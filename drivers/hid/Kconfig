@@ -635,6 +635,22 @@ config HID_LENOVO_GO_S
 	S. Say M here to compile this driver as a module. The module will be called
 	hid-lenovo-go-s.
 
+config HID_LEGIONKBD
+	tristate "Lenovo Legion keyboard RGB backlight"
+	depends on USB_HID
+	depends on LEDS_CLASS
+	help
+	  HID driver for Lenovo Legion / LOQ laptop keyboards with RGB
+	  backlight. Exposes 4 RGB zones as LED class devices.
+
+	  Supported models:
+	  - Legion 5/5 Pro (2020-2024)
+	  - Legion LOQ (2023-2024)
+	  - Ideapad 3 (2021-2022)
+
+	  Say M here to compile this driver as a module.
+	  The module will be called hid-legionkbd.
+
 config HID_LETSKETCH
 	tristate "Letsketch WP9620N tablets"
 	depends on USB_HID
