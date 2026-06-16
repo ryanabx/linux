@@ -1219,6 +1219,7 @@ static int process_kfunc_with_implicit_args(struct btf2btf_context *ctx, struct 
 {
 	s32 idx, new_proto_id, new_func_id, proto_id;
 	const char *param_name, *tag_name;
+	char *tmp_param_name;
 	const struct btf_param *params;
 	enum btf_func_linkage linkage;
 	char tmp_name[KSYM_NAME_LEN];
@@ -1299,7 +1300,11 @@ add_new_proto:
 		if (is_kf_implicit_arg(btf, &params[i]))
 			break;
 		param_name = btf__name_by_offset(btf, params[i].name_off);
-		err = btf__add_func_param(btf, param_name, params[i].type);
+		tmp_param_name = strdup(param_name);
+		if (!tmp_param_name)
+			return -ENOMEM;
+		err = btf__add_func_param(btf, tmp_param_name, params[i].type);
+		free(tmp_param_name);
 		if (err < 0) {
 			pr_err("ERROR: resolve_btfids: failed to add param %s for %s\n",
 			       param_name, kfunc->name);
