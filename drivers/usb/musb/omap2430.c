@@ -103,6 +103,13 @@ static void omap_musb_set_mailbox(struct omap2430_glue *glue)
 	case MUSB_ID_GROUND:
 		dev_dbg(musb->controller, "ID GND\n");
 		switch (musb->xceiv->otg->state) {
+		default:
+			musb->xceiv->otg->state = OTG_STATE_A_IDLE;
+			musb->xceiv->last_event = USB_EVENT_ID;
+			if (musb->gadget_driver)
+				omap_control_usb_set_mode(glue->control_otghs,
+							 USB_MODE_HOST);
+			fallthrough;
 		case OTG_STATE_A_IDLE:
 			error = musb_set_host(musb);
 			if (error)
@@ -117,15 +124,6 @@ static void omap_musb_set_mailbox(struct omap2430_glue *glue)
 			 * VBUS. At least cpcap VBUS shuts down otherwise.
 			 */
 			otg_set_vbus(musb->xceiv->otg, 1);
-			break;
-		default:
-			musb->xceiv->otg->state = OTG_STATE_A_IDLE;
-			musb->xceiv->last_event = USB_EVENT_ID;
-			if (musb->gadget_driver) {
-				omap_control_usb_set_mode(glue->control_otghs,
-							  USB_MODE_HOST);
-				otg_set_vbus(musb->xceiv->otg, 1);
-			}
 			break;
 		}
 		break;
