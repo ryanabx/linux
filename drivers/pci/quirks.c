@@ -6166,6 +6166,138 @@ DECLARE_PCI_FIXUP_CLASS_FINAL(PCI_VENDOR_ID_NVIDIA, 0x13b1,
 			      quirk_reset_lenovo_thinkpad_p50_nvgpu);
 
 /*
+ * On Lenovo Legion Slim 5 16APH8/16APH9, the firmware raises GPE 0x10 (see
+ * the \_GPE._E10 method in the ACPI tables) whenever the dGPU's PCIe port is
+ * powered off. The handler then sends a spurious Device Wake (0x02)
+ * notification to the port, which the PCI layer treats as a wake-up request,
+ * so the dGPU is resumed immediately out of D3cold and can never stay
+ * suspended.
+ *
+ * Work around this by masking the GPE while a matching dGPU is suspended,
+ * and unmasking it again once the device is resumed. The GPE only issues
+ * wake-up notifications for ports that have been powered off, so masking it
+ * while the dGPU is in D3cold does not affect normal operation.
+ *
+ * The suspend and resume PCI fixups are used to time the mask/unmask: they
+ * run on the device's suspend and resume paths, on the suspend path before
+ * the device is put into its low power state.
+ */
+#if defined(CONFIG_ACPI) && defined(CONFIG_DMI)
+/* GPE corresponding to the \_GPE._E10 method */
+#define LEGION_DGPU_WAKEUP_GPE 0x10
+
+static bool legion_dgpu_wakeup_quirk;
+static bool legion_dgpu_wakeup_quirk_checked;
+
+static int legion_dgpu_wakeup_quirk_cb(const struct dmi_system_id *d)
+{
+	legion_dgpu_wakeup_quirk = true;
+	pr_info("PCI: %s detected, dGPU wake-up GPE will be masked at suspend\n",
+		d->ident);
+	return 0;
+}
+
+static const struct dmi_system_id legion_dgpu_wakeup_quirk_table[] = {
+	{
+		.ident = "Lenovo Legion Slim 5 16APH8",
+		.callback = legion_dgpu_wakeup_quirk_cb,
+		.matches = {
+			DMI_EXACT_MATCH(DMI_SYS_VENDOR, "LENOVO"),
+			DMI_MATCH(DMI_PRODUCT_VERSION, "16APH8"),
+		},
+	},
+	{
+		.ident = "Lenovo Legion Slim 5 16APH9",
+		.callback = legion_dgpu_wakeup_quirk_cb,
+		.matches = {
+			DMI_EXACT_MATCH(DMI_SYS_VENDOR, "LENOVO"),
+			DMI_MATCH(DMI_PRODUCT_VERSION, "16APH9"),
+		},
+	},
+	{ }
+};
+
+static bool legion_dgpu_wakeup_quirk_active(void)
+{
+	if (!legion_dgpu_wakeup_quirk_checked) {
+		dmi_check_system(legion_dgpu_wakeup_quirk_table);
+		legion_dgpu_wakeup_quirk_checked = true;
+	}
+
+	return legion_dgpu_wakeup_quirk;
+}
+
+static bool legion_dgpu_wakeup_gpe_masked;
+
+static void set_legion_dgpu_wakeup_gpe(struct pci_dev *pdev, bool mask)
+{
+	acpi_handle gpe_dev = NULL;
+	acpi_status status;
+
+	/*
+	 * Resolve the device owning this GPE. A NULL device handle indicates
+	 * that it lives in the FADT-defined GPE0 block, which is the case here
+	 * (see the acpi_get_gpe_device() documentation).
+	 */
+	status = acpi_get_gpe_device(LEGION_DGPU_WAKEUP_GPE, &gpe_dev);
+	if (ACPI_FAILURE(status))
+		gpe_dev = NULL;
+
+	status = acpi_mask_gpe(gpe_dev, LEGION_DGPU_WAKEUP_GPE, mask);
+	if (ACPI_FAILURE(status)) {
+		pci_err(pdev, "Failed to %s GPE 0x%02X: %s\n",
+			mask ? "mask" : "unmask", LEGION_DGPU_WAKEUP_GPE,
+			acpi_format_exception(status));
+		return;
+	}
+
+	legion_dgpu_wakeup_gpe_masked = mask;
+	pci_dbg(pdev, "%s GPE 0x%02X, dGPU can stay in D3cold\n",
+		mask ? "Masked" : "Unmasked", LEGION_DGPU_WAKEUP_GPE);
+}
+
+static void quirk_legion_dgpu_mask_wakeup_gpe(struct pci_dev *pdev)
+{
+	if (!legion_dgpu_wakeup_quirk_active())
+		return;
+
+	if (legion_dgpu_wakeup_gpe_masked)
+		return;
+
+	set_legion_dgpu_wakeup_gpe(pdev, true);
+}
+
+static void quirk_legion_dgpu_unmask_wakeup_gpe(struct pci_dev *pdev)
+{
+	if (!legion_dgpu_wakeup_gpe_masked)
+		return;
+
+	if (!legion_dgpu_wakeup_quirk_active())
+		return;
+
+	set_legion_dgpu_wakeup_gpe(pdev, false);
+}
+
+/*
+ * The class-based match selects the discrete GPU (the vendor match keeps it
+ * out of any iGPU on the same system); the DMI check is done inside the
+ * hooks.
+ */
+DECLARE_PCI_FIXUP_CLASS_SUSPEND(PCI_VENDOR_ID_NVIDIA, PCI_ANY_ID,
+				PCI_CLASS_DISPLAY_VGA, 8,
+				quirk_legion_dgpu_mask_wakeup_gpe);
+DECLARE_PCI_FIXUP_CLASS_SUSPEND(PCI_VENDOR_ID_NVIDIA, PCI_ANY_ID,
+				PCI_CLASS_DISPLAY_3D, 8,
+				quirk_legion_dgpu_mask_wakeup_gpe);
+DECLARE_PCI_FIXUP_CLASS_RESUME(PCI_VENDOR_ID_NVIDIA, PCI_ANY_ID,
+			       PCI_CLASS_DISPLAY_VGA, 8,
+			       quirk_legion_dgpu_unmask_wakeup_gpe);
+DECLARE_PCI_FIXUP_CLASS_RESUME(PCI_VENDOR_ID_NVIDIA, PCI_ANY_ID,
+			       PCI_CLASS_DISPLAY_3D, 8,
+			       quirk_legion_dgpu_unmask_wakeup_gpe);
+#endif
+
+/*
  * Device [1b21:2142]
  * When in D0, PME# doesn't get asserted when plugging USB 3.0 device.
  */
