@@ -6181,6 +6181,13 @@ DECLARE_PCI_FIXUP_CLASS_FINAL(PCI_VENDOR_ID_NVIDIA, 0x13b1,
  * The suspend and resume PCI fixups are used to time the mask/unmask: they
  * run on the device's suspend and resume paths, on the suspend path before
  * the device is put into its low power state.
+ *
+ * GPE bit assignments are a firmware convention and are not covered by the
+ * ACPI spec, so a BIOS update could renumber or remove the handler. Before
+ * the first mask, the quirk verifies that the \_GPE._E10 method still
+ * exists and that the GPE is not declared as a wakeup source by the dGPU or
+ * one of its parent ports (via their _PRW methods), and refuses to mask if
+ * either check fails.
  */
 #if defined(CONFIG_ACPI) && defined(CONFIG_DMI)
 /* GPE corresponding to the \_GPE._E10 method */
@@ -6228,6 +6235,67 @@ static bool legion_dgpu_wakeup_quirk_active(void)
 }
 
 static bool legion_dgpu_wakeup_gpe_masked;
+static bool legion_dgpu_wakeup_gpe_verified;
+
+/*
+ * Return the GPE number declared by @handle's _PRW method, or -ENOENT if
+ * the method does not exist or cannot be parsed. The method returns either
+ * a bare GPE number (FADT GPE block) or a (GPE device, GPE number) package.
+ */
+static int legion_dgpu_prw_gpe_number(acpi_handle handle)
+{
+	struct acpi_buffer buffer = { ACPI_ALLOCATE_BUFFER, NULL };
+	union acpi_object *package, *element;
+	int gpe = -ENOENT;
+
+	if (ACPI_FAILURE(acpi_evaluate_object(handle, "_PRW", NULL, &buffer)))
+		return -ENOENT;
+
+	package = buffer.pointer;
+	if (package && package->type == ACPI_TYPE_PACKAGE &&
+	    package->package.count >= 1) {
+		element = &package->package.elements[0];
+		if (element->type == ACPI_TYPE_INTEGER) {
+			gpe = (int)element->integer.value;
+		} else if (element->type == ACPI_TYPE_PACKAGE &&
+			   element->package.count >= 2 &&
+			   element->package.elements[1].type ==
+			   ACPI_TYPE_INTEGER) {
+			gpe = (int)element->package.elements[1].integer.value;
+		}
+	}
+
+	kfree(buffer.pointer);
+	return gpe;
+}
+
+/*
+ * Check that the firmware still matches what this quirk expects: the
+ * \_GPE._E10 handler must exist, and GPE 0x10 must not be a wakeup source
+ * declared by the dGPU or one of its parent ports.
+ */
+static bool legion_dgpu_wakeup_gpe_conflicted(struct pci_dev *pdev)
+{
+	acpi_handle handle = ACPI_HANDLE(&pdev->dev);
+	int i;
+
+	if (!handle)
+		return true;
+
+	/* The handler must still exist in the ACPI namespace */
+	if (ACPI_FAILURE(acpi_get_handle("\\_GPE._E10", NULL, NULL)))
+		return true;
+
+	/* Never mask a GPE the firmware declares as a wakeup source */
+	for (i = 0; i < 3 && handle; i++) {
+		if (legion_dgpu_prw_gpe_number(handle) == LEGION_DGPU_WAKEUP_GPE)
+			return true;
+		if (ACPI_FAILURE(acpi_get_parent(handle, &handle)))
+			break;
+	}
+
+	return false;
+}
 
 static void set_legion_dgpu_wakeup_gpe(struct pci_dev *pdev, bool mask)
 {
@@ -6263,6 +6331,17 @@ static void quirk_legion_dgpu_mask_wakeup_gpe(struct pci_dev *pdev)
 
 	if (legion_dgpu_wakeup_gpe_masked)
 		return;
+
+	if (!legion_dgpu_wakeup_gpe_verified) {
+		legion_dgpu_wakeup_gpe_verified = true;
+
+		if (legion_dgpu_wakeup_gpe_conflicted(pdev)) {
+			pci_warn(pdev,
+				 "ACPI tables changed since the quirk was written; not masking GPE 0x%02X\n",
+				 LEGION_DGPU_WAKEUP_GPE);
+			return;
+		}
+	}
 
 	set_legion_dgpu_wakeup_gpe(pdev, true);
 }
