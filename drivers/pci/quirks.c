@@ -6166,6 +6166,250 @@ DECLARE_PCI_FIXUP_CLASS_FINAL(PCI_VENDOR_ID_NVIDIA, 0x13b1,
 			      quirk_reset_lenovo_thinkpad_p50_nvgpu);
 
 /*
+ * On Lenovo Legion Slim 5 16APH8/16APH9, the firmware raises a spurious GPE
+ * (see the \_GPE._Exx method in the ACPI tables) whenever the dGPU's PCIe
+ * port is powered off. The method checks the power state of the PCIe ports
+ * and sends a Device Wake (0x02) notification to every port that is off. The
+ * PCI layer treats such notifications as wake-up requests, so when the NVIDIA
+ * dGPU is runtime suspended and its port is powered off, it is immediately
+ * resumed and can never stay in D3cold.
+ *
+ * The dGPU's own wake-up GPE (from its _PRW) cannot be used to filter this,
+ * because the notification is delivered to the PCI port rather than the
+ * dGPU. Instead, the offending GPE is masked while a matching dGPU is
+ * suspended and restored once the device is back in D0. The method only
+ * issues wake-up notifications for ports that are already off, so masking
+ * the GPE while the dGPU is suspended does not affect normal operation.
+ *
+ * The GPE number is not hardcoded. It is discovered at runtime: while the
+ * dGPU is suspended and the culprit GPE is still unknown, a GPE wake source
+ * observer attributes every Device Wake notification to the GPE control
+ * method that issued it. The first GPE whose method sends a wake notification
+ * to the dGPU's upstream port while the dGPU is suspended is the culprit; it
+ * is remembered and masked on every subsequent suspend. This costs at most
+ * one spurious wake-up (the one used for discovery), after which the GPE is
+ * masked before the port is ever powered off.
+ *
+ * The suspend and resume PCI fixups are used to time the mask/unmask: they
+ * run on the device's suspend and resume paths, on the suspend path before
+ * the device is put into its low power state.
+ */
+#if defined(CONFIG_ACPI) && defined(CONFIG_DMI)
+static bool legion_dgpu_wakeup_quirk;
+static bool legion_dgpu_wakeup_quirk_checked;
+
+/* Discovered GPE that wakes the dGPU's port, and whether it is masked */
+static DEFINE_SPINLOCK(legion_dgpu_wake_lock);
+static acpi_handle legion_dgpu_wake_gpe_device;
+static u32 legion_dgpu_wake_gpe_number;
+static bool legion_dgpu_wake_gpe_found;
+static bool legion_dgpu_wake_gpe_masked;
+
+/* Armed while the dGPU is suspended and the culprit GPE is still unknown */
+static struct pci_dev *legion_dgpu_wake_capture_dev;
+static acpi_handle legion_dgpu_wake_capture_handle;
+
+static void set_legion_dgpu_wakeup_gpe(struct pci_dev *pdev, bool mask)
+{
+	acpi_status status;
+
+	spin_lock(&legion_dgpu_wake_lock);
+	if (legion_dgpu_wake_gpe_masked == mask) {
+		spin_unlock(&legion_dgpu_wake_lock);
+		return;
+	}
+	spin_unlock(&legion_dgpu_wake_lock);
+
+	/*
+	 * legion_dgpu_wake_gpe_device may be NULL, in which case the GPE is
+	 * in one of the FADT GPE blocks (see acpi_register_gpe_wake_observer()).
+	 */
+	status = acpi_mask_gpe(legion_dgpu_wake_gpe_device,
+			       legion_dgpu_wake_gpe_number, mask);
+	if (ACPI_FAILURE(status)) {
+		pci_err(pdev, "Failed to %s GPE 0x%02X: %s\n",
+			mask ? "mask" : "unmask",
+			legion_dgpu_wake_gpe_number,
+			acpi_format_exception(status));
+		return;
+	}
+
+	spin_lock(&legion_dgpu_wake_lock);
+	legion_dgpu_wake_gpe_masked = mask;
+	spin_unlock(&legion_dgpu_wake_lock);
+
+	pci_dbg(pdev, "%s GPE 0x%02X, dGPU can stay in D3cold\n",
+		mask ? "Masked" : "Unmasked", legion_dgpu_wake_gpe_number);
+}
+
+/*
+ * GPE wake source observer: if a wake notification is sent to the port of a
+ * suspended dGPU while the culprit GPE is still unknown, this is that GPE.
+ */
+static void legion_dgpu_wake_observer(acpi_handle device,
+				      acpi_handle gpe_device,
+				      u32 gpe_number, void *priv)
+{
+	struct pci_dev *pdev;
+	bool found;
+
+	spin_lock(&legion_dgpu_wake_lock);
+	found = legion_dgpu_wake_gpe_found;
+	if (!found && device == legion_dgpu_wake_capture_handle) {
+		legion_dgpu_wake_gpe_found = true;
+		legion_dgpu_wake_gpe_device = gpe_device;
+		legion_dgpu_wake_gpe_number = gpe_number;
+		found = true;
+	}
+	pdev = legion_dgpu_wake_capture_dev;
+	spin_unlock(&legion_dgpu_wake_lock);
+
+	if (!found || !pdev)
+		return;
+
+	pci_info(pdev, "Discovered GPE 0x%02X as the dGPU wake-up source, masking it while the dGPU is suspended\n",
+		gpe_number);
+
+	/*
+	 * Mask the GPE right away so it cannot fire again while the dGPU is
+	 * resumed. The resume PCI fixup restores it once the device is back
+	 * in D0.
+	 */
+	set_legion_dgpu_wakeup_gpe(pdev, true);
+}
+
+static int legion_dgpu_wakeup_quirk_cb(const struct dmi_system_id *d)
+{
+	acpi_status status;
+
+	legion_dgpu_wakeup_quirk = true;
+	pr_info("PCI: %s detected, dGPU wake-up GPE will be masked at suspend\n",
+		d->ident);
+
+	/*
+	 * Watch Device Wake notifications so that they can be attributed to
+	 * the GPE that caused them. This is safe to do here: the callback
+	 * only fires once the ACPI subsystem is up, long before the dGPU can
+	 * ever be suspended.
+	 */
+	status = acpi_register_gpe_wake_observer(legion_dgpu_wake_observer,
+						 NULL);
+	if (ACPI_FAILURE(status))
+		pr_err("PCI: %s: Failed to register GPE wake-up observer: %s\n",
+			d->ident, acpi_format_exception(status));
+	return 0;
+}
+
+static const struct dmi_system_id legion_dgpu_wakeup_quirk_table[] = {
+	{
+		.ident = "Lenovo Legion Slim 5 16APH8",
+		.callback = legion_dgpu_wakeup_quirk_cb,
+		.matches = {
+			DMI_EXACT_MATCH(DMI_SYS_VENDOR, "LENOVO"),
+			DMI_MATCH(DMI_PRODUCT_VERSION, "16APH8"),
+		},
+	},
+	{
+		.ident = "Lenovo Legion Slim 5 16APH9",
+		.callback = legion_dgpu_wakeup_quirk_cb,
+		.matches = {
+			DMI_EXACT_MATCH(DMI_SYS_VENDOR, "LENOVO"),
+			DMI_MATCH(DMI_PRODUCT_VERSION, "16APH9"),
+		},
+	},
+	{ }
+};
+
+static bool legion_dgpu_wakeup_quirk_active(void)
+{
+	if (!legion_dgpu_wakeup_quirk_checked) {
+		dmi_check_system(legion_dgpu_wakeup_quirk_table);
+		legion_dgpu_wakeup_quirk_checked = true;
+	}
+
+	return legion_dgpu_wakeup_quirk;
+}
+
+static void quirk_legion_dgpu_mask_wakeup_gpe(struct pci_dev *pdev)
+{
+	struct pci_dev *bridge;
+	struct acpi_device *adev;
+	bool found, masked;
+
+	if (!legion_dgpu_wakeup_quirk_active())
+		return;
+
+	spin_lock(&legion_dgpu_wake_lock);
+	found = legion_dgpu_wake_gpe_found;
+	masked = legion_dgpu_wake_gpe_masked;
+
+	if (found) {
+		/* GPE was discovered on a previous suspend: mask it */
+		spin_unlock(&legion_dgpu_wake_lock);
+		if (!masked)
+			set_legion_dgpu_wakeup_gpe(pdev, true);
+		return;
+	}
+
+	/*
+	 * The culprit GPE is not known yet: arm the capture. Any wake
+	 * notification delivered to the dGPU's upstream port while it is
+	 * suspended is attributed to its GPE by the observer. Note that the
+	 * suspend fixup runs before the device (and hence the port) is put
+	 * into its low power state, so the capture is armed in time.
+	 */
+	bridge = pci_upstream_bridge(pdev);
+	adev = bridge ? ACPI_COMPANION(&bridge->dev) : NULL;
+	if (!adev) {
+		spin_unlock(&legion_dgpu_wake_lock);
+		return;
+	}
+
+	legion_dgpu_wake_capture_dev = pdev;
+	legion_dgpu_wake_capture_handle = adev->handle;
+	spin_unlock(&legion_dgpu_wake_lock);
+}
+
+static void quirk_legion_dgpu_unmask_wakeup_gpe(struct pci_dev *pdev)
+{
+	bool masked;
+
+	if (!legion_dgpu_wakeup_quirk_active())
+		return;
+
+	spin_lock(&legion_dgpu_wake_lock);
+	/* The dGPU is back in D0, the capture window is over */
+	if (legion_dgpu_wake_capture_dev == pdev) {
+		legion_dgpu_wake_capture_dev = NULL;
+		legion_dgpu_wake_capture_handle = NULL;
+	}
+	masked = legion_dgpu_wake_gpe_masked;
+	spin_unlock(&legion_dgpu_wake_lock);
+
+	if (masked)
+		set_legion_dgpu_wakeup_gpe(pdev, false);
+}
+
+/*
+ * The class-based match selects the discrete GPU (the vendor match keeps it
+ * out of any iGPU on the same system); the DMI check is done inside the
+ * hooks.
+ */
+DECLARE_PCI_FIXUP_CLASS_SUSPEND(PCI_VENDOR_ID_NVIDIA, PCI_ANY_ID,
+				PCI_CLASS_DISPLAY_VGA, 8,
+				quirk_legion_dgpu_mask_wakeup_gpe);
+DECLARE_PCI_FIXUP_CLASS_SUSPEND(PCI_VENDOR_ID_NVIDIA, PCI_ANY_ID,
+				PCI_CLASS_DISPLAY_3D, 8,
+				quirk_legion_dgpu_mask_wakeup_gpe);
+DECLARE_PCI_FIXUP_CLASS_RESUME(PCI_VENDOR_ID_NVIDIA, PCI_ANY_ID,
+			       PCI_CLASS_DISPLAY_VGA, 8,
+			       quirk_legion_dgpu_unmask_wakeup_gpe);
+DECLARE_PCI_FIXUP_CLASS_RESUME(PCI_VENDOR_ID_NVIDIA, PCI_ANY_ID,
+			       PCI_CLASS_DISPLAY_3D, 8,
+			       quirk_legion_dgpu_unmask_wakeup_gpe);
+#endif
+
+/*
  * Device [1b21:2142]
  * When in D0, PME# doesn't get asserted when plugging USB 3.0 device.
  */
