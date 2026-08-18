@@ -628,6 +628,91 @@ acpi_status acpi_remove_pm_notifier(struct acpi_device *adev)
 	return status;
 }
 
+/*
+ * GPE wake source observers
+ *
+ * The ACPI core can attribute a Device Wake notification to the GPE control
+ * method (_Lxx/_Exx) that issued it. Drivers that need to know which GPE
+ * caused a particular device to be woken up may register an observer.
+ *
+ * NOTE: the callback is invoked with gpe_wake_observer_mutex held and runs
+ * in workqueue context. It must not attempt to register or unregister
+ * observers.
+ */
+struct acpi_gpe_wake_observer {
+	struct list_head node;
+	acpi_gpe_wake_observer callback;
+	void *priv;
+};
+
+static LIST_HEAD(acpi_gpe_wake_observers);
+static DEFINE_MUTEX(gpe_wake_observer_mutex);
+
+void acpi_gpe_wake_source_notify(acpi_handle device, acpi_handle gpe_device,
+				 u32 gpe_number)
+{
+	struct acpi_gpe_wake_observer *observer;
+
+	mutex_lock(&gpe_wake_observer_mutex);
+	list_for_each_entry(observer, &acpi_gpe_wake_observers, node)
+		observer->callback(device, gpe_device, gpe_number,
+				    observer->priv);
+	mutex_unlock(&gpe_wake_observer_mutex);
+}
+
+/**
+ * acpi_register_gpe_wake_observer - Register a GPE wake source observer.
+ * @callback: Callback invoked when a Device Wake notification is dispatched
+ *            to a device and the GPE that generated it is known.
+ * @priv: Private data passed to @callback.
+ */
+acpi_status acpi_register_gpe_wake_observer(acpi_gpe_wake_observer callback,
+					      void *priv)
+{
+	struct acpi_gpe_wake_observer *observer;
+
+	if (!callback)
+		return AE_BAD_PARAMETER;
+
+	observer = kmalloc_obj(*observer);
+	if (!observer)
+		return AE_NO_MEMORY;
+
+	observer->callback = callback;
+	observer->priv = priv;
+
+	mutex_lock(&gpe_wake_observer_mutex);
+	list_add_tail(&observer->node, &acpi_gpe_wake_observers);
+	mutex_unlock(&gpe_wake_observer_mutex);
+
+	return AE_OK;
+}
+EXPORT_SYMBOL_GPL(acpi_register_gpe_wake_observer);
+
+/**
+ * acpi_unregister_gpe_wake_observer - Unregister a GPE wake source observer.
+ * @callback: Callback as passed to acpi_register_gpe_wake_observer().
+ * @priv: Private data as passed to acpi_register_gpe_wake_observer().
+ */
+void acpi_unregister_gpe_wake_observer(acpi_gpe_wake_observer callback,
+					 void *priv)
+{
+	struct acpi_gpe_wake_observer *observer, *tmp;
+
+	mutex_lock(&gpe_wake_observer_mutex);
+	list_for_each_entry_safe(observer, tmp, &acpi_gpe_wake_observers,
+				  node) {
+		if (observer->callback == callback && observer->priv == priv) {
+			list_del(&observer->node);
+			mutex_unlock(&gpe_wake_observer_mutex);
+			kfree(observer);
+			return;
+		}
+	}
+	mutex_unlock(&gpe_wake_observer_mutex);
+}
+EXPORT_SYMBOL_GPL(acpi_unregister_gpe_wake_observer);
+
 bool acpi_bus_can_wakeup(acpi_handle handle)
 {
 	struct acpi_device *device = acpi_fetch_acpi_dev(handle);

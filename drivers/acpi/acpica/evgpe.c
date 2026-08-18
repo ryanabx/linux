@@ -480,7 +480,8 @@ static void ACPI_SYSTEM_XFACE acpi_ev_asynch_execute_gpe_method(void *context)
 		while (ACPI_SUCCESS(status) && notify) {
 			status =
 			    acpi_ev_queue_notify_request(notify->device_node,
-							 ACPI_NOTIFY_DEVICE_WAKE);
+							 ACPI_NOTIFY_DEVICE_WAKE,
+							 NULL, 0);
 
 			notify = notify->next;
 		}

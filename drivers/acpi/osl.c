@@ -1180,6 +1180,13 @@ void acpi_os_wait_events_complete(void)
 }
 EXPORT_SYMBOL(acpi_os_wait_events_complete);
 
+void acpi_os_notify_wake_source(acpi_handle device, acpi_handle gpe_device,
+				 u32 gpe_number)
+{
+	acpi_gpe_wake_source_notify(device, gpe_device, gpe_number);
+}
+EXPORT_SYMBOL(acpi_os_notify_wake_source);
+
 struct acpi_hp_work {
 	struct work_struct work;
 	struct acpi_device *adev;

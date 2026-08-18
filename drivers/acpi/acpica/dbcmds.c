@@ -383,7 +383,7 @@ void acpi_db_send_notify(char *name, u32 value)
 	/* Dispatch the notify if legal */
 
 	if (acpi_ev_is_notify_object(node)) {
-		status = acpi_ev_queue_notify_request(node, value);
+		status = acpi_ev_queue_notify_request(node, value, NULL, 0);
 		if (ACPI_FAILURE(status)) {
 			acpi_os_printf("Could not queue notify\n");
 		}

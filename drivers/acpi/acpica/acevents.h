@@ -42,7 +42,13 @@ u32 acpi_ev_get_gpe_number_index(u32 gpe_number);
 
 acpi_status
 acpi_ev_queue_notify_request(struct acpi_namespace_node *node,
-			     u32 notify_value);
+			     u32 notify_value,
+			     struct acpi_namespace_node *gpe_source,
+			     u32 gpe_number);
+
+void acpi_ev_get_gpe_method_source(struct acpi_walk_state *walk_state,
+				   struct acpi_namespace_node **gpe_source,
+				   u32 *gpe_number);
 
 /*
  * evglock - Global Lock support

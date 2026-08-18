@@ -56,7 +56,9 @@ acpi_status acpi_ex_opcode_2A_0T_0R(struct acpi_walk_state *walk_state)
 {
 	union acpi_operand_object **operand = &walk_state->operands[0];
 	struct acpi_namespace_node *node;
+	struct acpi_namespace_node *gpe_source = NULL;
 	u32 value;
+	u32 gpe_number;
 	acpi_status status = AE_OK;
 
 	ACPI_FUNCTION_TRACE_STR(ex_opcode_2A_0T_0R,
@@ -87,13 +89,22 @@ acpi_status acpi_ex_opcode_2A_0T_0R(struct acpi_walk_state *walk_state)
 		}
 
 		/*
+		 * If this Notify() is issued from a GPE control method, keep
+		 * track of the GPE so that the OS can attribute any resulting
+		 * wake notifications to it.
+		 */
+		acpi_ev_get_gpe_method_source(walk_state, &gpe_source,
+					       &gpe_number);
+
+		/*
 		 * Dispatch the notify to the appropriate handler
 		 * NOTE: the request is queued for execution after this method
 		 * completes. The notify handlers are NOT invoked synchronously
 		 * from this thread -- because handlers may in turn run other
 		 * control methods.
 		 */
-		status = acpi_ev_queue_notify_request(node, value);
+		status = acpi_ev_queue_notify_request(node, value, gpe_source,
+						       gpe_number);
 		break;
 
 	default:

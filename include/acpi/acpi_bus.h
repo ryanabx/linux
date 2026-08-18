@@ -756,11 +756,30 @@ static inline bool acpi_quirk_skip_gpio_event_handlers(void)
 }
 #endif
 
+/**
+ * acpi_gpe_wake_observer - Callback type for GPE wake source observers.
+ * @device: ACPI device that receives a Device Wake notification.
+ * @gpe_device: GPE block device of the GPE that generated the
+ *              notification, or NULL if the GPE is contained in one of the
+ *              FADT GPE blocks (see acpi_get_gpe_device()).
+ * @gpe_number: GPE index within that block, or global GPE number if
+ *              @gpe_device is NULL.
+ * @priv: Private data as passed to acpi_register_gpe_wake_observer().
+ */
+typedef void (*acpi_gpe_wake_observer)(acpi_handle device,
+				       acpi_handle gpe_device,
+				       u32 gpe_number, void *priv);
+
 #ifdef CONFIG_PM
 void acpi_pm_wakeup_event(struct device *dev);
 acpi_status acpi_add_pm_notifier(struct acpi_device *adev, struct device *dev,
 			void (*func)(struct acpi_device_wakeup_context *context));
 acpi_status acpi_remove_pm_notifier(struct acpi_device *adev);
+
+acpi_status acpi_register_gpe_wake_observer(acpi_gpe_wake_observer callback,
+					      void *priv);
+void acpi_unregister_gpe_wake_observer(acpi_gpe_wake_observer callback,
+					 void *priv);
 bool acpi_pm_device_can_wakeup(struct device *dev);
 int acpi_pm_device_sleep_state(struct device *, int *, int);
 int acpi_pm_set_device_wakeup(struct device *dev, bool enable);
@@ -777,6 +796,15 @@ static inline acpi_status acpi_add_pm_notifier(struct acpi_device *adev,
 static inline acpi_status acpi_remove_pm_notifier(struct acpi_device *adev)
 {
 	return AE_SUPPORT;
+}
+static inline acpi_status acpi_register_gpe_wake_observer(
+				acpi_gpe_wake_observer callback, void *priv)
+{
+	return AE_SUPPORT;
+}
+static inline void acpi_unregister_gpe_wake_observer(
+				acpi_gpe_wake_observer callback, void *priv)
+{
 }
 static inline bool acpi_pm_device_can_wakeup(struct device *dev)
 {

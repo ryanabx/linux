@@ -673,6 +673,10 @@ struct acpi_notify_info {
 	struct acpi_namespace_node *node;
 	union acpi_operand_object *handler_list_head;
 	struct acpi_global_notify_handler *global;
+	/* GPE block device that caused this wake notify, or NULL if unknown */
+	struct acpi_namespace_node *gpe_source;
+	/* Index of the GPE within that block */
+	u32 gpe_number;
 };
 
 /* Generic state is union of structs above */

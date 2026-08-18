@@ -29,6 +29,8 @@ void acpi_platform_init(void);
 void acpi_pnp_init(void);
 int acpi_sysfs_init(void);
 void acpi_gpe_apply_masked_gpes(void);
+void acpi_gpe_wake_source_notify(acpi_handle device, acpi_handle gpe_device,
+				 u32 gpe_number);
 void acpi_container_init(void);
 void acpi_memory_hotplug_init(void);
 #ifdef	CONFIG_ACPI_HOTPLUG_IOAPIC
