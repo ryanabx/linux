@@ -25,9 +25,8 @@
 #include <linux/hid.h>
 #include <linux/led-class-multicolor.h>
 #include <linux/module.h>
-#include <linux/mutex.h>
+#include <linux/pm.h>
 #include <linux/sysfs.h>
-#include <linux/usb.h>
 
 #include "hid-ids.h"
 
@@ -70,6 +69,9 @@ struct legion_kbd {
 	u8 speed;
 	u8 brightness;
 	u8 rgb[LEGION_KBD_NUM_ZONES][3]; /* Per-zone RGB values */
+
+	/* Zone colors saved across suspend */
+	u8 suspend_rgb[LEGION_KBD_NUM_ZONES][3];
 
 	/* LED class devices - one per zone */
 	struct legion_kbd_led leds[LEGION_KBD_NUM_ZONES];
@@ -320,18 +322,46 @@ static int legion_kbd_probe(struct hid_device *hdev,
 
 	/*
 	 * This device has multiple USB interfaces: a standard HID keyboard
-	 * interface and a vendor-specific interface for RGB control. We only
-	 * want to bind to the vendor-specific interface. Filter on the usage
-	 * page (upper 16 bits of the usage field) here.
+	 * interface and a vendor-specific interface for RGB control. Both
+	 * interfaces share the same vendor/product ID and thus match our id
+	 * table. Since hid-generic steps aside for any device another driver
+	 * claims, we must bind both interfaces ourselves: the keyboard
+	 * interface is simply left running in generic mode, and only the
+	 * vendor-specific interface gets the RGB handling below.
+	 *
+	 * Note that hdev->collection is only populated by hid_parse(), so
+	 * the interface can only be identified after parsing.
 	 */
-	if (hdev->collection == NULL)
-		return -ENODEV;
-	if ((hdev->collection[0].usage >> 16) != LEGION_KBD_USAGE_PAGE)
-		return -ENODEV;
+	ret = hid_parse(hdev);
+	if (ret) {
+		dev_err(&hdev->dev, "Failed to parse HID report: %d\n", ret);
+		return ret;
+	}
 
+	/* Standard keyboard interface: leave it running in generic mode */
+	if ((hdev->collection[0].usage >> 16) != LEGION_KBD_USAGE_PAGE) {
+		ret = hid_hw_start(hdev, HID_CONNECT_DEFAULT);
+		if (ret)
+			dev_err(&hdev->dev, "Failed to start HID: %d\n", ret);
+		return ret;
+	}
+
+	/*
+	 * Vendor RGB interface: no input devices, only this driver talks to
+	 * it.
+	 */
+	ret = hid_hw_start(hdev, HID_CONNECT_DRIVER);
+	if (ret) {
+		dev_err(&hdev->dev, "Failed to start HID: %d\n", ret);
+		return ret;
+	}
+
+	/* Vendor RGB interface: set up per-zone LED controls */
 	kbd = devm_kzalloc(&hdev->dev, sizeof(*kbd), GFP_KERNEL);
-	if (!kbd)
-		return -ENOMEM;
+	if (!kbd) {
+		ret = -ENOMEM;
+		goto err_stop;
+	}
 
 	kbd->hdev = hdev;
 	mutex_init(&kbd->lock);
@@ -344,25 +374,13 @@ static int legion_kbd_probe(struct hid_device *hdev,
 
 	hid_set_drvdata(hdev, kbd);
 
-	ret = hid_parse(hdev);
-	if (ret) {
-		dev_err(&hdev->dev, "Failed to parse HID report: %d\n", ret);
-		return ret;
-	}
-
-	ret = hid_hw_start(hdev, HID_CONNECT_NONE);
-	if (ret) {
-		dev_err(&hdev->dev, "Failed to start HID: %d\n", ret);
-		return ret;
-	}
-
 	ret = legion_kbd_register_leds(kbd);
 	if (ret) {
 		dev_err(&hdev->dev, "Failed to register LEDs: %d\n", ret);
 		goto err_stop;
 	}
 
-	ret = devm_device_add_group(&hdev->dev, &legion_kbd_attr_group);
+	ret = devm_device_add_group(&hdev->dev, legion_kbd_groups[0]);
 	if (ret) {
 		dev_err(&hdev->dev, "Failed to add sysfs group: %d\n", ret);
 		goto err_stop;
@@ -387,82 +405,62 @@ static void legion_kbd_remove(struct hid_device *hdev)
 	struct legion_kbd *kbd = hid_get_drvdata(hdev);
 
 	/* Turn off LEDs on removal */
-	mutex_lock(&kbd->lock);
-	legion_kbd_send_report(kbd);
-	mutex_unlock(&kbd->lock);
+	if (kbd) {
+		mutex_lock(&kbd->lock);
+		legion_kbd_send_report(kbd);
+		mutex_unlock(&kbd->lock);
+	}
 
 	hid_hw_stop(hdev);
 }
 
-#ifdef CONFIG_PM
+/*
+ * The transport-level suspend/resume is handled by the USB HID core, which
+ * dispatches to these callbacks via hid_driver_suspend()/hid_driver_resume().
+ */
 static int legion_kbd_suspend(struct hid_device *hdev, pm_message_t state)
 {
 	struct legion_kbd *kbd = hid_get_drvdata(hdev);
-	int i;
 
-	/* Save LED state and turn off LEDs during suspend */
+	if (!kbd)
+		return 0;
+
+	/*
+	 * Turn off the RGB zones while the device is suspended. The current
+	 * zone colors are saved so that resume() can restore them.
+	 */
 	mutex_lock(&kbd->lock);
-	for (i = 0; i < LEGION_KBD_NUM_ZONES; i++)
-		memset(kbd->rgb[i], 0, sizeof(kbd->rgb[i]));
-	legion_kbd_send_report(kbd);
-	mutex_unlock(&kbd->lock);
-
-	return hid_hw_suspend(hdev);
-}
-
-static int legion_kbd_resume(struct hid_device *hdev)
-{
-	struct legion_kbd *kbd = hid_get_drvdata(hdev);
-	int ret;
-
-	ret = hid_hw_resume(hdev);
-	if (ret)
-		return ret;
-
-	/* Restore LED state */
-	mutex_lock(&kbd->lock);
+	memcpy(kbd->suspend_rgb, kbd->rgb, sizeof(kbd->suspend_rgb));
+	memset(kbd->rgb, 0, sizeof(kbd->rgb));
 	legion_kbd_send_report(kbd);
 	mutex_unlock(&kbd->lock);
 
 	return 0;
 }
 
-static int __maybe_unused legion_kbd_runtime_suspend(struct device *dev)
+static int legion_kbd_resume(struct hid_device *hdev)
 {
-	return hid_runtime_suspend(dev);
-}
+	struct legion_kbd *kbd = hid_get_drvdata(hdev);
 
-static int __maybe_unused legion_kbd_runtime_resume(struct device *dev)
-{
-	return hid_runtime_resume(dev);
-}
+	if (!kbd)
+		return 0;
 
-static int __maybe_unused legion_kbd_runtime_idle(struct device *dev)
-{
-	return hid_runtime_idle(dev);
-}
+	/* Restore the RGB state saved at suspend */
+	mutex_lock(&kbd->lock);
+	memcpy(kbd->rgb, kbd->suspend_rgb, sizeof(kbd->rgb));
+	legion_kbd_send_report(kbd);
+	mutex_unlock(&kbd->lock);
 
-static const struct dev_pm_ops legion_kbd_pm_ops = {
-	.suspend = hid_suspend,
-	.resume = legion_kbd_resume,
-	.freeze = hid_suspend,
-	.thaw = legion_kbd_resume,
-	.poweroff = hid_suspend,
-	.restore = legion_kbd_resume,
-	USE_RUNTIME_PM_DEFINES
-};
-#define LEGION_KBD_PM_OPS	&legion_kbd_pm_ops
-#else
-#define LEGION_KBD_PM_OPS	NULL
-#endif
+	return 0;
+}
 
 /*
  * Device ID table.
  *
  * These keyboards have multiple USB interfaces: a standard HID keyboard
- * interface (handled by hid-generic) and a vendor-specific interface for
- * RGB control (handled by this driver). We match on vendor/product and
- * filter on usage page in the probe function.
+ * interface and a vendor-specific interface for RGB control. We match on
+ * vendor/product and distinguish the interfaces by usage page in the probe
+ * function, binding both (see legion_kbd_probe()).
  */
 static const struct hid_device_id legion_kbd_devices[] = {
 	{ HID_USB_DEVICE(USB_VENDOR_ID_ITE,
@@ -496,7 +494,9 @@ static struct hid_driver legion_kbd_driver = {
 	.id_table = legion_kbd_devices,
 	.probe = legion_kbd_probe,
 	.remove = legion_kbd_remove,
-	.pm = LEGION_KBD_PM_OPS,
+	.suspend = pm_ptr(legion_kbd_suspend),
+	.resume = pm_ptr(legion_kbd_resume),
+	.reset_resume = pm_ptr(legion_kbd_resume),
 };
 module_hid_driver(legion_kbd_driver);
 
