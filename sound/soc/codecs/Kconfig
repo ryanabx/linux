@@ -2842,6 +2842,22 @@ config SND_SOC_MT6357
 	  Enable support for the platform which uses MT6357 as
 	  external codec device.
 
+config SND_SOC_MT6391
+	tristate "MediaTek MT6391 Codec"
+	depends on MFD_MT6397
+	help
+	  Enable support for the audio codec inside the MediaTek MT6397
+	  family PMIC, marketed as MT6391 on MT8173 boards.
+
+	  The codec provides the analogue front and back ends: stereo
+	  headphone and loudspeaker outputs, and the microphone inputs,
+	  driven over the PMIC's register bus rather than a separate
+	  control interface. It is paired with the SoC's ADDA DAI by the
+	  MT8173 machine driver.
+
+	  To compile this driver as a module, choose M here: the module
+	  will be called snd-soc-mt6391.
+
 config SND_SOC_MT6358
 	tristate "MediaTek MT6358 Codec"
 	help
