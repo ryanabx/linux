@@ -15,6 +15,8 @@ description:
   such as battery and PMIC internal voltage regulators temperatures,
   accessory detection resistance (usually, for a 3.5mm audio jack)
   other than voltages for various PMIC internal components.
+  The older MT6397 has a 10-bit AUXADC of the same shape, measuring the
+  battery voltage and the battery thermistor.
 
 properties:
   compatible:
@@ -26,6 +28,7 @@ properties:
           - mediatek,mt6359-auxadc
           - mediatek,mt6363-auxadc
           - mediatek,mt6373-auxadc
+          - mediatek,mt6397-auxadc
       - items:
           - enum:
               - mediatek,mt6365-auxadc
