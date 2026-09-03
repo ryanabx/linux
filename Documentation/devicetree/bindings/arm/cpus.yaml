@@ -244,6 +244,9 @@ properties:
       - enum:
           - psci
           - spin-table
+          # PSCI CPU_ON/CPU_OFF wrapped with the CPU MTCMOS power sequence
+          # the firmware omits (MT8173 boards without ARM Trusted Firmware)
+          - mediatek,mt8173-smp
       # On ARM 32-bit systems this property is optional
       - enum:
           - actions,s500-smp
