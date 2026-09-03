@@ -1,0 +1,53 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/sound/mediatek,mt8173-mt6391.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: MediaTek MT8173 with the MT6391 PMIC audio codec
+
+maintainers:
+  - Ryan Brue <ryanbrue.dev@gmail.com>
+
+description:
+  Sound card for MT8173 boards whose playback codec is the audio block of the
+  MT6397 PMIC (marketed as the MT6391), reached over the SoC's internal
+  ADDA interface. Capture, when fitted, comes from a Realtek RT5514 on the
+  I2S interface.
+
+properties:
+  compatible:
+    const: mediatek,mt8173-mt6391
+
+  mediatek,audio-codec:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description: The MT6397 PMIC audio codec.
+
+  mediatek,capture-codec:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description:
+      The RT5514 codec carrying the microphone, on the I2S interface. Boards
+      without one have no capture.
+
+  mediatek,platform:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description: The phandle of the MT8173 audio front end (AFE).
+
+  pinctrl-names: true
+  pinctrl-0: true
+
+required:
+  - compatible
+  - mediatek,audio-codec
+  - mediatek,platform
+
+additionalProperties: false
+
+examples:
+  - |
+    sound {
+        compatible = "mediatek,mt8173-mt6391";
+        mediatek,audio-codec = <&mt6397codec>;
+        mediatek,capture-codec = <&rt5514>;
+        mediatek,platform = <&afe>;
+    };
