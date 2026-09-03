@@ -69,6 +69,20 @@ config MTK_MMSYS
 	  Say yes here to add support for the MediaTek Multimedia
 	  Subsystem (MMSYS).
 
+config MTK_MT8173_DISP_HANDOVER
+	bool "MediaTek MT8173 display overlay handover"
+	depends on ARCH_MEDIATEK || COMPILE_TEST
+	depends on HAS_IOMEM
+	help
+	  Some bootloaders hand the MT8173 display overlay over while it is
+	  still scanning out, and Linux gates the SMI clocks underneath it
+	  before mediatek-drm loads, which strands the engine for good.
+
+	  Say yes here to stop such an overlay at subsys_initcall, before the
+	  SMI larb and IOMMU drivers probe. This cannot be a module: a module
+	  cannot be loaded early enough to win that race. It does nothing
+	  unless the overlay is found already enabled.
+
 config MTK_SVS
 	tristate "MediaTek Smart Voltage Scaling(SVS)"
 	depends on NVMEM_MTK_EFUSE && NVMEM
