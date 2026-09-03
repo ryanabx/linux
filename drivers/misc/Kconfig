@@ -586,4 +586,23 @@ source "drivers/misc/keba/Kconfig"
 source "drivers/misc/amd-sbi/Kconfig"
 source "drivers/misc/rp1/Kconfig"
 source "drivers/misc/issei/Kconfig"
+
+config MT6630_WMT
+	tristate "MediaTek MT6630 WMT SDIO transport + Bluetooth"
+	depends on MMC && BT
+	help
+	  WMT control-plane driver for the MediaTek MT6630 combo chip on
+	  SDIO. Claims function 2, downloads the ROM patch firmware and
+	  registers a Bluetooth HCI over the STP transport. Say M here
+	  for amazon-suez mainline bring-up.
+
+config MT6630_WLAN
+	tristate "MediaTek MT6630 WLAN mac80211 driver (function 1)"
+	depends on MT6630_WMT && MAC80211
+	help
+	  mac80211 driver for the MediaTek MT6630 WLAN function: claims
+	  SDIO function 1, downloads and starts WIFI_RAM_CODE, then
+	  provides scanning and station-mode association (WPA2 verified).
+	  Say M here for amazon-suez mainline bring-up.
+
 endmenu
