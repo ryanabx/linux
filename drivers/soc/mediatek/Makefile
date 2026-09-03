@@ -10,3 +10,4 @@ obj-$(CONFIG_MTK_MT8173_DISP_HANDOVER) += mt8173-disp-handover.o
 obj-$(CONFIG_MTK_MMSYS) += mtk-mutex.o
 obj-$(CONFIG_MTK_SVS) += mtk-svs.o
 obj-$(CONFIG_MTK_SOCINFO) += mtk-socinfo.o
+obj-$(CONFIG_MTK_SPM_SUSPEND) += mtk-spm-suspend.o
