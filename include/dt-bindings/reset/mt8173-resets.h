@@ -28,6 +28,7 @@
 #define MT8173_INFRA_MMIOMMURST         47
 
 /* MMSYS resets */
+#define MT8173_MMSYS_SW0_RST_B_DISP_OVL0	17
 #define MT8173_MMSYS_SW0_RST_B_DISP_DSI0	25
 
 /*  PERICFG resets */
