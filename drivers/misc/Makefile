@@ -71,3 +71,5 @@ obj-y				+= keba/
 obj-y				+= amd-sbi/
 obj-$(CONFIG_MISC_RP1)		+= rp1/
 obj-$(CONFIG_INTEL_SSEI)	+= issei/
+obj-$(CONFIG_MT6630_WMT)		+= mt6630-wmt.o
+obj-$(CONFIG_MT6630_WLAN)		+= mt6630-wlan.o

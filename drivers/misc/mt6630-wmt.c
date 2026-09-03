@@ -1,0 +1,1034 @@
+// SPDX-License-Identifier: GPL-2.0
+/*
+ * WMT control-plane driver for the MediaTek MT6630 combo chip on SDIO.
+ *
+ * Claims SDIO function 2 (the BGF/WMT control function), performs the
+ * driver-own handshake, queries the chip version, and downloads the ROM
+ * patch pair (mt6630_patch_e3_{0,1}_hdr.bin). This brings the chip to the
+ * fully-patched state from which BT/Wi-Fi function-on is possible.
+ *
+ * The protocol is documented in ~/suez-work/MT6630-DESIGN.md with vendor
+ * source citations; every magic number below has a section reference there.
+ *
+ * Patch address discovery (design doc 9.4.1, RESOLVED): the per-patch
+ * 4-byte download address is the dword at file offset 0x18 in each patch
+ * blob (the field the header struct calls u4PatchVer). The vendor's
+ * userspace launcher lseeks to 0x16, reads the 2-byte fw version, then
+ * reads these 4 bytes and passes them to WMT_IOCTL_SET_PATCH_INFO; the
+ * kernel memcpys them into WMT_PATCH_P_ADDRESS_CMD[12..15]. The low
+ * nibble of the first byte is the download sequence (e3_0: 0x21 -> 1,
+ * e3_1: 0x22 -> 2), which fixes the file order.
+ */
+
+#include <linux/delay.h>
+#include <linux/etherdevice.h>
+#include <linux/firmware.h>
+#include <linux/hex.h>
+#include <linux/kernel.h>
+#include <linux/of.h>
+#include <linux/unaligned.h>
+#include <linux/module.h>
+#include <linux/mmc/host.h>
+#include <linux/mmc/sdio_func.h>
+#include <linux/mmc/sdio_ids.h>
+#include <linux/skbuff.h>
+
+#include <net/bluetooth/bluetooth.h>
+#include <net/bluetooth/hci_core.h>
+
+#include "mt6630-wmt.h"
+
+#define MT6630_SDIO_DEVICE_ID	0x6630
+#define MT6630_WMT_FUNC		2	/* BGF/WMT control function (design doc 1.1) */
+#define MT6630_SDIO_BLK_SIZE	512	/* design doc 1.2 */
+
+#define MT6630_FW_PATCH_0	"mediatek/mt6630/mt6630_patch_e3_0_hdr.bin"
+#define MT6630_FW_PATCH_1	"mediatek/mt6630/mt6630_patch_e3_1_hdr.bin"
+
+/* STP-SDIO register map, function-2 I/O space (design doc 2.1) */
+#define CHLPCR	0x0004	/* ownership + host interrupt enable */
+#define CHISR	0x0010	/* host interrupt status */
+#define CHIER	0x0014	/* host interrupt enable mask */
+#define CTDR	0x0018	/* chip TX data register (host -> chip) */
+#define CRDR	0x001c	/* chip RX data register (chip -> host) */
+
+/* CHLPCR bits (design doc 2.2). Writes to CHLPCR use CMD52 byte writes to
+ * CHLPCR+1 carrying the high byte, per the COHEC_00006052 erratum (2.3). */
+#define C_FW_OWN_REQ_CLR	0x0200	/* write: request driver-own (wake) */
+#define C_FW_OWN_REQ_SET	0x0100	/* write: give ownership back to FW */
+#define C_FW_INT_EN_SET		0x0001	/* write: enable COM interrupt output */
+#define C_FW_COM_DRV_OWN	0x0100	/* read: 1 = driver owns the chip */
+
+/* CHISR/CHIER bits (design doc 2.2) */
+#define CHISR_RX_DONE		0x00000002
+#define CHISR_RX_PKT_LEN_MASK	0xffff0000
+#define CHISR_RX_PKT_LEN_SHIFT	16
+#define CHIER_INIT_VALUE	0xfffe	/* all ints except FW_OWN_BACK (design doc 2.2) */
+
+/* STP task IDs (design doc 4.1) */
+#define STP_TASK_BT		0
+#define STP_TASK_WMT		4
+
+#define STP_SDIO_HDR_SIZE	4
+#define STP_HDR_SIZE		4
+#define STP_CRC_SIZE		2
+
+/* WMT packet (design doc 5.1) */
+#define WMT_PKT_TYPE_CMD	0x01
+#define WMT_PKT_TYPE_EVENT	0x02
+#define WMT_OPCODE_PATCH	0x01
+#define WMT_OPCODE_FUNC_CTRL	0x06
+#define WMT_OPCODE_RESET	0x07
+#define WMT_OPCODE_INT		0x08
+
+/* Chip-id / version registers, read via OPCODE_INT (design doc 5.2) */
+#define GEN_HVR			0x80000000	/* hardware version; E3 = 0x8A11 */
+#define GEN_FVR			0x80000004	/* firmware/ROM version */
+#define GEN_HCR			0x80000008	/* hardware code = chip id 0x6630 */
+#define GEN_REG_MASK		0x0000ffff
+
+/* Patch download (design doc 6.6, 7.1) */
+#define MT6630_PATCH_HDR_SIZE	28
+#define MT6630_PATCH_ADDR_OFF	0x18	/* per-patch address dword in the header */
+#define MT6630_PATCH_FRAG_SIZE	1000
+#define MT6630_PATCH_FRAG_1ST	0x01
+#define MT6630_PATCH_FRAG_MID	0x02
+#define MT6630_PATCH_FRAG_LAST	0x03
+
+/* own-clear poll: design doc 3.1 uses retry=1200 * 500us = 600ms */
+#define OWN_POLL_RETRIES	1200
+#define OWN_POLL_DELAY_US	500
+/* RX poll after a command: generous, this is bring-up only */
+#define RX_POLL_RETRIES		1000
+#define RX_POLL_DELAY_US	1000
+/* Non-WMT frames (fw log etc.) tolerated while waiting for an event */
+#define RX_SKIP_FRAMES		8
+
+/* TX frame ceiling: SDIO(4) + STP(4) + WMT(5 + 1000) + CRC(2) = 1015,
+ * 4-byte then 512-block aligned -> 1024. */
+#define MT6630_XFER_BUF_SIZE	2048
+
+struct mt6630_wmt {
+	struct sdio_func *func;
+	u8 *tx_buf;
+	u8 *rx_buf;
+	/* serializes senders (tx_buf is shared between WMT and BT paths) */
+	struct mutex tx_lock;
+	struct hci_dev *hdev;
+	bool irq_claimed;
+};
+
+/* debug: stop before the LAST fragment and dump the download state */
+static bool debug_stop_last;
+module_param(debug_stop_last, bool, 0644);
+
+/* Fixed command/event byte arrays (design doc 5.2; vendor wmt_ic_6630.c).
+ * The vendor validates events with a full memcmp; real silicon returns
+ * exactly these bytes, so we do the same. */
+static const u8 wmt_patch_address_cmd[] = {
+	0x01, 0x08, 0x10, 0x00, 0x01, 0x01, 0x00, 0x01,
+	0xd4, 0x03, 0x09, 0x02, 0x00, 0x00, 0x00, 0x00,
+	0xff, 0xff, 0xff, 0xff
+};
+static const u8 wmt_patch_address_evt[] = {
+	0x02, 0x08, 0x04, 0x00, 0x00, 0x00, 0x00, 0x01
+};
+/* bytes [12..15] are overwritten with the per-patch address */
+static const u8 wmt_patch_p_address_cmd[] = {
+	0x01, 0x08, 0x10, 0x00, 0x01, 0x01, 0x00, 0x01,
+	0xfc, 0x08, 0x09, 0x02, 0x00, 0x00, 0x08, 0x00,
+	0xff, 0xff, 0xff, 0xff
+};
+static const u8 wmt_patch_evt[] = { 0x02, 0x01, 0x01, 0x00, 0x00 };
+static const u8 wmt_reset_cmd[] = { 0x01, 0x07, 0x01, 0x00, 0x04 };
+static const u8 wmt_reset_evt[] = { 0x02, 0x07, 0x01, 0x00, 0x00 };
+/* coex ant mode 1, from WMT.cfg/mt6630_ant_m1.cfg (design doc 5.2, 7.3) */
+static const u8 wmt_coex_cmd[] = { 0x01, 0x10, 0x02, 0x00, 0x01, 0x01 };
+static const u8 wmt_coex_evt[] = { 0x02, 0x10, 0x01, 0x00, 0x00 };
+/* FUNC_CTRL: 01 06 02 00 <drvType> <on> ; drvType BT=0, WIFI=3 (design doc 5.2) */
+static const u8 wmt_bt_on_cmd[]  = { 0x01, 0x06, 0x02, 0x00, 0x00, 0x01 };
+static const u8 wmt_bt_off_cmd[] = { 0x01, 0x06, 0x02, 0x00, 0x00, 0x00 };
+static const u8 wmt_wifi_on_cmd[] = { 0x01, 0x06, 0x02, 0x00, 0x03, 0x01 };
+static const u8 wmt_func_ctrl_evt[] = { 0x02, 0x06, 0x01, 0x00, 0x00 };
+
+/* True once the chip is patched and the WLAN function is powered; the
+ * func-1 driver (mt6630-wlan) gates its probe on this (its firmware
+ * download needs the ROM patches and FUNC_CTRL WIFI on, both of which
+ * happen here on function 2). */
+static bool mt6630_wmt_chip_ready;
+
+bool mt6630_wmt_ready(void)
+{
+	return READ_ONCE(mt6630_wmt_chip_ready);
+}
+EXPORT_SYMBOL_GPL(mt6630_wmt_ready);
+
+/* CHLPCR writes use CMD52 byte writes per the COHEC_00006052 erratum
+ * (design doc 2.3): the own-request bits (8/9) go to the high byte at
+ * CHLPCR+1, the interrupt-enable bits (0/1) to the low byte at CHLPCR+0. */
+static int chlpcr_writeb(struct sdio_func *func, u16 val)
+{
+	int ret = 0;
+
+	sdio_writeb(func, (u8)(val >> 8), CHLPCR + 1, &ret);
+	return ret;
+}
+
+static int chlpcr_writeb_lo(struct sdio_func *func, u8 val)
+{
+	int ret = 0;
+
+	sdio_writeb(func, val, CHLPCR, &ret);
+	return ret;
+}
+
+/* Claim ownership of the chip: own-clear, then poll CHLPCR bit8 (design doc 3.1). */
+static int mt6630_own_clear(struct sdio_func *func)
+{
+	int ret, i;
+	u32 lpcr;
+
+	ret = chlpcr_writeb(func, C_FW_OWN_REQ_CLR);
+	if (ret)
+		return ret;
+
+	for (i = 0; i < OWN_POLL_RETRIES; i++) {
+		lpcr = sdio_readl(func, CHLPCR, &ret);
+		if (ret)
+			return ret;
+		if (lpcr & C_FW_COM_DRV_OWN)
+			return 0;
+		udelay(OWN_POLL_DELAY_US);
+	}
+	return -ETIMEDOUT;
+}
+
+/*
+ * Wrap an STP payload in SDIO + STP framing and write it to CTDR
+ * (design doc 4.2). Frame: SDIO hdr(4) | STP hdr(4) | payload | CRC=0(2),
+ * 4-byte aligned, then 512-block aligned if larger than one block
+ * (vendor stp_sdio.c:1898-1917; hardware trims the padding).
+ */
+static int mt6630_stp_send(struct mt6630_wmt *w, u8 type, const void *payload,
+			   u16 len)
+{
+	u16 total = STP_SDIO_HDR_SIZE + STP_HDR_SIZE + len + STP_CRC_SIZE;
+	u32 xfer = ALIGN(total, 4);
+	u8 *tx = w->tx_buf;
+	int ret;
+
+	if (xfer > MT6630_SDIO_BLK_SIZE)
+		xfer = ALIGN(xfer, MT6630_SDIO_BLK_SIZE);
+	if (xfer > MT6630_XFER_BUF_SIZE)
+		return -EINVAL;
+
+	mutex_lock(&w->tx_lock);
+	/* SDIO header: total length including this header (design doc 4.2a) */
+	tx[0] = total & 0xff;
+	tx[1] = (total >> 8) & 0xff;
+	tx[2] = 0x00;
+	tx[3] = 0x00;
+	/* STP header: 0x80, (type<<4)|len_hi, len_lo, 0 (design doc 4.2b) */
+	tx[4] = 0x80;
+	tx[5] = (type << 4) | ((len >> 8) & 0x0f);
+	tx[6] = len & 0xff;
+	tx[7] = 0x00;
+
+	memcpy(&tx[8], payload, len);
+	/* CRC placeholder + alignment padding */
+	memset(&tx[8 + len], 0, xfer - 8 - len);
+
+	/* nested claims by the same context are fine (probe/remove paths) */
+	sdio_claim_host(w->func);
+	ret = sdio_writesb(w->func, CTDR, tx, xfer);
+	sdio_release_host(w->func);
+	mutex_unlock(&w->tx_lock);
+	if (ret)
+		dev_err(&w->func->dev, "CTDR write of %u failed: %d\n",
+			xfer, ret);
+	return ret;
+}
+
+/*
+ * Receive one STP frame of the wanted type, polled. Reads a whole SDIO
+ * packet from CRDR when CHISR signals RX_DONE, then walks the STP frames
+ * inside it (a packet may carry several; each is padded to 4 bytes,
+ * design doc 4.3). Frames of other types (fw log on tasks 5/6, etc.) are
+ * discarded with a debug print. Returns the payload length, or -errno.
+ */
+static int mt6630_stp_recv(struct mt6630_wmt *w, u8 want_type, void *buf,
+			   u16 buflen)
+{
+	struct sdio_func *func = w->func;
+	int ret, i, skipped = 0;
+	u32 chisr = 0, pkt_len;
+	u8 *rx = w->rx_buf;
+	u32 off;
+
+	while (skipped < RX_SKIP_FRAMES) {
+		for (i = 0; i < RX_POLL_RETRIES; i++) {
+			chisr = sdio_readl(func, CHISR, &ret);
+			if (ret)
+				return ret;
+			if (chisr & CHISR_RX_DONE)
+				break;
+			udelay(RX_POLL_DELAY_US);
+		}
+		if (!(chisr & CHISR_RX_DONE)) {
+			dev_err(&func->dev, "rx timeout, chisr 0x%08x\n", chisr);
+			return -ETIMEDOUT;
+		}
+
+		pkt_len = (chisr & CHISR_RX_PKT_LEN_MASK) >> CHISR_RX_PKT_LEN_SHIFT;
+		if (pkt_len < STP_SDIO_HDR_SIZE + STP_HDR_SIZE ||
+		    pkt_len > MT6630_XFER_BUF_SIZE) {
+			dev_err(&func->dev, "bad rx pkt len %u, chisr 0x%08x\n",
+				pkt_len, chisr);
+			return -EPROTO;
+		}
+
+		ret = sdio_readsb(func, rx, CRDR, pkt_len);
+		if (ret) {
+			dev_err(&func->dev, "CRDR read of %u failed: %d\n",
+				pkt_len, ret);
+			return ret;
+		}
+
+		/* SDIO header sanity (design doc 4.2a) */
+		if (get_unaligned_le16(rx) != pkt_len || rx[2] || rx[3])
+			dev_dbg(&func->dev,
+				"rx sdio hdr mismatch: %02x %02x %02x %02x (pkt %u)\n",
+				rx[0], rx[1], rx[2], rx[3], pkt_len);
+
+		/* Walk STP frames in the packet */
+		off = STP_SDIO_HDR_SIZE;
+		while (off + STP_HDR_SIZE <= pkt_len) {
+			u8 type = (rx[off + 1] & 0x70) >> 4;
+			u16 len = ((rx[off + 1] & 0x0f) << 8) | rx[off + 2];
+			u32 frame = STP_HDR_SIZE + len + STP_CRC_SIZE;
+
+			if (rx[off] != 0x80) {
+				dev_warn(&func->dev,
+					 "STP sync lost at %u: %02x\n",
+					 off, rx[off]);
+				return -EPROTO;
+			}
+			if (off + frame > pkt_len) {
+				dev_warn(&func->dev,
+					 "STP frame overruns packet (%u+%u > %u)\n",
+					 off, frame, pkt_len);
+				return -EPROTO;
+			}
+
+			if (type == want_type) {
+				if (len > buflen)
+					return -ENOSPC;
+				memcpy(buf, &rx[off + STP_HDR_SIZE], len);
+				return len;
+			}
+
+			dev_info(&func->dev,
+				 "discarding STP type %u frame (%u bytes): %.*s\n",
+				 type, len, min_t(int, len, 40),
+				 &rx[off + STP_HDR_SIZE]);
+			skipped++;
+			/* per-frame padding to 4 bytes (design doc 4.3) */
+			off += ALIGN(frame, 4);
+		}
+	}
+	dev_err(&func->dev, "no STP type-%u frame in %d frames\n",
+		want_type, skipped);
+	return -EPROTO;
+}
+
+/* Send a WMT command and receive its event (matched on the echoed opcode;
+ * unsolicited WMT events with a different opcode are skipped, bounded — the
+ * 2018 patch fw emits an opcode-0x16 indication right after init). Polled. */
+static int mt6630_wmt_xfer(struct mt6630_wmt *w, const u8 *cmd, u16 cmd_len,
+			   u8 *evt, u16 evt_max)
+{
+	int ret, skip;
+
+	ret = mt6630_stp_send(w, STP_TASK_WMT, cmd, cmd_len);
+	if (ret)
+		return ret;
+
+	for (skip = 0; skip < 4; skip++) {
+		ret = mt6630_stp_recv(w, STP_TASK_WMT, evt, evt_max);
+		if (ret < 0)
+			return ret;
+		if (ret >= 2 && evt[0] == WMT_PKT_TYPE_EVENT &&
+		    evt[1] != cmd[1]) {
+			dev_info(&w->func->dev,
+				 "skipping unsolicited WMT event op 0x%02x (%d bytes)\n",
+				 evt[1], ret);
+			continue;
+		}
+		return ret;
+	}
+	return -EPROTO;
+}
+
+/* Send a WMT command whose event is a fixed byte string (vendor init_script
+ * idiom: full memcmp, design doc 5.3). */
+static int mt6630_wmt_cmd(struct mt6630_wmt *w, const u8 *cmd, u16 cmd_len,
+			  const u8 *evt, u16 evt_len, const char *what)
+{
+	u8 rxevt[64];
+	int ret;
+
+	ret = mt6630_wmt_xfer(w, cmd, cmd_len, rxevt, sizeof(rxevt));
+	if (ret < 0) {
+		dev_err(&w->func->dev, "%s: xfer failed: %d\n", what, ret);
+		return ret;
+	}
+	if (ret != evt_len || memcmp(rxevt, evt, evt_len)) {
+		dev_err(&w->func->dev,
+			"%s: bad event (%d bytes): %*ph, wanted %*ph\n",
+			what, ret, min(ret, 8), rxevt, (int)evt_len, evt);
+		return -EPROTO;
+	}
+	return 0;
+}
+
+/*
+ * WMT register read via OPCODE_INT (design doc 5.2).
+ * CMD (20 bytes): hdr(01 08 10 00) op=2 type=1 rsvd count=1 addr val mask
+ * EVT (16 bytes): hdr(02 08 ..) status(4) addr(4) value(4)
+ */
+static int mt6630_wmt_reg_read(struct mt6630_wmt *w, u32 addr, u32 mask,
+			       u32 *out)
+{
+	u8 cmd[20] = { 0x01, 0x08, 0x10, 0x00, 0x02, 0x01, 0x00, 0x01 };
+	u8 evt[32];
+	int ret;
+
+	put_unaligned_le32(addr, &cmd[8]);
+	put_unaligned_le32(0,    &cmd[12]);
+	put_unaligned_le32(mask, &cmd[16]);
+
+	ret = mt6630_wmt_xfer(w, cmd, sizeof(cmd), evt, sizeof(evt));
+	if (ret < 0)
+		return ret;
+	if (ret < 16 || evt[0] != WMT_PKT_TYPE_EVENT || evt[1] != WMT_OPCODE_INT)
+		return -EPROTO;
+
+	*out = get_unaligned_le32(&evt[12]);
+	return 0;
+}
+
+/* Deliver one STP type-0 payload (a verbatim H4 frame: type byte +
+ * packet, design doc 8) to the Bluetooth core. */
+static void mt6630_bt_deliver(struct mt6630_wmt *w, const u8 *data, u16 len)
+{
+	struct hci_dev *hdev = w->hdev;
+	struct sk_buff *skb;
+
+	if (!hdev || len < 1)
+		return;
+
+	skb = bt_skb_alloc(len - 1, GFP_KERNEL);
+	if (!skb)
+		return;
+	hci_skb_pkt_type(skb) = data[0];
+	skb_put_data(skb, data + 1, len - 1);
+
+	hdev->stat.byte_rx += len;
+	hci_recv_frame(hdev, skb);	/* consumes skb, validates type */
+}
+
+/*
+ * SDIO in-band interrupt: drain all pending RX packets and demux the STP
+ * frames inside them. Runs in the sdio_irq thread with the host claimed.
+ * BT (type 0) goes to the HCI core; WMT events (type 4) are unexpected
+ * at runtime (all WMT exchanges are polled during probe/remove); fw
+ * messages (types 5/6) are logged at debug level.
+ */
+/* Chained function-1 (WLAN) handler; see mt6630-wmt.h. */
+static void (*mt6630_wlan_isr)(void *ctx);
+static void *mt6630_wlan_isr_ctx;
+
+void mt6630_wmt_register_wlan_isr(void (*fn)(void *ctx), void *ctx)
+{
+	WRITE_ONCE(mt6630_wlan_isr_ctx, ctx);
+	/* ctx must be visible before fn */
+	smp_wmb();
+	WRITE_ONCE(mt6630_wlan_isr, fn);
+}
+EXPORT_SYMBOL_GPL(mt6630_wmt_register_wlan_isr);
+
+void mt6630_wmt_unregister_wlan_isr(void)
+{
+	WRITE_ONCE(mt6630_wlan_isr, NULL);
+}
+EXPORT_SYMBOL_GPL(mt6630_wmt_unregister_wlan_isr);
+
+static void mt6630_wmt_stp_service(struct sdio_func *func)
+{
+	struct mt6630_wmt *w = sdio_get_drvdata(func);
+	u8 *rx = w->rx_buf;
+	u32 chisr, pkt_len, off;
+	int ret;
+
+	for (;;) {
+		chisr = sdio_readl(func, CHISR, &ret);
+		if (ret || !(chisr & CHISR_RX_DONE))
+			return;
+
+		pkt_len = (chisr & CHISR_RX_PKT_LEN_MASK) >> CHISR_RX_PKT_LEN_SHIFT;
+		if (pkt_len < STP_SDIO_HDR_SIZE + STP_HDR_SIZE ||
+		    pkt_len > MT6630_XFER_BUF_SIZE) {
+			dev_warn(&func->dev, "irq: bad rx len %u (chisr 0x%08x)\n",
+				 pkt_len, chisr);
+			return;
+		}
+		ret = sdio_readsb(func, rx, CRDR, pkt_len);
+		if (ret)
+			return;
+
+		off = STP_SDIO_HDR_SIZE;
+		while (off + STP_HDR_SIZE <= pkt_len) {
+			u8 type = (rx[off + 1] & 0x70) >> 4;
+			u16 len = ((rx[off + 1] & 0x0f) << 8) | rx[off + 2];
+			u32 frame = STP_HDR_SIZE + len + STP_CRC_SIZE;
+
+			if (rx[off] != 0x80 || off + frame > pkt_len) {
+				dev_warn(&func->dev,
+					 "irq: STP desync at %u: %*ph\n",
+					 off, 4, &rx[off]);
+				break;
+			}
+			if (type == STP_TASK_BT)
+				mt6630_bt_deliver(w, &rx[off + STP_HDR_SIZE],
+						  len);
+			else
+				dev_dbg(&func->dev,
+					"irq: STP type %u frame (%u): %.*s\n",
+					type, len, min_t(int, len, 40),
+					&rx[off + STP_HDR_SIZE]);
+			off += ALIGN(frame, 4);
+		}
+	}
+}
+
+static void mt6630_sdio_irq(struct sdio_func *func)
+{
+	void (*wlan_fn)(void *ctx);
+
+	/* one DAT1 line, no CCCR INTx: service func 2 (BT, latency
+	 * sensitive) first, then chain the func-1 WLAN handler */
+	mt6630_wmt_stp_service(func);
+
+	wlan_fn = READ_ONCE(mt6630_wlan_isr);
+	if (wlan_fn) {
+		smp_rmb();
+		wlan_fn(READ_ONCE(mt6630_wlan_isr_ctx));
+	}
+}
+
+static int mt6630_bt_open(struct hci_dev *hdev)
+{
+	return 0;
+}
+
+static int mt6630_bt_close(struct hci_dev *hdev)
+{
+	return 0;
+}
+
+static int mt6630_bt_flush(struct hci_dev *hdev)
+{
+	return 0;
+}
+
+/* MTK vendor command, same shape as upstream btmtk_set_bdaddr() */
+static int mt6630_bt_set_bdaddr(struct hci_dev *hdev, const bdaddr_t *bdaddr)
+{
+	struct sk_buff *skb;
+
+	skb = __hci_cmd_sync(hdev, 0xfc1a, 6, bdaddr, HCI_INIT_TIMEOUT);
+	if (IS_ERR(skb)) {
+		bt_dev_err(hdev, "setting bdaddr failed (%ld)", PTR_ERR(skb));
+		return PTR_ERR(skb);
+	}
+	kfree_skb(skb);
+	return 0;
+}
+
+/* The fw boots with a default address; the bootloader stores the factory
+ * one as ASCII hex in the DT at /idme/bt_mac_addr (like the wlan MAC).
+ * Failure is not fatal -- BT just keeps the default address. */
+static int mt6630_bt_setup(struct hci_dev *hdev)
+{
+	struct device_node *np;
+	const char *val;
+	bdaddr_t bdaddr;
+	u8 mac[6];
+	int len, i;
+
+	np = of_find_node_by_path("/idme/bt_mac_addr");
+	if (!np)
+		return 0;
+	val = of_get_property(np, "value", &len);
+	if (val && len >= 12 && hex2bin(mac, val, 6) == 0 &&
+	    is_valid_ether_addr(mac)) {
+		for (i = 0; i < 6; i++)	/* bdaddr_t is reversed */
+			bdaddr.b[i] = mac[5 - i];
+		if (!mt6630_bt_set_bdaddr(hdev, &bdaddr))
+			bt_dev_info(hdev, "bdaddr %pM from idme", mac);
+	}
+	of_node_put(np);
+	return 0;
+}
+
+/* TX: H4 frame verbatim inside STP type 0 (design doc 8). */
+static int mt6630_bt_send(struct hci_dev *hdev, struct sk_buff *skb)
+{
+	struct mt6630_wmt *w = hci_get_drvdata(hdev);
+	int ret;
+
+	memcpy(skb_push(skb, 1), &hci_skb_pkt_type(skb), 1);
+	ret = mt6630_stp_send(w, STP_TASK_BT, skb->data, skb->len);
+	if (ret) {
+		hdev->stat.err_tx++;
+		skb_pull(skb, 1);
+		return ret;	/* core frees the skb on error */
+	}
+
+	hdev->stat.byte_tx += skb->len;
+	switch (hci_skb_pkt_type(skb)) {
+	case HCI_COMMAND_PKT:
+		hdev->stat.cmd_tx++;
+		break;
+	case HCI_ACLDATA_PKT:
+		hdev->stat.acl_tx++;
+		break;
+	case HCI_SCODATA_PKT:
+		hdev->stat.sco_tx++;
+		break;
+	}
+	kfree_skb(skb);
+	return 0;
+}
+
+/*
+ * Download one ROM patch (design doc 6.6). The firmware blob is
+ * 28-byte header + body; the body goes down in 1000-byte fragments, each
+ * prefixed by the 5-byte patch command and acked by a 5-byte event.
+ */
+static int mt6630_patch_download(struct mt6630_wmt *w, const char *name)
+{
+	const struct firmware *fw;
+	struct device *dev = &w->func->dev;
+	u8 p_address_cmd[sizeof(wmt_patch_p_address_cmd)];
+	const u8 *body;
+	size_t body_size, frag_size, off = 0;
+	u8 frag_flag;
+	/* 5-byte WMT patch cmd + fragment, built contiguously */
+	u8 *cmd __free(kfree) = kmalloc(5 + MT6630_PATCH_FRAG_SIZE, GFP_KERNEL);
+	int ret, frag = 0, frag_num;
+
+	if (!cmd)
+		return -ENOMEM;
+
+	ret = request_firmware(&fw, name, dev);
+	if (ret) {
+		dev_err(dev, "patch %s not found: %d\n", name, ret);
+		return ret;
+	}
+	if (fw->size <= MT6630_PATCH_HDR_SIZE) {
+		release_firmware(fw);
+		return -EINVAL;
+	}
+
+	dev_info(dev, "patch %s: %zu bytes, built %.15s, hw 0x%02x%02x, address %*ph\n",
+		 name, fw->size, fw->data,
+		 fw->data[0x15], fw->data[0x14],
+		 4, &fw->data[MT6630_PATCH_ADDR_OFF]);
+
+	/* target-address prologue: fixed reg write, then the per-patch
+	 * address dword from file offset 0x18 (design doc 6.6 steps 5-6) */
+	ret = mt6630_wmt_cmd(w, wmt_patch_address_cmd,
+			     sizeof(wmt_patch_address_cmd),
+			     wmt_patch_address_evt,
+			     sizeof(wmt_patch_address_evt), "patch address");
+	if (ret)
+		goto out;
+
+	memcpy(p_address_cmd, wmt_patch_p_address_cmd, sizeof(p_address_cmd));
+	memcpy(&p_address_cmd[12], &fw->data[MT6630_PATCH_ADDR_OFF], 4);
+	/* The file's address dword carries the download sequence in the low
+	 * nibble (e3_0: ...21 = seq 1, e3_1: ...22 = seq 2). The fw uses the
+	 * register value verbatim as the destination pointer and its
+	 * descriptor parser aborts on an unaligned base (verified by memory
+	 * readback: body landed at 0x80021, ABT at eva 0x80029), so strip
+	 * the tag to get the real destination. The vendor command template
+	 * defaults to 0x00080000, so the whole low byte is tag. */
+	p_address_cmd[12] = 0x00;
+	ret = mt6630_wmt_cmd(w, p_address_cmd, sizeof(p_address_cmd),
+			     wmt_patch_address_evt,
+			     sizeof(wmt_patch_address_evt), "patch p-address");
+	if (ret)
+		goto out;
+
+	body = fw->data + MT6630_PATCH_HDR_SIZE;
+	body_size = fw->size - MT6630_PATCH_HDR_SIZE;
+	frag_num = DIV_ROUND_UP(body_size, MT6630_PATCH_FRAG_SIZE);
+
+	while (off < body_size) {
+		frag_size = min_t(size_t, MT6630_PATCH_FRAG_SIZE,
+				  body_size - off);
+		if (frag == frag_num - 1) {
+			if (debug_stop_last) {
+				static const u32 dbg_regs[] = {
+					0x020903d4, 0x020908fc,
+					0x00080000, 0x00080020, 0x00080024,
+					0x00080028, 0x0008002c, 0x00080030,
+				};
+				u32 v;
+				int i;
+
+				for (i = 0; i < ARRAY_SIZE(dbg_regs); i++) {
+					v = 0xdeadbeef;
+					ret = mt6630_wmt_reg_read(w,
+							dbg_regs[i],
+							0xffffffff, &v);
+					dev_info(dev,
+						 "dbg reg 0x%08x = 0x%08x (ret %d)\n",
+						 dbg_regs[i], v, ret);
+				}
+				dev_info(dev, "body[0..15]: %*ph\n", 16, body);
+				ret = -EAGAIN;
+				goto out;
+			}
+			frag_flag = MT6630_PATCH_FRAG_LAST;
+		} else if (frag == 0)
+			frag_flag = MT6630_PATCH_FRAG_1ST;
+		else
+			frag_flag = MT6630_PATCH_FRAG_MID;
+
+		/* WMT patch cmd: 01 01 len_lo len_hi flag, len = 1 + frag */
+		cmd[0] = WMT_PKT_TYPE_CMD;
+		cmd[1] = WMT_OPCODE_PATCH;
+		put_unaligned_le16(1 + frag_size, &cmd[2]);
+		cmd[4] = frag_flag;
+		memcpy(&cmd[5], body + off, frag_size);
+
+		ret = mt6630_wmt_cmd(w, cmd, 5 + frag_size, wmt_patch_evt,
+				     sizeof(wmt_patch_evt), "patch fragment");
+		if (ret) {
+			int i;
+
+			dev_err(dev, "patch %s: fragment %d/%d failed\n",
+				name, frag + 1, frag_num);
+			/* drain and print whatever the fw is saying (the
+			 * exception dump arrives on STP tasks 5/6); type 0xf
+			 * never matches so every frame is logged */
+			for (i = 0; i < 16; i++)
+				if (mt6630_stp_recv(w, 0xf, NULL, 0) == -ETIMEDOUT)
+					break;
+			goto out;
+		}
+
+		off += frag_size;
+		frag++;
+	}
+
+	dev_info(dev, "patch %s: %d fragments downloaded\n", name, frag_num);
+out:
+	release_firmware(fw);
+	return ret;
+}
+
+/* WMT reset after each patch (design doc 6.5); re-claim ownership in case
+ * the reset bounced it back to the firmware side. */
+static int mt6630_wmt_reset(struct mt6630_wmt *w)
+{
+	int ret;
+
+	ret = mt6630_wmt_cmd(w, wmt_reset_cmd, sizeof(wmt_reset_cmd),
+			     wmt_reset_evt, sizeof(wmt_reset_evt), "wmt reset");
+	if (ret)
+		return ret;
+	/* the reset applies the downloaded patch; give the fw time to
+	 * re-init (the vendor flow has a natural multi-ms userspace round
+	 * trip here before the next command) */
+	msleep(50);
+	return mt6630_own_clear(w->func);
+}
+
+static int mt6630_chip_init(struct mt6630_wmt *w)
+{
+	struct sdio_func *func = w->func;
+	u32 hcr = 0, hvr = 0, fvr = 0;
+	int ret;
+
+	ret = mt6630_own_clear(func);
+	if (ret) {
+		dev_err(&func->dev, "driver-own handshake failed: %d\n", ret);
+		return ret;
+	}
+
+	/* Enable interrupts (design doc 6.3 steps 4-5). We poll rather than
+	 * use the IRQ, but the FW expects the COM interrupt enabled. */
+	sdio_writel(func, CHIER_INIT_VALUE, CHIER, &ret);
+	if (ret)
+		return ret;
+	ret = chlpcr_writeb_lo(func, C_FW_INT_EN_SET);
+	if (ret)
+		return ret;
+
+	/* Chip id and versions (design doc 9.2) */
+	ret = mt6630_wmt_reg_read(w, GEN_HCR, GEN_REG_MASK, &hcr);
+	if (ret) {
+		dev_err(&func->dev, "GEN_HCR read failed: %d\n", ret);
+		return ret;
+	}
+	mt6630_wmt_reg_read(w, GEN_HVR, GEN_REG_MASK, &hvr);
+	mt6630_wmt_reg_read(w, GEN_FVR, GEN_REG_MASK, &fvr);
+
+	dev_info(&func->dev,
+		 "MT6630 WMT alive: chip id 0x%04x, hw ver 0x%04x, fw ver 0x%04x\n",
+		 hcr & 0xffff, hvr & 0xffff, fvr & 0xffff);
+	if ((hcr & 0xffff) != MT6630_SDIO_DEVICE_ID) {
+		dev_err(&func->dev, "unexpected chip id (wanted 0x6630)\n");
+		return -ENODEV;
+	}
+
+	/* ROM patch pair, reset after each (design doc 6.5 step 9.3) */
+	ret = mt6630_patch_download(w, MT6630_FW_PATCH_0);
+	if (ret)
+		return ret;
+	ret = mt6630_wmt_reset(w);
+	if (ret)
+		return ret;
+	ret = mt6630_patch_download(w, MT6630_FW_PATCH_1);
+	if (ret)
+		return ret;
+	ret = mt6630_wmt_reset(w);
+	if (ret)
+		return ret;
+
+	/* final reset + coex antenna mode (design doc 6.5 steps 10-11) */
+	ret = mt6630_wmt_reset(w);
+	if (ret)
+		return ret;
+	ret = mt6630_wmt_cmd(w, wmt_coex_cmd, sizeof(wmt_coex_cmd),
+			     wmt_coex_evt, sizeof(wmt_coex_evt), "coex config");
+	if (ret)
+		return ret;
+
+	dev_info(&func->dev, "MT6630 patched and initialized\n");
+	return 0;
+}
+
+static int mt6630_wmt_probe(struct sdio_func *func,
+			    const struct sdio_device_id *id)
+{
+	struct mt6630_wmt *w;
+	struct hci_dev *hdev;
+	int ret;
+
+	/* Only the WMT/BGF function; function 1 is Wi-Fi (design doc 1.1). */
+	if (func->num != MT6630_WMT_FUNC)
+		return -ENODEV;
+
+	w = devm_kzalloc(&func->dev, sizeof(*w), GFP_KERNEL);
+	if (!w)
+		return -ENOMEM;
+	w->func = func;
+	w->tx_buf = devm_kmalloc(&func->dev, MT6630_XFER_BUF_SIZE, GFP_KERNEL);
+	w->rx_buf = devm_kmalloc(&func->dev, MT6630_XFER_BUF_SIZE, GFP_KERNEL);
+	if (!w->tx_buf || !w->rx_buf)
+		return -ENOMEM;
+	mutex_init(&w->tx_lock);
+	sdio_set_drvdata(func, w);
+
+	sdio_claim_host(func);
+
+	ret = sdio_enable_func(func);
+	if (ret)
+		goto out;
+
+	ret = sdio_set_block_size(func, MT6630_SDIO_BLK_SIZE);
+	if (ret)
+		goto out_disable;
+
+	ret = mt6630_chip_init(w);
+	if (ret)
+		goto out_disable;
+
+	/* BT function on, while WMT exchanges are still polled */
+	ret = mt6630_wmt_cmd(w, wmt_bt_on_cmd, sizeof(wmt_bt_on_cmd),
+			     wmt_func_ctrl_evt, sizeof(wmt_func_ctrl_evt),
+			     "bt func on");
+	if (ret)
+		goto out_disable;
+
+	/* WLAN function on, for the func-1 driver (non-fatal: BT is still
+	 * useful if this fails) */
+	ret = mt6630_wmt_cmd(w, wmt_wifi_on_cmd, sizeof(wmt_wifi_on_cmd),
+			     wmt_func_ctrl_evt, sizeof(wmt_func_ctrl_evt),
+			     "wifi func on");
+	if (!ret)
+		WRITE_ONCE(mt6630_wmt_chip_ready, true);
+
+	/* switch RX to the in-band interrupt */
+	ret = sdio_claim_irq(func, mt6630_sdio_irq);
+	if (ret)
+		goto out_disable;
+	w->irq_claimed = true;
+
+	sdio_release_host(func);
+
+	hdev = hci_alloc_dev();
+	if (!hdev) {
+		ret = -ENOMEM;
+		goto out_irq;
+	}
+	hdev->bus = HCI_SDIO;
+	hci_set_drvdata(hdev, w);
+	SET_HCIDEV_DEV(hdev, &func->dev);
+	hdev->open  = mt6630_bt_open;
+	hdev->close = mt6630_bt_close;
+	hdev->flush = mt6630_bt_flush;
+	hdev->send  = mt6630_bt_send;
+	hdev->setup = mt6630_bt_setup;
+	hdev->set_bdaddr = mt6630_bt_set_bdaddr;
+
+	ret = hci_register_dev(hdev);
+	if (ret) {
+		hci_free_dev(hdev);
+		goto out_irq;
+	}
+	w->hdev = hdev;
+
+	dev_info(&func->dev, "MT6630 Bluetooth up (%s)\n", hdev->name);
+	return 0;
+
+out_irq:
+	sdio_claim_host(func);
+	sdio_release_irq(func);
+	w->irq_claimed = false;
+out_disable:
+	sdio_disable_func(func);
+out:
+	sdio_release_host(func);
+	return ret;
+}
+
+static void mt6630_wmt_remove(struct sdio_func *func)
+{
+	struct mt6630_wmt *w = sdio_get_drvdata(func);
+
+	WRITE_ONCE(mt6630_wmt_chip_ready, false);
+
+	if (w->hdev) {
+		hci_unregister_dev(w->hdev);
+		hci_free_dev(w->hdev);
+		w->hdev = NULL;
+	}
+
+	sdio_claim_host(func);
+	if (w->irq_claimed) {
+		sdio_release_irq(func);
+		w->irq_claimed = false;
+		/* back to polled mode: politely turn BT off (best effort) */
+		mt6630_wmt_cmd(w, wmt_bt_off_cmd, sizeof(wmt_bt_off_cmd),
+			       wmt_func_ctrl_evt, sizeof(wmt_func_ctrl_evt),
+			       "bt func off");
+	}
+	sdio_disable_func(func);
+	sdio_release_host(func);
+}
+
+/* ---- power management ----
+ *
+ * Both SDIO function drivers need .suspend and .resume, and both ask for
+ * MMC_PM_KEEP_POWER. Those are two separate requirements:
+ *
+ *  - mmc_sdio_pre_suspend() walks every present function and gives up on the
+ *    whole card unless each one's driver has both callbacks. For a
+ *    non-removable card "gives up" is only a dev_warn ("missing suspend/resume
+ *    ops for non-removable SDIO card"), so it looks harmless -- but the card
+ *    is then carried into suspend with nothing having quiesced it.
+ *
+ *  - Without MMC_PM_KEEP_POWER, mmc_sdio_suspend() calls mmc_power_off(),
+ *    which runs the pwrseq and drops PMU_EN and RST. That is a full chip power
+ *    cycle. The ROM patches and the WLAN firmware live in the chip's RAM and
+ *    are gone; mmc_sdio_resume() then re-runs mmc_sdio_reinit_card(), so the
+ *    function enables and block sizes set up at probe are gone too. Every
+ *    transfer afterwards fails -EINVAL ("CTDR write of 24 failed: -22"), the
+ *    Bluetooth commands time out, and ieee80211_reconfig() gives up with
+ *    "wiphy_resume returns -22". Neither radio recovers without a reboot.
+ *
+ * Keeping the chip powered is honest on this board rather than wishful: its
+ * supply is not switchable. The vendor's &mmc3 has no vmmc-supply at all, and
+ * its connectivity-combo node leaves gpio_combo_ldo_en_pin and
+ * gpio_combo_pmuv28_en_pin commented out, so the only software power control
+ * that exists anywhere is the pwrseq's PMU_EN and RST -- precisely what
+ * MMC_PM_KEEP_POWER stops the core from touching. The flag is only accepted if
+ * host->pm_caps allows it, which is what keep-power-in-suspend in the mmc3
+ * node is for.
+ *
+ * mmc_sdio_resume() clears host->pm_flags on its way out, so this has to be
+ * re-requested on every suspend, not once at probe.
+ */
+static int mt6630_wmt_suspend(struct device *dev)
+{
+	struct sdio_func *func = dev_to_sdio_func(dev);
+	int ret;
+
+	ret = sdio_set_host_pm_flags(func, MMC_PM_KEEP_POWER);
+	if (ret) {
+		/* Failing the suspend is the right response. Proceeding would
+		 * power-cycle the chip behind both drivers' backs and leave
+		 * Bluetooth and Wi-Fi dead until the next reboot, which is a
+		 * far worse outcome than not suspending. */
+		dev_err(dev,
+			"cannot keep the MT6630 powered across suspend (%d); is keep-power-in-suspend missing from the mmc node?\n",
+			ret);
+		return ret;
+	}
+
+	/* Nothing else to do. The chip keeps its firmware and its registers,
+	 * and the mmc core sets mmc_card_set_suspended() and cancels
+	 * host->sdio_irq_work, so the chained interrupt cannot run while the
+	 * controller is clock-gated. The Bluetooth core quiesces hdev through
+	 * its own PM notifier, before any function driver's .suspend. */
+	return 0;
+}
+
+static int mt6630_wmt_resume(struct device *dev)
+{
+	/* mmc_sdio_resume() clears the suspended flag and wakes the SDIO irq
+	 * thread; msdc_restore_reg() re-arms the controller's SDIO interrupt.
+	 * The chip never stopped, so there is nothing here to restore. */
+	return 0;
+}
+
+static DEFINE_SIMPLE_DEV_PM_OPS(mt6630_wmt_pm_ops,
+				mt6630_wmt_suspend, mt6630_wmt_resume);
+
+static const struct sdio_device_id mt6630_wmt_ids[] = {
+	{ SDIO_DEVICE(SDIO_VENDOR_ID_MEDIATEK, MT6630_SDIO_DEVICE_ID) },
+	{ /* end */ },
+};
+MODULE_DEVICE_TABLE(sdio, mt6630_wmt_ids);
+
+static struct sdio_driver mt6630_wmt_driver = {
+	.name		= "mt6630-wmt",
+	.id_table	= mt6630_wmt_ids,
+	.probe		= mt6630_wmt_probe,
+	.remove		= mt6630_wmt_remove,
+	.drv		= {
+		.pm	= pm_sleep_ptr(&mt6630_wmt_pm_ops),
+	},
+};
+module_sdio_driver(mt6630_wmt_driver);
+
+MODULE_FIRMWARE(MT6630_FW_PATCH_0);
+MODULE_FIRMWARE(MT6630_FW_PATCH_1);
+MODULE_AUTHOR("amazon-suez mainline bringup");
+MODULE_DESCRIPTION("WMT control-plane driver for MT6630 on SDIO");
+MODULE_LICENSE("GPL");
