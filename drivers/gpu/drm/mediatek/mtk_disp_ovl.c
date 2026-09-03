@@ -13,6 +13,7 @@
 #include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
+#include <linux/reset.h>
 #include <linux/soc/mediatek/mtk-cmdq.h>
 
 #include "mtk_crtc.h"
@@ -160,6 +161,7 @@ struct mtk_disp_ovl_data {
 struct mtk_disp_ovl {
 	struct drm_crtc			*crtc;
 	struct clk			*clk;
+	struct reset_control		*reset;
 	void __iomem			*regs;
 	struct cmdq_client_reg		cmdq_reg;
 	const struct mtk_disp_ovl_data	*data;
@@ -631,6 +633,32 @@ static int mtk_disp_ovl_probe(struct platform_device *pdev)
 	if (IS_ERR(priv->regs))
 		return dev_err_probe(dev, PTR_ERR(priv->regs),
 				     "failed to ioremap ovl\n");
+
+	priv->reset = devm_reset_control_get_optional_exclusive(dev, NULL);
+	if (IS_ERR(priv->reset))
+		return dev_err_probe(dev, PTR_ERR(priv->reset),
+				     "failed to get ovl reset\n");
+
+	/*
+	 * A bootloader that hands the OVL over while it is still scanning out
+	 * leaves SMI reads in flight.  If those clocks are gated underneath it
+	 * before a driver claims them - which is what happens when this driver
+	 * is a module, since the SMI larb has runtime-suspended long before it
+	 * loads - the reads never complete.  The engine is then stuck for good:
+	 * its frame state machine parks in s_w_rst, the soft DISP_REG_OVL_RST
+	 * can no longer clear it, and it never emits another pixel.  Only the
+	 * MMSYS block reset recovers that, so take it before configuring.
+	 */
+	if (priv->reset) {
+		ret = clk_prepare_enable(priv->clk);
+		if (ret)
+			return dev_err_probe(dev, ret,
+					     "failed to enable ovl clk for reset\n");
+
+		reset_control_reset(priv->reset);
+		clk_disable_unprepare(priv->clk);
+	}
+
 #if IS_REACHABLE(CONFIG_MTK_CMDQ)
 	ret = cmdq_dev_get_client_reg(dev, &priv->cmdq_reg, 0);
 	if (ret)
