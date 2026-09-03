@@ -38,6 +38,18 @@ config APM_POWER
 config ADC_BATTERY_HELPER
 	tristate
 
+config BATTERY_MT6397
+	tristate "MediaTek MT6397 PMIC fuel gauge support"
+	depends on MFD_MT6397 || COMPILE_TEST
+	depends on IIO
+	help
+	  Say Y here to enable support for the fuel gauge in the MediaTek
+	  MT6397 PMIC. It coulomb-counts with the PMIC's hardware charge
+	  accumulator and runs MediaTek's battery-meter algorithm on top,
+	  with per-temperature OCV, resistance and capacity tables from the
+	  device tree, so a board ported from a MediaTek kernel reports the
+	  same state of charge it did there.
+
 config GENERIC_ADC_BATTERY
 	tristate "Generic battery support using IIO"
 	depends on IIO
