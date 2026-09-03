@@ -106,6 +106,16 @@ config SND_SOC_MT8173_MAX98090
 	  Select Y if you have such device.
 	  If unsure select "N".
 
+config SND_SOC_MT8173_MT6391
+	tristate "ASoC Audio driver for MT8173 with MT6391 PMIC codec"
+	depends on SND_SOC_MT8173
+	select SND_SOC_MT6391
+	help
+	  This adds ASoC machine driver support for MT8173 boards whose
+	  primary codec is the MT6391 audio block of the MT6397 family
+	  PMIC, connected over the internal ADDA interface, such as the
+	  Amazon Fire HD 10 2017 (suez).
+
 config SND_SOC_MT8173_RT5650
 	tristate "ASoC Audio driver for MT8173 with RT5650 codec"
 	depends on SND_SOC_MT8173 && I2C
