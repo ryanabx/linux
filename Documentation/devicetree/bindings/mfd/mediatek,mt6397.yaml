@@ -117,6 +117,14 @@ properties:
     $ref: /schemas/iio/adc/mediatek,mt6359-auxadc.yaml#
     unevaluatedProperties: false
 
+  battery:
+    type: object
+    $ref: /schemas/power/supply/mediatek,mt6397-battery.yaml#
+    unevaluatedProperties: false
+    description:
+      The MT6397 fuel gauge (FGADC), for boards that route the battery
+      current through the PMIC's sense input.
+
   audio-codec:
     type: object
     description:
