@@ -93,6 +93,21 @@ config MTK_SVS
 	  chip process corner, temperatures and other factors. Then DVFS
 	  driver could apply SVS bank voltage to PMIC/Buck.
 
+config MTK_SPM_SUSPEND
+	tristate "MediaTek MT8173 SPM suspend-to-RAM"
+	depends on ARCH_MEDIATEK || COMPILE_TEST
+	depends on SUSPEND && MFD_SYSCON
+	help
+	  Suspend-to-RAM driven by the MT8173 System Power Manager, for boards
+	  whose firmware is older than PSCI 1.0 and therefore cannot offer
+	  SYSTEM_SUSPEND. On those the kernel has no platform_suspend_ops and
+	  /sys/power/mem_sleep offers only s2idle.
+
+	  Boards that ship ARM Trusted Firmware do not need this -- BL31 does
+	  the same work at EL3 -- and should not enable it.
+
+	  If unsure, say N.
+
 config MTK_SOCINFO
 	tristate "MediaTek SoC Information"
 	default y
