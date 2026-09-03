@@ -443,6 +443,67 @@ err_drm_dev_exit:
 }
 
 int
+pvr_power_system_suspend(struct device *dev)
+{
+	struct platform_device *plat_dev = to_platform_device(dev);
+	struct drm_device *drm_dev = platform_get_drvdata(plat_dev);
+	struct pvr_device *pvr_dev = to_pvr_device(drm_dev);
+	int err;
+
+	/*
+	 * A device that has been lost cannot be talked to, and there is
+	 * nothing left to power down. pvr_power_device_suspend() answers
+	 * -EIO for it, which the PM core turns into a failed system suspend
+	 * for the whole machine -- and because nothing clears the condition,
+	 * it would fail that way on every subsequent attempt.
+	 */
+	if (drm_dev_is_unplugged(drm_dev))
+		return 0;
+
+	/*
+	 * Stop the watchdog before entering the runtime suspend path, and do
+	 * it from here, where no SRCU read section is held.
+	 *
+	 * pvr_power_device_suspend() takes drm_dev_enter() and then waits for
+	 * this same work inside pvr_power_fw_disable(). A watchdog worker that
+	 * is part way through a failing hard reset calls pvr_device_lost(),
+	 * whose drm_dev_unplug() waits in synchronize_srcu() for exactly the
+	 * section the suspend path is holding: neither side can finish.
+	 *
+	 * Runtime PM never lets the two overlap, because the worker holds a
+	 * reference from pm_runtime_get_if_in_use(), and
+	 * rpm_check_suspend_allowed() refuses to suspend while the usage count
+	 * is raised. pm_runtime_force_suspend() does not consult that count, so
+	 * system sleep has to keep them apart itself.
+	 */
+	cancel_delayed_work_sync(&pvr_dev->watchdog.work);
+
+	err = pm_runtime_force_suspend(dev);
+
+	/*
+	 * The device can be lost between the test above and here. Answering
+	 * the resulting -EIO would fail the suspend for the whole machine over
+	 * a device that no longer exists.
+	 */
+	if (err && drm_dev_is_unplugged(drm_dev))
+		return 0;
+
+	return err;
+}
+
+int
+pvr_power_system_resume(struct device *dev)
+{
+	struct platform_device *plat_dev = to_platform_device(dev);
+	struct drm_device *drm_dev = platform_get_drvdata(plat_dev);
+
+	if (drm_dev_is_unplugged(drm_dev))
+		return 0;
+
+	return pm_runtime_force_resume(dev);
+}
+
+int
 pvr_power_device_idle(struct device *dev)
 {
 	struct platform_device *plat_dev = to_platform_device(dev);
