@@ -618,6 +618,13 @@
 			#clock-cells = <1>;
 		};
 
+		fhctl: clock-controller@10209e00 {
+			compatible = "mediatek,mt8173-fhctl";
+			reg = <0 0x10209e00 0 0x200>;
+			clocks = <&apmixedsys CLK_APMIXED_MMPLL>;
+			mediatek,hopping-ssc-percent = <0>;
+		};
+
 		hdmi_phy: hdmi-phy@10209100 {
 			compatible = "mediatek,mt8173-hdmi-phy";
 			reg = <0 0x10209100 0 0x24>;
