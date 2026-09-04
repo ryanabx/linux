@@ -132,6 +132,10 @@ properties:
           - enum:
               - mediatek,mt8167-pumpkin
           - const: mediatek,mt8167
+      - description: Amazon Fire HD 10 (2017)
+        items:
+          - const: amazon,suez
+          - const: mediatek,mt8173
       - description: Google Elm (Acer Chromebook R13)
         items:
           - const: google,elm-rev8
