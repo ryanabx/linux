@@ -22,6 +22,7 @@ properties:
   compatible:
     items:
       - enum:
+          - amazon,suez-boe-nt51021
           - boe,tv101wum-nx0
           - boe,tv080wum-nx2
       - const: novatek,nt51021
