@@ -20,6 +20,7 @@ struct boe_nt51021_variant {
 	int (*init)(struct boe_nt51021_desc *ctx);
 
 	const struct drm_display_mode *display_mode;
+	unsigned long mode_flags;
 };
 
 struct boe_nt51021_desc {
@@ -602,6 +603,46 @@ static int nt51021_boe_10wu_init(struct boe_nt51021_desc *ctx)
 	return dsi_ctx.accum_err;
 }
 
+/*
+ * Amazon Fire HD 10 (2017), BOE glass. Taken from the BOE branch of
+ * init_lcm_registers() in the vendor LCM driver,
+ * drivers/misc/mediatek/lcm/nt51021_wuxga_dsi_vdo/ in the Fire OS 3.18 tree.
+ * The vendor programs no gamma here, and leaves CABC alone -- it drives CABC
+ * over I2C from the backlight path instead.
+ */
+static int nt51021_suez_init(struct boe_nt51021_desc *ctx)
+{
+	struct mipi_dsi_multi_context dsi_ctx = { .dsi = ctx->dsi };
+
+	mipi_dsi_generic_write_seq_multi(&dsi_ctx, 0x8f, 0xa5);
+	mipi_dsi_usleep_range(&dsi_ctx, 1000, 2000);
+	mipi_dsi_generic_write_seq_multi(&dsi_ctx, 0x01, 0x00);
+	mipi_dsi_msleep(&dsi_ctx, 20);
+	mipi_dsi_generic_write_seq_multi(&dsi_ctx, 0x8f, 0xa5);
+	mipi_dsi_usleep_range(&dsi_ctx, 1000, 2000);
+	mipi_dsi_generic_write_seq_multi(&dsi_ctx, 0x83, 0x00);
+	mipi_dsi_generic_write_seq_multi(&dsi_ctx, 0x84, 0x00);
+	mipi_dsi_generic_write_seq_multi(&dsi_ctx, 0x8c, 0x80);
+	mipi_dsi_generic_write_seq_multi(&dsi_ctx, 0xcd, 0x6c);
+	mipi_dsi_generic_write_seq_multi(&dsi_ctx, 0xc0, 0x8b);
+	mipi_dsi_generic_write_seq_multi(&dsi_ctx, 0xc8, 0xf0);
+	mipi_dsi_generic_write_seq_multi(&dsi_ctx, 0x97, 0x00);
+	mipi_dsi_generic_write_seq_multi(&dsi_ctx, 0x8b, 0x10);
+	mipi_dsi_generic_write_seq_multi(&dsi_ctx, 0xa9, 0x20);
+	mipi_dsi_generic_write_seq_multi(&dsi_ctx, 0x83, 0xaa);
+	mipi_dsi_generic_write_seq_multi(&dsi_ctx, 0x84, 0x11);
+	mipi_dsi_generic_write_seq_multi(&dsi_ctx, 0xa9, 0x4b);
+	mipi_dsi_generic_write_seq_multi(&dsi_ctx, 0x85, 0x04);
+	mipi_dsi_generic_write_seq_multi(&dsi_ctx, 0x86, 0x08);
+	mipi_dsi_generic_write_seq_multi(&dsi_ctx, 0x9c, 0x10);
+	mipi_dsi_dcs_exit_sleep_mode_multi(&dsi_ctx);
+	mipi_dsi_msleep(&dsi_ctx, 120);
+	mipi_dsi_generic_write_seq_multi(&dsi_ctx, 0x8f, 0x00);
+	mipi_dsi_msleep(&dsi_ctx, 5);
+
+	return dsi_ctx.accum_err;
+}
+
 static int nt51021_boe_off(struct boe_nt51021_desc *ctx)
 {
 	struct mipi_dsi_multi_context dsi_ctx = { .dsi = ctx->dsi };
@@ -708,8 +749,7 @@ static int nt51021_boe_probe(struct mipi_dsi_device *dsi)
 
 	dsi->lanes = 4;
 	dsi->format = MIPI_DSI_FMT_RGB888;
-	dsi->mode_flags = MIPI_DSI_MODE_VIDEO | MIPI_DSI_MODE_VIDEO_BURST |
-			  MIPI_DSI_MODE_NO_EOT_PACKET | MIPI_DSI_MODE_LPM;
+	dsi->mode_flags = ctx->variant->mode_flags;
 
 	ctx->panel.prepare_prev_first = true;
 
@@ -771,19 +811,67 @@ static const struct drm_display_mode nt51021_boe_10wu_mode = {
 	.type = DRM_MODE_TYPE_DRIVER,
 };
 
+/*
+ * Vendor lcm_get_params(): 1200x1920, hsync 1 / hbp 32 / hfp 110,
+ * vsync 1 / vbp 14 / vfp 11, giving htotal 1343 and vtotal 1946. The clock
+ * follows the vendor's PLL_CLOCK = 490, i.e. 980 Mbps per lane, which over
+ * four lanes at 24bpp is 163.33 MHz and so 62.5 Hz. That is also what the
+ * bootloader leaves running: read back before the kernel touches it, this
+ * board's MIPI TX PLL decodes to exactly 980 Mbps per lane.
+ *
+ * The vendor's lcm_get_params() also reports physical_width = 136 and
+ * physical_height = 221. The height is wrong: 1200/136 and 1920/221 disagree
+ * by 1.5%, i.e. non-square pixels, and no dimension of this panel is 221 mm.
+ * The active area of a 10.1" 16:10 panel is 135.6 x 217.0 mm, so the vendor's
+ * width is kept and the height corrected to 217.
+ */
+static const struct drm_display_mode nt51021_suez_mode = {
+	.clock = 163333,
+	.hdisplay = 1200,
+	.hsync_start = 1200 + 110,
+	.hsync_end = 1200 + 110 + 1,
+	.htotal = 1200 + 110 + 1 + 32,
+	.vdisplay = 1920,
+	.vsync_start = 1920 + 11,
+	.vsync_end = 1920 + 11 + 1,
+	.vtotal = 1920 + 11 + 1 + 14,
+	.width_mm = 136,
+	.height_mm = 217,
+	.type = DRM_MODE_TYPE_DRIVER,
+};
+
+#define NT51021_BURST_MODE_FLAGS	(MIPI_DSI_MODE_VIDEO | \
+					 MIPI_DSI_MODE_VIDEO_BURST | \
+					 MIPI_DSI_MODE_NO_EOT_PACKET | \
+					 MIPI_DSI_MODE_LPM)
+
 static const struct boe_nt51021_variant nt51021_8inch_data = {
 	.init = nt51021_boe_8_init,
 	.display_mode = &nt51021_boe_8_mode,
+	.mode_flags = NT51021_BURST_MODE_FLAGS,
 };
 
 static const struct boe_nt51021_variant nt51021_10wu_data = {
 	.init = nt51021_boe_10wu_init,
 	.display_mode = &nt51021_boe_10wu_mode,
+	.mode_flags = NT51021_BURST_MODE_FLAGS,
+};
+
+static const struct boe_nt51021_variant nt51021_suez_data = {
+	.init = nt51021_suez_init,
+	.display_mode = &nt51021_suez_mode,
+	/*
+	 * The vendor LCM driver asks for SYNC_EVENT_VDO_MODE with
+	 * cont_clock = 1: sync events rather than burst, and a continuously
+	 * running HS clock, so MIPI_DSI_CLOCK_NON_CONTINUOUS stays absent.
+	 */
+	.mode_flags = MIPI_DSI_MODE_VIDEO | MIPI_DSI_MODE_LPM,
 };
 
 static const struct of_device_id nt51021_boe_of_match[] = {
 	{ .compatible = "boe,tv080wum-nx2", .data = &nt51021_8inch_data },
 	{ .compatible = "boe,tv101wum-nx0", .data = &nt51021_10wu_data },
+	{ .compatible = "amazon,suez-boe-nt51021", .data = &nt51021_suez_data },
 	{ /* sentinel */ }
 };
 MODULE_DEVICE_TABLE(of, nt51021_boe_of_match);
