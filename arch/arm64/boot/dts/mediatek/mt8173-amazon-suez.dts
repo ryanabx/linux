@@ -14,6 +14,21 @@
 	model = "Amazon Fire HD 10 (2017)";
 	compatible = "amazon,suez", "mediatek,mt8173";
 
+	/*
+	 * The vendor bootloader (LK) chooses which appended DTB to hand to the
+	 * kernel by board revision: shipping only the vendor "hvt" DTB does not
+	 * boot, shipping only the vendor "dvt" one does, and this unit reports
+	 * version = "dvt". A DTB LK does not select is silently ignored and the
+	 * kernel is never entered at all - which is why a mainline DTB carrying
+	 * neither property never got control.
+	 *
+	 * Nothing in mainline binds to this property; it exists only so LK
+	 * selects the DTB. It is kept here because the DTB is appended to the
+	 * kernel image as-is; a packaging step that patched it in would be the
+	 * alternative.
+	 */
+	version = "dvt";
+
 	aliases {
 		/* Pin the MMC indices; the SD slot otherwise renames the eMMC. */
 		mmc0 = &mmc0;
