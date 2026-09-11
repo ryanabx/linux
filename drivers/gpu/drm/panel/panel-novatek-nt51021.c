@@ -23,6 +23,7 @@ struct novatek_nt51021_variant {
 	int (*init)(struct novatek_nt51021_desc *ctx);
 
 	const struct drm_display_mode *display_mode;
+	unsigned long mode_flags;
 };
 
 struct novatek_nt51021_desc {
@@ -607,6 +608,39 @@ static int boe_tv101wum_nx0_init(struct novatek_nt51021_desc *ctx)
 	return dsi_ctx.accum_err;
 }
 
+static int boe_tv101wum_nm0_init(struct novatek_nt51021_desc *ctx)
+{
+	struct mipi_dsi_multi_context dsi_ctx = { .dsi = ctx->dsi };
+
+	mipi_dsi_generic_write_seq_multi(&dsi_ctx, 0x8f, 0xa5);
+	mipi_dsi_usleep_range(&dsi_ctx, 1000, 2000);
+	mipi_dsi_generic_write_seq_multi(&dsi_ctx, 0x01, 0x00);
+	mipi_dsi_msleep(&dsi_ctx, 20);
+	mipi_dsi_generic_write_seq_multi(&dsi_ctx, 0x8f, 0xa5);
+	mipi_dsi_usleep_range(&dsi_ctx, 1000, 2000);
+	mipi_dsi_generic_write_seq_multi(&dsi_ctx, 0x83, 0x00);
+	mipi_dsi_generic_write_seq_multi(&dsi_ctx, 0x84, 0x00);
+	mipi_dsi_generic_write_seq_multi(&dsi_ctx, 0x8c, 0x80);
+	mipi_dsi_generic_write_seq_multi(&dsi_ctx, 0xcd, 0x6c);
+	mipi_dsi_generic_write_seq_multi(&dsi_ctx, 0xc0, 0x8b);
+	mipi_dsi_generic_write_seq_multi(&dsi_ctx, 0xc8, 0xf0);
+	mipi_dsi_generic_write_seq_multi(&dsi_ctx, 0x97, 0x00);
+	mipi_dsi_generic_write_seq_multi(&dsi_ctx, 0x8b, 0x10);
+	mipi_dsi_generic_write_seq_multi(&dsi_ctx, 0xa9, 0x20);
+	mipi_dsi_generic_write_seq_multi(&dsi_ctx, 0x83, 0xaa);
+	mipi_dsi_generic_write_seq_multi(&dsi_ctx, 0x84, 0x11);
+	mipi_dsi_generic_write_seq_multi(&dsi_ctx, 0xa9, 0x4b);
+	mipi_dsi_generic_write_seq_multi(&dsi_ctx, 0x85, 0x04);
+	mipi_dsi_generic_write_seq_multi(&dsi_ctx, 0x86, 0x08);
+	mipi_dsi_generic_write_seq_multi(&dsi_ctx, 0x9c, 0x10);
+	mipi_dsi_dcs_exit_sleep_mode_multi(&dsi_ctx);
+	mipi_dsi_msleep(&dsi_ctx, 120);
+	mipi_dsi_generic_write_seq_multi(&dsi_ctx, 0x8f, 0x00);
+	mipi_dsi_msleep(&dsi_ctx, 5);
+
+	return dsi_ctx.accum_err;
+}
+
 static int nt51021_novatek_off(struct novatek_nt51021_desc *ctx)
 {
 	struct mipi_dsi_multi_context dsi_ctx = { .dsi = ctx->dsi };
@@ -713,8 +747,7 @@ static int nt51021_novatek_probe(struct mipi_dsi_device *dsi)
 
 	dsi->lanes = 4;
 	dsi->format = MIPI_DSI_FMT_RGB888;
-	dsi->mode_flags = MIPI_DSI_MODE_VIDEO | MIPI_DSI_MODE_VIDEO_BURST |
-			  MIPI_DSI_MODE_NO_EOT_PACKET | MIPI_DSI_MODE_LPM;
+	dsi->mode_flags = ctx->variant->mode_flags;
 
 	ctx->panel.prepare_prev_first = true;
 
@@ -744,6 +777,21 @@ static const struct drm_display_mode boe_tv080wum_nx2_mode = {
 	.type = DRM_MODE_TYPE_DRIVER,
 };
 
+static const struct drm_display_mode boe_tv101wum_nm0_mode = {
+	.clock = 163333,
+	.hdisplay = 1200,
+	.hsync_start = 1200 + 110,
+	.hsync_end = 1200 + 110 + 1,
+	.htotal = 1200 + 110 + 1 + 32,
+	.vdisplay = 1920,
+	.vsync_start = 1920 + 11,
+	.vsync_end = 1920 + 11 + 1,
+	.vtotal = 1920 + 11 + 1 + 14,
+	.width_mm = 135,
+	.height_mm = 216,
+	.type = DRM_MODE_TYPE_DRIVER,
+};
+
 static const struct drm_display_mode boe_tv101wum_nx0_mode = {
 	.clock = (1200 + 172 + 4 + 32) * (1920 + 25 + 1 + 14) * 60 / 1000,
 	.hdisplay = 1200,
@@ -759,18 +807,32 @@ static const struct drm_display_mode boe_tv101wum_nx0_mode = {
 	.type = DRM_MODE_TYPE_DRIVER,
 };
 
+#define NT51021_BURST_MODE_FLAGS	(MIPI_DSI_MODE_VIDEO | \
+					 MIPI_DSI_MODE_VIDEO_BURST | \
+					 MIPI_DSI_MODE_NO_EOT_PACKET | \
+					 MIPI_DSI_MODE_LPM)
+
 static const struct novatek_nt51021_variant boe_tv080wum_nx2_data = {
 	.init = boe_tv080wum_nx2_init,
 	.display_mode = &boe_tv080wum_nx2_mode,
+	.mode_flags = NT51021_BURST_MODE_FLAGS,
+};
+
+static const struct novatek_nt51021_variant boe_tv101wum_nm0_data = {
+	.init = boe_tv101wum_nm0_init,
+	.display_mode = &boe_tv101wum_nm0_mode,
+	.mode_flags = MIPI_DSI_MODE_VIDEO | MIPI_DSI_MODE_LPM,
 };
 
 static const struct novatek_nt51021_variant boe_tv101wum_nx0_data = {
 	.init = boe_tv101wum_nx0_init,
 	.display_mode = &boe_tv101wum_nx0_mode,
+	.mode_flags = NT51021_BURST_MODE_FLAGS,
 };
 
 static const struct of_device_id nt51021_novatek_of_match[] = {
 	{ .compatible = "boe,tv080wum-nx2", .data = &boe_tv080wum_nx2_data },
+	{ .compatible = "boe,tv101wum-nm0", .data = &boe_tv101wum_nm0_data },
 	{ .compatible = "boe,tv101wum-nx0", .data = &boe_tv101wum_nx0_data },
 	{ /* sentinel */ }
 };
