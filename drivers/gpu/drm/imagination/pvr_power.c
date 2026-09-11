@@ -99,11 +99,11 @@ pvr_power_fw_disable(struct pvr_device *pvr_dev, bool hard_reset, bool rpm_suspe
 
 		err = pvr_power_request_idle(pvr_dev);
 		if (err)
-			return err;
+			goto err_requeue_watchdog;
 
 		err = pvr_power_request_pwr_off(pvr_dev);
 		if (err)
-			return err;
+			goto err_requeue_watchdog;
 	}
 
 	if (rpm_suspend) {
@@ -112,8 +112,23 @@ pvr_power_fw_disable(struct pvr_device *pvr_dev, bool hard_reset, bool rpm_suspe
 	}
 
 	err = pvr_fw_stop(pvr_dev);
-	if (err && rpm_suspend)
-		enable_irq(pvr_dev->irq);
+	if (err) {
+		if (rpm_suspend)
+			enable_irq(pvr_dev->irq);
+		if (!hard_reset)
+			goto err_requeue_watchdog;
+	}
+
+	return err;
+
+err_requeue_watchdog:
+	/*
+	 * The watchdog was cancelled above and nothing else restarts it until
+	 * pvr_power_fw_enable() runs, which on this path it never will. Put it
+	 * back, or the firmware is left running with no stall detection.
+	 */
+	queue_delayed_work(pvr_dev->sched_wq, &pvr_dev->watchdog.work,
+			   msecs_to_jiffies(WATCHDOG_TIME_MS));
 
 	return err;
 }
