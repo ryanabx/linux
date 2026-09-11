@@ -1998,6 +1998,44 @@
 	};
 };
 
+&scpsys {
+	/*
+	 * Suspend-to-RAM. This board's firmware is PSCI 0.2, which predates
+	 * SYSTEM_SUSPEND, so the kernel is never given platform_suspend_ops
+	 * and /sys/power/mem_sleep offers only s2idle. mtk-spm-suspend drives
+	 * the SPM from the kernel instead, the way the vendor kernel does.
+	 *
+	 * This is deliberately a board property rather than something in
+	 * mt8173.dtsi: mt8173-elm and mt8173-oak ship ARM Trusted Firmware,
+	 * where BL31 does this same work at EL3, and adding the node there
+	 * would put two suspend implementations on the same hardware.
+	 */
+	spm_suspend: spm-suspend {
+		compatible = "mediatek,mt8173-spm-suspend";
+
+		/* SPM IRQ0, as the vendor's scpsys node has it (155..160). */
+		interrupts = <GIC_SPI 155 IRQ_TYPE_LEVEL_LOW>;
+
+		/* MP0_AXI_CONFIG, for ACINACTM around the WFI */
+		mediatek,mcucfg = <&mcucfg>;
+
+		/*
+		 * The rails feeding the still-powered CPU must not follow
+		 * SRCLKEN down while the SoC is asleep.
+		 */
+		mediatek,pmic = <&pmic>;
+
+		/*
+		 * fscp_ck is parked on the crystal for the duration, because
+		 * the SPM stops the PLL it normally runs from.
+		 */
+		clocks = <&topckgen CLK_TOP_SCP_SEL>,
+			 <&topckgen CLK_TOP_SYSPLL1_D2>,
+			 <&clk26m>;
+		clock-names = "scp_sel", "syspll1_d2", "clk26m";
+	};
+};
+
 /* Peripheral only: the single micro-B port is also the charger input. */
 &ssusb {
 	vusb33-supply = <&mt6397_vusb_reg>;
