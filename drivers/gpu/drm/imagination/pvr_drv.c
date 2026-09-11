@@ -1472,12 +1472,25 @@ static void pvr_remove(struct platform_device *plat_dev)
 	WARN_ON(!xa_empty(&pvr_dev->job_ids));
 	WARN_ON(!xa_empty(&pvr_dev->free_list_ids));
 
+	/*
+	 * Power the GPU down while the device is still plugged. The runtime
+	 * suspend path takes drm_dev_enter(), so once the device is unplugged
+	 * it answers -EIO and leaves the firmware running.
+	 */
+	pm_runtime_suspend(drm_dev->dev);
+
+	/*
+	 * Unplug before tearing anything down. drm_dev_unplug() makes every
+	 * later drm_dev_enter() fail and waits for the sections already in
+	 * flight, so an ioctl cannot still be walking the structures freed
+	 * below.
+	 */
+	drm_dev_unplug(drm_dev);
+
 	xa_destroy(&pvr_dev->job_ids);
 	xa_destroy(&pvr_dev->free_list_ids);
 
-	pm_runtime_suspend(drm_dev->dev);
 	pvr_device_fini(pvr_dev);
-	drm_dev_unplug(drm_dev);
 	pvr_watchdog_fini(pvr_dev);
 	pvr_queue_device_fini(pvr_dev);
 	pvr_context_device_fini(pvr_dev);
