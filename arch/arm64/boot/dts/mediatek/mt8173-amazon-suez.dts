@@ -115,6 +115,20 @@
 		enable-active-high;
 	};
 
+	sound {
+		compatible = "mediatek,mt8173-mt6391";
+		mediatek,audio-codec = <&mt6397codec>;
+		/*
+		 * Capture comes from the RT5514 over I2S2, not from the MT6397.
+		 * The AFE carries that stream to I17/I18 -> O09/O10 -> VUL;
+		 * this adds the back end that lets that leg power up.
+		 */
+		mediatek,capture-codec = <&rt5514>;
+		mediatek,platform = <&afe>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&audio_pins_default>;
+	};
+
 	reserved-memory {
 		#address-cells = <2>;
 		#size-cells = <2>;
@@ -379,6 +393,22 @@
 };
 
 &pio {
+	/*
+	 * I2S2, which is how the RT5514 delivers the internal microphones.
+	 * The pins are the I2S0 group muxed to their I2S2 functions, exactly
+	 * as suez_dvt.dts's audio_pins_default does. MCK is included because
+	 * the RT5514 takes its 12.288 MHz master clock from the SoC.
+	 */
+	audio_pins_default: audio-default-pins {
+		pins-i2s2 {
+			pinmux = <MT8173_PIN_128_I2S0_LRCK__FUNC_I2S2_WS>,
+				 <MT8173_PIN_129_I2S0_BCK__FUNC_I2S2_BCK>,
+				 <MT8173_PIN_130_I2S0_MCK__FUNC_I2S2_MCK>,
+				 <MT8173_PIN_132_I2S0_DATA1__FUNC_I2S2_DI_2>;
+			bias-pull-down;
+		};
+	};
+
 	charger_pins: charger-pins {
 		pins-int {
 			pinmux = <MT8173_PIN_9_EINT9__FUNC_GPIO9>;
