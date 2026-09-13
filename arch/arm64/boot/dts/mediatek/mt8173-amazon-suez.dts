@@ -307,6 +307,12 @@
 		reg = <0 0x40000000 0 0x80000000>;
 	};
 
+	/* USB ID pin on GPIO16 (IDDIG): low means an OTG adapter is attached. */
+	extcon_usb: extcon-usb {
+		compatible = "linux,extcon-usb-gpio";
+		id-gpios = <&pio 16 GPIO_ACTIVE_HIGH>;
+	};
+
 	backlight_enable: regulator-backlight-enable {
 		compatible = "regulator-fixed";
 		regulator-name = "backlight_enable";
@@ -504,6 +510,14 @@
 
 		/* No fuel gauge on this part, so the battery class would read 0/0. */
 		omit-battery-class;
+
+		/*
+		 * The charger's boost converter is the only 5 V source for the
+		 * micro-B port, so this is what powers a USB OTG peripheral.
+		 * The vendor's p0-vbus-mode = <1> ("by charger ic") is the same
+		 * arrangement.
+		 */
+		usb_otg_vbus: usb-otg-vbus { };
 	};
 };
 
@@ -712,6 +726,18 @@
 		pins-int {
 			pinmux = <MT8173_PIN_9_EINT9__FUNC_GPIO9>;
 			input-enable;
+			bias-pull-up;
+		};
+	};
+
+	/*
+	 * The port's ID pin. Pulled up so it floats high (peripheral) with
+	 * nothing or a plain cable attached, and reads low only when an OTG
+	 * adapter grounds it, as on mt8173-evb.
+	 */
+	usb_id_pins: usb-id-pins {
+		pins-iddig {
+			pinmux = <MT8173_PIN_16_IDDIG__FUNC_IDDIG>;
 			bias-pull-up;
 		};
 	};
@@ -1415,11 +1441,25 @@
 	};
 };
 
-/* Peripheral only: the single micro-B port is also the charger input. */
+/*
+ * The single micro-B port is the charger input and the only USB port. It is
+ * dual-role: peripheral by default, and host when an OTG adapter grounds the
+ * ID pin, with the charger's boost converter sourcing VBUS. The vendor kernel
+ * detected the role the same way (otg-mode = <1>, "iddig-eint").
+ */
 &ssusb {
 	vusb33-supply = <&mt6397_vusb_reg>;
-	dr_mode = "peripheral";
+	vbus-supply = <&usb_otg_vbus>;
+	extcon = <&extcon_usb>;
+	dr_mode = "otg";
 	maximum-speed = "high-speed";
+	pinctrl-names = "default";
+	pinctrl-0 = <&usb_id_pins>;
+	status = "okay";
+};
+
+&usb_host {
+	vusb33-supply = <&mt6397_vusb_reg>;
 	status = "okay";
 };
 
