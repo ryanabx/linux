@@ -1487,11 +1487,17 @@ static void pvr_remove(struct platform_device *plat_dev)
 	 */
 	drm_dev_unplug(drm_dev);
 
+	/*
+	 * Stop the watchdog before anything it looks at is freed.
+	 * pvr_power_fw_disable() requeues it on its error paths, so it can
+	 * still be armed here.
+	 */
+	pvr_watchdog_fini(pvr_dev);
+
 	xa_destroy(&pvr_dev->job_ids);
 	xa_destroy(&pvr_dev->free_list_ids);
 
 	pvr_device_fini(pvr_dev);
-	pvr_watchdog_fini(pvr_dev);
 	pvr_queue_device_fini(pvr_dev);
 	pvr_context_device_fini(pvr_dev);
 	pvr_power_domains_fini(pvr_dev);
