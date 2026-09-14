@@ -302,6 +302,42 @@
 		};
 	};
 
+	/*
+	 * Three board-skin thermistors on the SoC AUXADC, the vendor's
+	 * amazon,virtual_sensor_thermistor nodes. The vendor property
+	 * aux_channel_num = <0>, <1>, <2> is not an ADC channel but an index
+	 * into its thermal driver's bts_channel_param[] table, which maps the
+	 * three to AUXADC channels 0, 1 and 12. Each is a 10 kOhm-at-25C NTC
+	 * (the vendor's AP_NTC_10 table, TSM0A103F34D1RZ) under a 39 kOhm
+	 * pull-up to 1.8 V; mainline's ncp15xh103 curve agrees with that table
+	 * to within 0.1 C over 0-80 C. Plain hwmon sensors: the vendor's
+	 * weighted "virtual sensor" skin model on top of them is not carried,
+	 * and nothing here is a thermal zone.
+	 */
+	thermistor-0 {
+		compatible = "murata,ncp15xh103";
+		io-channels = <&auxadc 0>;
+		pullup-uv = <1800000>;
+		pullup-ohm = <39000>;
+		pulldown-ohm = <0>;
+	};
+
+	thermistor-1 {
+		compatible = "murata,ncp15xh103";
+		io-channels = <&auxadc 1>;
+		pullup-uv = <1800000>;
+		pullup-ohm = <39000>;
+		pulldown-ohm = <0>;
+	};
+
+	thermistor-2 {
+		compatible = "murata,ncp15xh103";
+		io-channels = <&auxadc 12>;
+		pullup-uv = <1800000>;
+		pullup-ohm = <39000>;
+		pulldown-ohm = <0>;
+	};
+
 	memory@40000000 {
 		device_type = "memory";
 		reg = <0 0x40000000 0 0x80000000>;
