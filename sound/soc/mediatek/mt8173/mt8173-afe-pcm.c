@@ -766,9 +766,11 @@ static struct snd_soc_dai_driver mt8173_afe_hdmi_dais[] = {
 
 static const struct snd_kcontrol_new mt8173_afe_o03_mix[] = {
 	SOC_DAPM_SINGLE_AUTODISABLE("I05 Switch", AFE_CONN1, 21, 1, 0),
+	SOC_DAPM_SINGLE_AUTODISABLE("I06 Switch", AFE_CONN1, 22, 1, 0),
 };
 
 static const struct snd_kcontrol_new mt8173_afe_o04_mix[] = {
+	SOC_DAPM_SINGLE_AUTODISABLE("I05 Switch", AFE_CONN2, 5, 1, 0),
 	SOC_DAPM_SINGLE_AUTODISABLE("I06 Switch", AFE_CONN2, 6, 1, 0),
 };
 
@@ -817,6 +819,8 @@ static const struct snd_soc_dapm_route mt8173_afe_pcm_routes[] = {
 	{"I17", NULL, "I2S Capture"},
 	{"I18", NULL, "I2S Capture"},
 	{ "O03", "I05 Switch", "I05" },
+	{ "O03", "I06 Switch", "I06" },
+	{ "O04", "I05 Switch", "I05" },
 	{ "O04", "I06 Switch", "I06" },
 	{ "O09", "I17 Switch", "I17" },
 	{ "O09", "I03 Switch", "I03" },
