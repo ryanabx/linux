@@ -7,6 +7,7 @@
 
 /dts-v1/;
 #include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/iio/adc/mediatek,mt6397-auxadc.h>
 #include <dt-bindings/input/input.h>
 #include "mt8173.dtsi"
 
@@ -63,6 +64,148 @@
 			/* Scanlines are padded to 1216 px; a wrong stride shears the image. */
 			stride = <(1216 * 4)>;
 			format = "a8r8g8b8";
+		};
+	};
+
+	/*
+	 * The pack. Everything the gauge needs is on the fuel-gauge node below;
+	 * this node carries only what the power-supply core reads for the
+	 * generic properties. The figures are the vendor's for the Desay cell
+	 * this unit is fitted with (IDME productid2 0831 = BATTERY_ID_DSY;
+	 * ATL units read 0841), from suez_bat_setting.dtsi battery_dsy_setting:
+	 * q_max_pos_25 and the 25 C profile's end points. Nothing here is
+	 * measured on this board.
+	 */
+	battery: battery {
+		compatible = "simple-battery";
+		device-chemistry = "lithium-ion";
+		voltage-min-design-microvolt = <3352000>;
+		voltage-max-design-microvolt = <4321000>;
+		charge-full-design-microamp-hours = <6348000>;
+		constant-charge-voltage-max-microvolt = <4352000>;
+
+		/*
+		 * The vendor's characterisation of the Desay cell, from
+		 * suez_bat_setting.dtsi battery_dsy_setting, taken at -10, 0,
+		 * 10, 25 and 50 C (its t0, t1, t1_5, t2 and t3).
+		 *
+		 * The vendor spells its curves as depth of discharge against
+		 * millivolts, and indexes them by charge rather than by
+		 * percentage: a row is a fixed 54 mAh step, so the percentage it
+		 * carries is round(row * 54 * 100 / Qmax) and about one row in
+		 * six repeats the percentage before it. Resampled here onto the
+		 * percentage itself, averaging the rows that share one, at 1 %
+		 * below 15 % and 3 % above it - finer where the curve is steep.
+		 * Against the vendor's own 120 rows that is worth at most one
+		 * point of reported capacity, which is less than those rows
+		 * disagree among themselves between two characterisation
+		 * temperatures.
+		 */
+		ocv-capacity-celsius = <(-10) 0 10 25 50>;
+		ocv-capacity-table-0 =
+				<4275000 100>, <4252000 99>, <4215000 96>,
+				<4177000 93>, <4149000 90>, <4121000 87>,
+				<4092000 84>, <4076000 81>, <4030000 78>,
+				<3982000 75>, <3959000 72>, <3945000 69>,
+				<3929000 66>, <3901000 63>, <3879000 60>,
+				<3860000 57>, <3843000 54>, <3833000 51>,
+				<3823000 48>, <3811000 45>, <3803000 42>,
+				<3796000 39>, <3789000 36>, <3782000 33>,
+				<3776000 30>, <3769000 27>, <3756000 24>,
+				<3746000 21>, <3736000 18>, <3716000 15>,
+				<3711000 14>, <3704000 13>, <3697000 12>,
+				<3694000 11>, <3693000 10>, <3692000 9>,
+				<3691000 8>, <3689000 7>, <3686000 6>,
+				<3676000 5>, <3651000 4>, <3613000 3>,
+				<3565000 2>, <3504000 1>, <3419000 0>;
+		ocv-capacity-table-1 =
+				<4287000 100>, <4267000 99>, <4225000 96>,
+				<4192000 93>, <4166000 90>, <4130000 87>,
+				<4105000 84>, <4084000 81>, <4055000 78>,
+				<4003000 75>, <3969000 72>, <3956000 69>,
+				<3940000 66>, <3923000 63>, <3894000 60>,
+				<3867000 57>, <3850000 54>, <3832000 51>,
+				<3822000 48>, <3812000 45>, <3802000 42>,
+				<3796000 39>, <3789000 36>, <3786000 33>,
+				<3783000 30>, <3779000 27>, <3773000 24>,
+				<3761000 21>, <3750000 18>, <3730000 15>,
+				<3725000 14>, <3719000 13>, <3712000 12>,
+				<3706000 11>, <3704000 10>, <3701000 9>,
+				<3698000 8>, <3695000 7>, <3692000 6>,
+				<3685000 5>, <3670000 4>, <3639000 3>,
+				<3565000 2>, <3457000 1>, <3335000 0>;
+		ocv-capacity-table-2 =
+				<4309000 100>, <4292000 99>, <4248000 96>,
+				<4219000 93>, <4188000 90>, <4156000 87>,
+				<4129000 84>, <4095000 81>, <4080000 78>,
+				<4037000 75>, <3994000 72>, <3967000 69>,
+				<3958000 66>, <3942000 63>, <3917000 60>,
+				<3884000 57>, <3860000 54>, <3846000 51>,
+				<3830000 48>, <3820000 45>, <3808000 42>,
+				<3801000 39>, <3791000 36>, <3786000 33>,
+				<3780000 30>, <3776000 27>, <3770000 24>,
+				<3758000 21>, <3749000 18>, <3729000 15>,
+				<3725000 14>, <3719000 13>, <3711000 12>,
+				<3705000 11>, <3702000 10>, <3699000 9>,
+				<3698000 8>, <3697000 7>, <3694000 6>,
+				<3686000 5>, <3681000 4>, <3632000 3>,
+				<3561000 2>, <3495000 1>, <3400000 0>;
+		ocv-capacity-table-3 =
+				<4321000 100>, <4304000 99>, <4260000 96>,
+				<4231000 93>, <4194000 90>, <4167000 87>,
+				<4131000 84>, <4104000 81>, <4073000 78>,
+				<4058000 75>, <4002000 72>, <3976000 69>,
+				<3966000 66>, <3946000 63>, <3924000 60>,
+				<3895000 57>, <3863000 54>, <3843000 51>,
+				<3831000 48>, <3817000 45>, <3808000 42>,
+				<3798000 39>, <3791000 36>, <3783000 33>,
+				<3777000 30>, <3767000 27>, <3759000 24>,
+				<3747000 21>, <3739000 18>, <3721000 15>,
+				<3716000 14>, <3712000 13>, <3702000 12>,
+				<3693000 11>, <3691000 10>, <3691000 9>,
+				<3690000 8>, <3688000 7>, <3685000 6>,
+				<3678000 5>, <3662000 4>, <3628000 3>,
+				<3586000 2>, <3531000 1>, <3460000 0>;
+		ocv-capacity-table-4 =
+				<4337000 100>, <4321000 99>, <4270000 96>,
+				<4238000 93>, <4199000 90>, <4171000 87>,
+				<4135000 84>, <4109000 81>, <4075000 78>,
+				<4051000 75>, <4020000 72>, <3996000 69>,
+				<3972000 66>, <3950000 63>, <3927000 60>,
+				<3902000 57>, <3870000 54>, <3850000 51>,
+				<3834000 48>, <3820000 45>, <3810000 42>,
+				<3799000 39>, <3792000 36>, <3783000 33>,
+				<3777000 30>, <3758000 27>, <3746000 24>,
+				<3733000 21>, <3724000 18>, <3707000 15>,
+				<3702000 14>, <3698000 13>, <3692000 12>,
+				<3682000 11>, <3679000 10>, <3678000 9>,
+				<3678000 8>, <3676000 7>, <3674000 6>,
+				<3666000 5>, <3647000 4>, <3614000 3>,
+				<3572000 2>, <3519000 1>, <3450000 0>;
+	};
+
+	/*
+	 * The pack thermistor, on the PMIC's AUXADC rather than the SoC's,
+	 * under the pull-up the vendor calls rbat_pull_up_r and
+	 * rbat_pull_up_volt. Its 19-point table in suez_bat_setting.dtsi is a
+	 * 47 kOhm-at-25C NTC and agrees with mainline's ncp15wb473 curve to
+	 * within 0.5 C over the -20 to 70 C it covers.
+	 */
+	batt_therm: thermistor-battery {
+		compatible = "murata,ncp15wb473";
+		io-channels = <&pmic_auxadc MT6397_AUXADC_BAT_TEMP>;
+		pullup-uv = <1200000>;
+		pullup-ohm = <24000>;
+		pulldown-ohm = <0>;
+		#thermal-sensor-cells = <0>;
+	};
+
+	thermal-zones {
+		/* Read on demand by the fuel gauge, which does its own polling. */
+		battery-thermal {
+			polling-delay = <0>;
+			polling-delay-passive = <0>;
+			thermal-sensors = <&batt_therm>;
 		};
 	};
 
@@ -513,6 +656,23 @@
 
 		mt6397rtc: rtc {
 			compatible = "mediatek,mt6397-rtc";
+
+			/*
+			 * The first of the RTC's spare bytes, which MediaTek
+			 * documents as the fuel gauge's and the vendor kernel
+			 * uses for exactly that. Seven bits, because the
+			 * eighth is reserved.
+			 */
+			nvmem-layout {
+				compatible = "fixed-layout";
+				#address-cells = <1>;
+				#size-cells = <1>;
+
+				rtc_soc: state-of-charge@0 {
+					reg = <0x0 0x1>;
+					bits = <0 7>;
+				};
+			};
 		};
 
 		mt6397clk: clocks {
@@ -525,6 +685,145 @@
 			mediatek,speaker-mode = <0>;
 			mediatek,adc-warmup-time-us = <10000>;
 			mediatek,dmic-warmup-time-us = <45000>;
+		};
+
+		/*
+		 * The PMIC's auxiliary ADC. It is the only way to read the
+		 * battery voltage on this board: the SoC AUXADC channels are
+		 * board thermistors (the vendor's cust_adc.dtsi describes only
+		 * temperature0/1 plus an RF channel), and the BQ24297 is a
+		 * charger with no ADC, which is why bq24190-battery reports
+		 * neither voltage_now nor capacity. Its ISENSE channel is the pack
+		 * voltage, which is where the vendor measures it on a board with a
+		 * power-path charger, and BAT_TEMP the pack thermistor.
+		 */
+		pmic_auxadc: adc {
+			compatible = "mediatek,mt6397-auxadc";
+			#io-channel-cells = <1>;
+		};
+
+		/*
+		 * The PMIC's fuel gauge, running MediaTek's battery-meter
+		 * algorithm on the hardware coulomb counter, exactly as Fire OS
+		 * did (CONFIG_SOC_BY_HW_FG). Every number below is the vendor's
+		 * own tuning for the Desay pack in this unit, copied from
+		 * suez_bat_setting.dtsi battery_dsy_setting and the suez_1v0
+		 * defaults in mt_bm_data.c; none is measured here. The tables
+		 * are indexed by the battery's ocv-capacity-celsius, so all of
+		 * them are at -10, 0, 10, 25 and 50 C (the vendor's t0, t1,
+		 * t1_5, t2 and t3), and they are resampled onto the same
+		 * percentages as ocv-capacity-table-N, 45 points each.
+		 */
+		fuel_gauge: battery {
+			compatible = "mediatek,mt6397-battery";
+			io-channels = <&pmic_auxadc MT6397_AUXADC_ISENSE>;
+			io-channel-names = "voltage";
+			monitored-battery = <&battery>;
+			nvmem-cells = <&rtc_soc>;
+			nvmem-cell-names = "state-of-charge";
+			power-supplies = <&bq24297>;
+			shunt-resistor-micro-ohms = <10000>;	/* r_fg_value */
+			mediatek,car-tune-value = <101>;
+			mediatek,ocv2cv-transform;
+			/* vendor cv_current 6000, in units of 0.1 mA */
+			mediatek,cv-current-microamp = <600000>;
+			mediatek,poweron-low-capacity-tolerance = <0>;
+			/* q_max_pos_* and q_max_pos_*_h_current */
+			mediatek,qmax-microamp-hours =
+				<5947000 6141000 6210000 6348000 6345000>;
+			mediatek,qmax-high-current-microamp-hours =
+				<5739000 5568000 5936000 6130000 6133000>;
+
+			/*
+			 * The internal resistance the pack has at each point of the
+			 * matching ocv-capacity-table, from the same
+			 * characterisation. battery.yaml has no property for this:
+			 * resistance-temp-table only scales one resistance with
+			 * temperature, and this one varies along the discharge curve
+			 * as well, by more than a factor of two at -10 C. The
+			 * resistance is in microohms, like the voltage beside it and
+			 * like factory-internal-resistance-micro-ohms.
+			 */
+			mediatek,ocv-resistance-table-0 =
+				<4275000 254000>, <4252000 254000>, <4215000 269000>,
+				<4177000 276000>, <4149000 320000>, <4121000 368000>,
+				<4092000 396000>, <4076000 404000>, <4030000 381000>,
+				<3982000 396000>, <3959000 405000>, <3945000 414000>,
+				<3929000 421000>, <3901000 411000>, <3879000 401000>,
+				<3860000 385000>, <3843000 175000>, <3833000 123000>,
+				<3823000 106000>, <3811000 96000>, <3803000 93000>,
+				<3796000 93000>, <3789000 92000>, <3782000 92000>,
+				<3776000 88000>, <3769000 83000>, <3756000 77000>,
+				<3746000 76000>, <3736000 75000>, <3716000 74000>,
+				<3711000 74000>, <3704000 74000>, <3697000 73000>,
+				<3694000 73000>, <3693000 73000>, <3692000 74000>,
+				<3691000 75000>, <3689000 76000>, <3686000 78000>,
+				<3676000 80000>, <3651000 78000>, <3613000 81000>,
+				<3565000 84000>, <3504000 90000>, <3419000 98000>;
+			mediatek,ocv-resistance-table-1 =
+				<4287000 230000>, <4267000 230000>, <4225000 252000>,
+				<4192000 256000>, <4166000 262000>, <4130000 269000>,
+				<4105000 269000>, <4084000 239000>, <4055000 245000>,
+				<4003000 211000>, <3969000 268000>, <3956000 274000>,
+				<3940000 280000>, <3923000 277000>, <3894000 267000>,
+				<3867000 258000>, <3850000 253000>, <3832000 255000>,
+				<3822000 257000>, <3812000 261000>, <3802000 266000>,
+				<3796000 269000>, <3789000 274000>, <3786000 277000>,
+				<3783000 285000>, <3779000 295000>, <3773000 304000>,
+				<3761000 317000>, <3750000 334000>, <3730000 368000>,
+				<3725000 373000>, <3719000 385000>, <3712000 393000>,
+				<3706000 402000>, <3704000 417000>, <3701000 438000>,
+				<3698000 463000>, <3695000 484000>, <3692000 507000>,
+				<3685000 533000>, <3670000 559000>, <3639000 575000>,
+				<3565000 636000>, <3457000 729000>, <3335000 822000>;
+			mediatek,ocv-resistance-table-2 =
+				<4309000 123000>, <4292000 123000>, <4248000 132000>,
+				<4219000 133000>, <4188000 136000>, <4156000 141000>,
+				<4129000 140000>, <4095000 147000>, <4080000 153000>,
+				<4037000 148000>, <3994000 147000>, <3967000 146000>,
+				<3958000 154000>, <3942000 154000>, <3917000 149000>,
+				<3884000 136000>, <3860000 129000>, <3846000 130000>,
+				<3830000 129000>, <3820000 130000>, <3808000 134000>,
+				<3801000 133000>, <3791000 136000>, <3786000 136000>,
+				<3780000 138000>, <3776000 141000>, <3770000 139000>,
+				<3758000 143000>, <3749000 143000>, <3729000 144000>,
+				<3725000 148000>, <3719000 151000>, <3711000 152000>,
+				<3705000 151000>, <3702000 155000>, <3699000 160000>,
+				<3698000 164000>, <3697000 168000>, <3694000 179000>,
+				<3686000 182000>, <3681000 134000>, <3632000 196000>,
+				<3561000 223000>, <3495000 250000>, <3400000 285000>;
+			mediatek,ocv-resistance-table-3 =
+				<4321000 74000>, <4304000 74000>, <4260000 73000>,
+				<4231000 73000>, <4194000 74000>, <4167000 75000>,
+				<4131000 77000>, <4104000 78000>, <4073000 83000>,
+				<4058000 84000>, <4002000 79000>, <3976000 83000>,
+				<3966000 86000>, <3946000 86000>, <3924000 89000>,
+				<3895000 84000>, <3863000 70000>, <3843000 68000>,
+				<3831000 68000>, <3817000 69000>, <3808000 70000>,
+				<3798000 72000>, <3791000 74000>, <3783000 73000>,
+				<3777000 74000>, <3767000 72000>, <3759000 71000>,
+				<3747000 71000>, <3739000 73000>, <3721000 74000>,
+				<3716000 75000>, <3712000 76000>, <3702000 74000>,
+				<3693000 74000>, <3691000 74000>, <3691000 75000>,
+				<3690000 76000>, <3688000 76000>, <3685000 78000>,
+				<3678000 80000>, <3662000 78000>, <3628000 79000>,
+				<3586000 83000>, <3531000 86000>, <3460000 93000>;
+			mediatek,ocv-resistance-table-4 =
+				<4337000 50000>, <4321000 50000>, <4270000 51000>,
+				<4238000 52000>, <4199000 53000>, <4171000 53000>,
+				<4135000 54000>, <4109000 54000>, <4075000 55000>,
+				<4051000 56000>, <4020000 57000>, <3996000 58000>,
+				<3972000 60000>, <3950000 62000>, <3927000 65000>,
+				<3902000 65000>, <3870000 56000>, <3850000 55000>,
+				<3834000 55000>, <3820000 55000>, <3810000 55000>,
+				<3799000 57000>, <3792000 57000>, <3783000 59000>,
+				<3777000 60000>, <3758000 54000>, <3746000 55000>,
+				<3733000 55000>, <3724000 56000>, <3707000 55000>,
+				<3702000 55000>, <3698000 56000>, <3692000 56000>,
+				<3682000 54000>, <3679000 55000>, <3678000 56000>,
+				<3678000 57000>, <3676000 57000>, <3674000 58000>,
+				<3666000 59000>, <3647000 58000>, <3614000 59000>,
+				<3572000 61000>, <3519000 63000>, <3450000 68000>;
 		};
 
 		mt6397pin: pinctrl {
