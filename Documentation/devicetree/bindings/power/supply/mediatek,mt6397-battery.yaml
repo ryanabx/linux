@@ -1,0 +1,156 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/power/supply/mediatek,mt6397-battery.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: MediaTek MT6397 PMIC fuel gauge
+
+maintainers:
+  - Ryan Brue <ryanbrue.dev@gmail.com>
+
+description:
+  The MT6397 PMIC contains a fuel gauge (FGADC) that measures the battery
+  current across a board-provided sense resistor and integrates it in
+  hardware. The driver runs MediaTek's battery-meter algorithm on top of it,
+  which needs the pack characterised at several temperatures. The
+  open-circuit-voltage curves and the temperatures themselves are the generic
+  ocv-capacity-table-N and ocv-capacity-celsius of the monitored battery; the
+  internal resistance along each curve and the capacity at each temperature
+  have no generic property and are given here, indexed the same way. The pack
+  temperature comes from a thermal zone named "battery-thermal", and the state
+  of charge is carried over a reboot in a byte of the PMIC RTC's spare
+  storage. The gauge is a child of the PMIC node.
+
+allOf:
+  - $ref: power-supply.yaml#
+
+properties:
+  compatible:
+    const: mediatek,mt6397-battery
+
+  io-channels:
+    items:
+      - description:
+          Battery voltage, from the PMIC AUXADC's ISENSE channel, which is
+          the one on the pack when the charger sits in the power path.
+
+  io-channel-names:
+    items:
+      - const: voltage
+
+  monitored-battery: true
+
+  nvmem-cells:
+    items:
+      - description:
+          One byte of storage that survives a reboot, which the meter seeds
+          itself from so that the reported capacity does not jump. The MT6397
+          RTC offers its spare bytes for this.
+
+  nvmem-cell-names:
+    items:
+      - const: state-of-charge
+
+  power-supplies:
+    description: The charger, whose status re-anchors the gauge at full.
+
+  shunt-resistor-micro-ohms:
+    description: Value of the current sense resistor fitted on the board.
+    enum: [10000, 20000]
+
+  mediatek,car-tune-value:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    description:
+      Per-board correction of both the current and the charge the gauge
+      reports, in percent. 100 means no correction.
+    default: 100
+
+  mediatek,ocv2cv-transform:
+    type: boolean
+    description:
+      Correct the coulomb-counted state of charge for the load actually
+      drawn, by shrinking the capacity tables in proportion to the average
+      current over mediatek,cv-current-microamp. Present when the pack has
+      been characterised well enough for that to help; it also makes the
+      value kept over a reboot the uncorrected one.
+
+  mediatek,cv-current-microamp:
+    description:
+      The load the pack was characterised at. The meter scales its capacity
+      tables by the ratio of the measured average current to this. It is not
+      the charger's termination current, which is charge-term-current-microamp
+      of the monitored battery.
+    default: 600000
+
+  mediatek,poweron-low-capacity-tolerance:
+    $ref: /schemas/types.yaml#/definitions/uint32
+    description:
+      State of charge in percent below which the value remembered from the
+      previous boot is not trusted unless a charger is present.
+    default: 0
+
+  mediatek,qmax-microamp-hours:
+    description:
+      Capacity of the pack at each temperature in ocv-capacity-celsius, drawn
+      at the characterisation current.
+    minItems: 1
+    maxItems: 20
+
+  mediatek,qmax-high-current-microamp-hours:
+    description:
+      Capacity of the pack at each temperature in ocv-capacity-celsius, drawn
+      at the highest current it was characterised at. Defaults to
+      mediatek,qmax-microamp-hours.
+    minItems: 1
+    maxItems: 20
+
+patternProperties:
+  "^mediatek,ocv-resistance-table-[0-9]+$":
+    $ref: /schemas/types.yaml#/definitions/uint32-matrix
+    description:
+      The internal resistance of the pack at each point of the battery's
+      ocv-capacity-table with the same index, in the same order and with the
+      same number of points. battery.yaml has no property for it, because
+      resistance-temp-table scales a single resistance with temperature,
+      while this one also varies along the discharge curve.
+    maxItems: 128
+    items:
+      items:
+        - description: open circuit voltage in microvolts
+        - description: internal resistance in microohms
+
+required:
+  - compatible
+  - io-channels
+  - io-channel-names
+  - monitored-battery
+  - nvmem-cells
+  - nvmem-cell-names
+  - shunt-resistor-micro-ohms
+  - mediatek,qmax-microamp-hours
+  - mediatek,ocv-resistance-table-0
+
+additionalProperties: false
+
+examples:
+  - |
+    pmic {
+        battery {
+            compatible = "mediatek,mt6397-battery";
+            io-channels = <&pmic_auxadc 0>;
+            io-channel-names = "voltage";
+            monitored-battery = <&pack>;
+            nvmem-cells = <&rtc_soc>;
+            nvmem-cell-names = "state-of-charge";
+            power-supplies = <&charger>;
+            shunt-resistor-micro-ohms = <10000>;
+            mediatek,car-tune-value = <101>;
+            mediatek,cv-current-microamp = <600000>;
+            mediatek,ocv2cv-transform;
+            mediatek,ocv-resistance-table-0 =
+                <4275000 130000>, <3831000 110000>, <3352000 170000>;
+            mediatek,qmax-microamp-hours = <6348000>;
+            mediatek,qmax-high-current-microamp-hours = <6130000>;
+        };
+    };
