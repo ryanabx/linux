@@ -116,6 +116,15 @@
  */
 #define MT6397_BAT_LEARN_MIN_SPAN	85
 
+/*
+ * Where the coulomb count may be pulled onto the curve, and by how much it has
+ * to be out before it is worth doing. Only near empty: the discharge curve is
+ * steep there, so a millivolt of error in the open-circuit voltage is a small
+ * fraction of a percent, where through the flat middle it would be several.
+ */
+#define MT6397_BAT_CALIB_MAX_CAP	15
+#define MT6397_BAT_CALIB_MIN_GAP	5
+
 struct mt6397_bat_point {
 	s32 x;		/* depth of discharge in %, or resistance in mOhm */
 	s32 mv;
@@ -862,6 +871,38 @@ static void mt6397_bat_read_charger(struct mt6397_battery *bat)
 }
 
 /*
+ * Nothing else brings the coulomb count back to the curve. The meter is
+ * re-anchored only at full and at the cut-off, and what it keeps across a
+ * reboot is the counted value, so an error in the slope -- an aged pack
+ * counted against its design capacity -- returns on every cycle. Measured on
+ * this board: ten points high near empty.
+ *
+ * Near empty the open-circuit voltage is the better of the two estimates,
+ * because the curve is steep there, so pull the count onto it -- which is what
+ * sc27xx_fgu_capacity_calibration() does, and for the same reason it does not
+ * try in the flat middle. Not while charging either: the pack polarises the
+ * other way and the voltage reads high.
+ */
+static void mt6397_bat_calibrate(struct mt6397_battery *bat)
+{
+	if (bat->charger_online || bat->charging)
+		return;
+
+	if (bat->cap_by_v > MT6397_BAT_CALIB_MAX_CAP ||
+	    abs(bat->cap_by_v - bat->cap_by_c) < MT6397_BAT_CALIB_MIN_GAP)
+		return;
+
+	dev_info(bat->dev,
+		 "re-anchoring the counter: %d %% counted against %d %% by voltage\n",
+		 bat->cap_by_c, bat->cap_by_v);
+
+	mt6397_bat_meter_reset(bat, bat->cap_by_v);
+	bat->cap_by_c = bat->cap_by_v;
+	if (!bat->ocv2cv)
+		bat->soc = bat->cap_by_v;
+}
+
+/*
  * The displayed percentage, which only ever moves one point at a time and sits
  * at 99 % until the charger reports full.
  */
@@ -962,6 +1003,7 @@ static void mt6397_bat_work(struct work_struct *work)
 
 		mt6397_bat_read_charger(bat);
 		mt6397_bat_meter_run(bat);
+		mt6397_bat_calibrate(bat);
 		mt6397_bat_update_ui(bat);
 
 		dev_dbg(bat->dev,
