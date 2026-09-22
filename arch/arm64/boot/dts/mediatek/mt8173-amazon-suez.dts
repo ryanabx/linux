@@ -366,6 +366,14 @@
 	enable-method = "mediatek,mt8173-smp";
 };
 
+/*
+ * PSCI CPU_SUSPEND does not return on this board's firmware: the core parks
+ * in WFI with its power domain still on, and no interrupt wakes it again.
+ */
+&CPU_SLEEP_0 {
+	status = "disabled";
+};
+
 &dsi0 {
 	status = "okay";
 	#address-cells = <1>;
