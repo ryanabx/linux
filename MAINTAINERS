@@ -16727,6 +16727,13 @@ S:	Maintained
 F:	drivers/iio/adc/mt6397-auxadc.c
 F:	include/dt-bindings/iio/adc/mediatek,mt6397-auxadc.h
 
+MEDIATEK MT6397 PMIC FUEL GAUGE DRIVER
+M:	Ryan Brue <ryanbrue.dev@gmail.com>
+L:	linux-pm@vger.kernel.org
+S:	Maintained
+F:	Documentation/devicetree/bindings/power/supply/mediatek,mt6397-battery.yaml
+F:	drivers/power/supply/mt6397-battery.c
+
 MEDIATEK MT6735 CLOCK & RESET DRIVERS
 M:	Yassine Oudjana <y.oudjana@protonmail.com>
 L:	linux-clk@vger.kernel.org
