@@ -751,3 +751,17 @@
 		interrupt-names = "host-wakeup";
 	};
 };
+
+&sar_target {
+	status = "okay";
+};
+
+&sar_ram {
+	/* The Samsung bootloader takes its boot mode from the end of SAR bank 1 */
+	reboot-mode {
+		compatible = "samsung,espresso-reboot-mode";
+		mode-normal = <0x1>;
+		mode-recovery = <0x2>;
+		mode-download = <0x20>;
+	};
+};
