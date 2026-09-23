@@ -57,6 +57,8 @@ properties:
   "#interrupt-cells":
     const: 2
 
+  system-power-controller: true
+
   rtc:
     type: object
     $ref: /schemas/rtc/rtc.yaml#
