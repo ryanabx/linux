@@ -405,6 +405,7 @@ static int mtk_wdt_probe(struct platform_device *pdev)
 	struct device *dev = &pdev->dev;
 	struct mtk_wdt_dev *mtk_wdt;
 	const struct mtk_wdt_data *wdt_data;
+	u32 priority = 128;
 	int err, irq;
 
 	mtk_wdt = devm_kzalloc(dev, sizeof(*mtk_wdt), GFP_KERNEL);
@@ -441,7 +442,8 @@ static int mtk_wdt_probe(struct platform_device *pdev)
 
 	watchdog_init_timeout(&mtk_wdt->wdt_dev, timeout, dev);
 	watchdog_set_nowayout(&mtk_wdt->wdt_dev, nowayout);
-	watchdog_set_restart_priority(&mtk_wdt->wdt_dev, 128);
+	of_property_read_u32(dev->of_node, "priority", &priority);
+	watchdog_set_restart_priority(&mtk_wdt->wdt_dev, priority);
 
 	watchdog_set_drvdata(&mtk_wdt->wdt_dev, mtk_wdt);
 
