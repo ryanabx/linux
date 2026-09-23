@@ -892,6 +892,8 @@
 		interrupts-extended = <&pio 5 IRQ_TYPE_LEVEL_HIGH>;
 		interrupt-controller;
 		#interrupt-cells = <2>;
+		/* PSCI SYSTEM_OFF never returns on this board's firmware. */
+		system-power-controller;
 
 		mt6397rtc: rtc {
 			compatible = "mediatek,mt6397-rtc";
@@ -1411,4 +1413,9 @@
  */
 &vpu {
 	status = "disabled";
+};
+
+&watchdog {
+	/* Ahead of PSCI (129): its SYSTEM_RESET never returns on this board. */
+	priority = <192>;
 };
