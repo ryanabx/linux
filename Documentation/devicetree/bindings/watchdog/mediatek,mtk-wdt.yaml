@@ -15,6 +15,7 @@ description:
 
 allOf:
   - $ref: watchdog.yaml#
+  - $ref: /schemas/power/reset/restart-handler.yaml#
 
 properties:
   compatible:
@@ -53,6 +54,9 @@ properties:
   interrupts:
     items:
       - description: Watchdog pre-timeout (bark) interrupt
+
+  priority:
+    default: 128
 
   mediatek,disable-extrst:
     description: Disable sending output reset signal
