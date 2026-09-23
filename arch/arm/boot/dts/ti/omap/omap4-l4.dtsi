@@ -1272,8 +1272,8 @@
 			ranges = <0x0 0x4000 0x1000>;
 		};
 
-		target-module@6000 {			/* 0x4a326000, ap 13 28.0 */
-			compatible = "ti,sysc";
+		sar_target: target-module@6000 {	/* 0x4a326000, ap 13 28.0 */
+			compatible = "ti,sysc-omap4-simple", "ti,sysc";
 			status = "disabled";
 			#address-cells = <1>;
 			#size-cells = <1>;
@@ -1281,6 +1281,12 @@
 				 <0x00001000 0x00007000 0x00000400>,
 				 <0x00002000 0x00008000 0x00000800>,
 				 <0x00003000 0x00009000 0x00000400>;
+
+			/* SAR RAM bank 1 */
+			sar_ram: sram@0 {
+				compatible = "ti,omap4-sar-ram", "syscon", "simple-mfd";
+				reg = <0x0 0x1000>;
+			};
 		};
 	};
 };
