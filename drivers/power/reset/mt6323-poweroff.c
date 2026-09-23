@@ -83,12 +83,20 @@ static const struct of_device_id mt6323_pwrc_dt_match[] = {
 };
 MODULE_DEVICE_TABLE(of, mt6323_pwrc_dt_match);
 
+static const struct platform_device_id mt6323_pwrc_id[] = {
+	{ .name = "mt6323-pwrc" },
+	{ .name = "mt6397-pwrc" },
+	{ }
+};
+MODULE_DEVICE_TABLE(platform, mt6323_pwrc_id);
+
 static struct platform_driver mt6323_pwrc_driver = {
 	.probe          = mt6323_pwrc_probe,
 	.driver         = {
 		.name   = "mt6323-pwrc",
 		.of_match_table = mt6323_pwrc_dt_match,
 	},
+	.id_table	= mt6323_pwrc_id,
 };
 
 module_platform_driver(mt6323_pwrc_driver);
