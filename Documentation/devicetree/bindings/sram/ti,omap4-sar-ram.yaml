@@ -1,0 +1,53 @@
+# SPDX-License-Identifier: GPL-2.0-only OR BSD-2-Clause
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/sram/ti,omap4-sar-ram.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: TI OMAP4 SAR RAM
+
+maintainers:
+  - Ryan Brue <ryanbrue.dev@gmail.com>
+
+description:
+  The SAR (save and restore) RAM of OMAP4 SoCs is on-chip RAM in the wakeup
+  domain. It keeps its contents across a warm reset, so boot firmware and the
+  kernel can use it to pass state, for example a reboot mode for the
+  bootloader.
+
+properties:
+  compatible:
+    items:
+      - const: ti,omap4-sar-ram
+      - const: syscon
+      - const: simple-mfd
+
+  reg:
+    maxItems: 1
+
+  reboot-mode:
+    type: object
+    description:
+      Reboot mode for the bootloader, for example a syscon-reboot-mode node
+      or a device specific one such as samsung,espresso-reboot-mode.
+
+required:
+  - compatible
+  - reg
+
+additionalProperties: false
+
+examples:
+  - |
+    sram@4a326000 {
+        compatible = "ti,omap4-sar-ram", "syscon", "simple-mfd";
+        reg = <0x4a326000 0x1000>;
+
+        reboot-mode {
+            compatible = "syscon-reboot-mode";
+            offset = <0xff8>;
+            mode-normal = <0x1>;
+            mode-recovery = <0x2>;
+            mode-download = <0x20>;
+        };
+    };
