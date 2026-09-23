@@ -1291,7 +1291,13 @@ static int smb347_get_battery_info(struct smb347_charger *smb)
 		supply = smb->usb;
 
 	err = power_supply_get_battery_info(supply, &info);
-	if (err == -ENXIO || err == -ENODEV)
+	/*
+	 * No monitored-battery in the firmware node is not an error: fall back
+	 * to the chip's OTP defaults. power_supply_get_battery_info() reports
+	 * that as -ENOENT since it looks the phandle up with
+	 * fwnode_find_reference().
+	 */
+	if (err == -ENXIO || err == -ENODEV || err == -ENOENT)
 		return 0;
 	if (err)
 		return err;
