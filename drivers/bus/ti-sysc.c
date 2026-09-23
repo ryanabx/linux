@@ -3142,6 +3142,7 @@ static int sysc_check_active_timer(struct sysc *ddata)
 
 static const struct of_device_id sysc_match_table[] = {
 	{ .compatible = "simple-bus", },
+	{ .compatible = "simple-mfd", },
 	{ /* sentinel */ },
 };
 
