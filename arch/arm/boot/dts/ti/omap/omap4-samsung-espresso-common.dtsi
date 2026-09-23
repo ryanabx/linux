@@ -596,6 +596,15 @@
 	regulator-always-on;
 };
 
+&vio {
+	/*
+	 * No consumer is known, but if VIO is off at a warm reset, the next
+	 * boot hangs before the kernel gets far. A warm reset doesn't reset
+	 * the TWL6032, so keep it on like the vendor kernel does.
+	 */
+	regulator-always-on;
+};
+
 &ldousb {
 	regulator-min-microvolt = <3300000>;
 	regulator-max-microvolt = <3300000>;
