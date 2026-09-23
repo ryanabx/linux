@@ -70,6 +70,10 @@ static const struct resource mt6397_rtc_resources[] = {
 	DEFINE_RES_IRQ(MT6397_IRQ_RTC),
 };
 
+static const struct resource mt6397_pwrc_resources[] = {
+	DEFINE_RES_MEM(MT6397_RTC_BASE, MT6397_RTC_SIZE),
+};
+
 static const struct resource mt6358_keys_resources[] = {
 	DEFINE_RES_IRQ_NAMED(MT6358_IRQ_PWRKEY, "powerkey"),
 	DEFINE_RES_IRQ_NAMED(MT6358_IRQ_HOMEKEY, "homekey"),
@@ -291,11 +295,19 @@ static const struct mfd_cell mt6397_devs[] = {
 	}
 };
 
+/* Added only when the PMIC is marked as the system power controller. */
+static const struct mfd_cell mt6397_pwrc_cell = {
+	.name = "mt6397-pwrc",
+	.num_resources = ARRAY_SIZE(mt6397_pwrc_resources),
+	.resources = mt6397_pwrc_resources,
+};
+
 struct chip_data {
 	u32 cid_addr;
 	u32 cid_shift;
 	const struct mfd_cell *cells;
 	int cell_size;
+	const struct mfd_cell *pwrc_cell;
 	int (*irq_init)(struct mt6397_chip *chip);
 };
 
@@ -352,6 +364,7 @@ static const struct chip_data mt6397_core = {
 	.cid_shift = 0,
 	.cells = mt6397_devs,
 	.cell_size = ARRAY_SIZE(mt6397_devs),
+	.pwrc_cell = &mt6397_pwrc_cell,
 	.irq_init = mt6397_irq_init,
 };
 
@@ -401,6 +414,11 @@ static int mt6397_probe(struct platform_device *pdev)
 	ret = devm_mfd_add_devices(&pdev->dev, PLATFORM_DEVID_NONE,
 				   pmic_core->cells, pmic_core->cell_size,
 				   NULL, 0, pmic->irq_domain);
+	if (!ret && pmic_core->pwrc_cell &&
+	    of_device_is_system_power_controller(pdev->dev.of_node))
+		ret = devm_mfd_add_devices(&pdev->dev, PLATFORM_DEVID_NONE,
+					   pmic_core->pwrc_cell, 1,
+					   NULL, 0, NULL);
 	if (ret) {
 		irq_domain_remove(pmic->irq_domain);
 		dev_err(&pdev->dev, "failed to add child devices: %d\n", ret);
