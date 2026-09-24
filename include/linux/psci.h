@@ -34,6 +34,14 @@ struct psci_operations {
 
 extern struct psci_operations psci_ops;
 
+/*
+ * Register a platform sequence to run after a successful PSCI CPU_ON, for
+ * firmware that starts a core but does not power the domain it lives in.
+ * arm64 only; there is no matching call for the way down, which a
+ * CPUHP_BP_PREPARE_DYN teardown callback already covers.
+ */
+int psci_set_cpu_power_on(int (*fn)(unsigned int cpu));
+
 struct psci_0_1_function_ids {
 	u32 cpu_suspend;
 	u32 cpu_on;
