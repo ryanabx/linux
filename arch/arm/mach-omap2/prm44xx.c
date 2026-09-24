@@ -90,6 +90,9 @@ static struct prm_reset_src_map omap44xx_prm_reset_src_map[] = {
 	{ -1, -1 },
 };
 
+/* PRM_RSTST as read at boot, see omap44xx_prm_save_reset_sources() */
+static u32 omap44xx_prm_rstst;
+
 /* PRM low-level functions */
 
 /* Read a register in a CM/PRM instance in the PRM module */
@@ -362,6 +365,34 @@ static void omap44xx_prm_enable_io_wakeup(void)
 }
 
 /**
+ * omap44xx_prm_save_reset_sources - save and clear the last reset sources
+ *
+ * The PRM_RSTST bits are sticky: a warm reset only adds bits to the ones
+ * that are already set, and nothing clears them until the next cold reset.
+ * Save the register for omap44xx_prm_read_reset_sources(), and on OMAP4
+ * clear it, so the next boot sees the cause of its own reset only.  The
+ * bootloader of some devices depends on that: the Samsung Galaxy Tab 2
+ * bootloader treats every reset with GLOBAL_COLD_RST set as a power-on and
+ * ignores the reboot mode left in the SAR RAM.
+ */
+static void __init omap44xx_prm_save_reset_sources(void)
+{
+	s32 inst = omap4_prmst_get_prm_dev_inst();
+
+	if (inst == PRM_INSTANCE_UNKNOWN)
+		return;
+
+	omap44xx_prm_rstst = omap4_prm_read_inst_reg(inst, OMAP4_RM_RSTST);
+
+	if (!soc_is_omap44xx())
+		return;
+
+	pr_info("PRM: last reset sources: PRM_RSTST = 0x%08x\n",
+		omap44xx_prm_rstst);
+	omap4_prm_write_inst_reg(omap44xx_prm_rstst, inst, OMAP4_RM_RSTST);
+}
+
+/**
  * omap44xx_prm_read_reset_sources - return the last SoC reset source
  *
  * Return a u32 representing the last reset sources of the SoC.  The
@@ -371,15 +402,7 @@ static u32 omap44xx_prm_read_reset_sources(void)
 {
 	struct prm_reset_src_map *p;
 	u32 r = 0;
-	u32 v;
-	s32 inst = omap4_prmst_get_prm_dev_inst();
-
-	if (inst == PRM_INSTANCE_UNKNOWN)
-		return 0;
-
-
-	v = omap4_prm_read_inst_reg(inst,
-				    OMAP4_RM_RSTST);
+	u32 v = omap44xx_prm_rstst;
 
 	p = omap44xx_prm_reset_src_map;
 	while (p->reg_shift >= 0 && p->std_shift >= 0) {
@@ -815,6 +838,7 @@ int __init omap44xx_prm_init(const struct omap_prcm_init_data *data)
 		prm_features |= PRM_HAS_VOLTAGE;
 
 	omap4_prminst_set_prm_dev_inst(data->device_inst_offset);
+	omap44xx_prm_save_reset_sources();
 
 	/* Add AM437X specific differences */
 	if (of_device_is_compatible(data->np, "ti,am4-prcm")) {
