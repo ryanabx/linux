@@ -47,6 +47,8 @@
 #define CFG_FLOAT_VOLTAGE_FLOAT_MASK		0x3f
 #define CFG_FLOAT_VOLTAGE_THRESHOLD_MASK	0xc0
 #define CFG_FLOAT_VOLTAGE_THRESHOLD_SHIFT	6
+#define CFG_CHARGE_CONTROL			0x04
+#define CFG_CHARGE_CONTROL_APSD_ENABLED		BIT(2)
 #define CFG_STAT				0x05
 #define CFG_STAT_DISABLED			BIT(5)
 #define CFG_STAT_ACTIVE_HIGH			BIT(7)
@@ -99,6 +101,8 @@
 #define CMD_A_OTG_ENABLED			BIT(4)
 #define CMD_A_ALLOW_WRITE			BIT(7)
 #define CMD_B					0x31
+#define CMD_B_HC_MODE				BIT(0)
+#define CMD_B_USB5				BIT(1)
 #define CMD_C					0x33
 
 /* Interrupt Status registers */
@@ -129,6 +133,10 @@
 #define STAT_C_CHG_TERM				BIT(5)
 #define STAT_C_CHARGER_ERROR			BIT(6)
 #define STAT_E					0x3f
+#define STAT_E_USB_MODE_MASK			0x60
+#define STAT_E_USB_MODE_HC			0x00
+#define STAT_E_USB_MODE_USB1			0x20
+#define STAT_E_USB_MODE_USB5			0x40
 
 #define SMB347_MAX_REGISTER			0x3f
 
@@ -494,6 +502,95 @@ static int smb347_set_current_limits(struct smb347_charger *smb)
 	return 0;
 }
 
+/*
+ * smb347_set_usb_apsd - let the charger pick the USB input mode itself
+ * @smb: pointer to smb347 charger instance
+ *
+ * With automatic power source detection (APSD) enabled, the charger selects
+ * the USB5/1/HC mode from the type of port it detects, as it does with its
+ * OTP defaults: 500 mA for a standard downstream port, high-current mode
+ * for chargers. Bootloaders may have disabled it, and then, with register
+ * control of the mode, the input stays in USB1 (100 mA) mode. Enabling it
+ * with the cable attached runs the detection right away. The caller must
+ * have made the configuration registers writable.
+ */
+static int smb347_set_usb_apsd(struct smb347_charger *smb)
+{
+	return regmap_set_bits(smb->regmap, CFG_CHARGE_CONTROL,
+			       CFG_CHARGE_CONTROL_APSD_ENABLED);
+}
+
+/*
+ * smb347_set_usb_input_limit - select the USB input current mode by hand
+ * @smb: pointer to smb347 charger instance
+ * @limit: input current limit in uA
+ *
+ * Disables APSD, which would override the mode, and selects USB1 (100 mA)
+ * mode below 500 mA, USB5 (500 mA) mode below the high-current range, and
+ * otherwise high-current mode with the largest table limit not above
+ * @limit. APSD is enabled again when USB is plugged in the next time. The
+ * caller must have made the configuration registers writable.
+ */
+static int smb347_set_usb_input_limit(struct smb347_charger *smb,
+				      unsigned int limit)
+{
+	unsigned int id = smb->id;
+	unsigned int cmd_b;
+	int ret;
+
+	if (limit < 500000) {
+		cmd_b = 0;
+	} else if (limit < icl_tbl[id][2]) {
+		cmd_b = CMD_B_USB5;
+	} else {
+		ret = current_to_hw(icl_tbl[id], ARRAY_SIZE(icl_tbl[id]), limit);
+		if (ret < 0)
+			return ret;
+
+		ret = regmap_update_bits(smb->regmap, CFG_CURRENT_LIMIT,
+					 CFG_CURRENT_LIMIT_USB_MASK, ret);
+		if (ret < 0)
+			return ret;
+
+		cmd_b = CMD_B_HC_MODE | CMD_B_USB5;
+	}
+
+	ret = regmap_clear_bits(smb->regmap, CFG_CHARGE_CONTROL,
+				CFG_CHARGE_CONTROL_APSD_ENABLED);
+	if (ret < 0)
+		return ret;
+
+	return regmap_update_bits(smb->regmap, CMD_B,
+				  CMD_B_HC_MODE | CMD_B_USB5, cmd_b);
+}
+
+/* Returns the USB input current limit in effect, in uA */
+static int smb347_get_usb_input_limit(struct smb347_charger *smb)
+{
+	unsigned int id = smb->id;
+	unsigned int val;
+	int ret;
+
+	ret = regmap_read(smb->regmap, STAT_E, &val);
+	if (ret < 0)
+		return ret;
+
+	switch (val & STAT_E_USB_MODE_MASK) {
+	case STAT_E_USB_MODE_USB1:
+		return 100000;
+	case STAT_E_USB_MODE_USB5:
+		return 500000;
+	case STAT_E_USB_MODE_HC:
+		ret = regmap_read(smb->regmap, CFG_CURRENT_LIMIT, &val);
+		if (ret < 0)
+			return ret;
+		return hw_to_current(icl_tbl[id], ARRAY_SIZE(icl_tbl[id]),
+				     val & CFG_CURRENT_LIMIT_USB_MASK);
+	default:
+		return -ENODATA;
+	}
+}
+
 static int smb347_set_voltage_limits(struct smb347_charger *smb)
 {
 	int ret;
@@ -697,6 +794,18 @@ static int smb347_set_writable(struct smb347_charger *smb, bool writable,
 	return ret;
 }
 
+/* Called from the interrupt handler when USB has come online */
+static void smb347_usb_plugged(struct smb347_charger *smb)
+{
+	if (smb347_set_writable(smb, true, false))
+		return;
+
+	if (smb347_set_usb_apsd(smb))
+		dev_warn(smb->dev, "failed to enable APSD\n");
+
+	smb347_set_writable(smb, false, false);
+}
+
 static int smb347_hw_init(struct smb347_charger *smb)
 {
 	unsigned int val;
@@ -783,6 +892,12 @@ static int smb347_hw_init(struct smb347_charger *smb)
 	ret = smb347_update_ps_status(smb);
 	if (ret < 0)
 		goto fail;
+
+	if (smb->use_usb) {
+		ret = smb347_set_usb_apsd(smb);
+		if (ret < 0)
+			goto fail;
+	}
 
 	ret = smb347_start_stop_charging(smb);
 
@@ -876,6 +991,8 @@ static irqreturn_t smb347_interrupt(int irq, void *data)
 	 */
 	if (irqstat_e & (IRQSTAT_E_USBIN_UV_IRQ | IRQSTAT_E_DCIN_UV_IRQ)) {
 		if (smb347_update_ps_status(smb) > 0) {
+			if (smb->usb_online)
+				smb347_usb_plugged(smb);
 			smb347_start_stop_charging(smb);
 			if (smb->use_mains)
 				power_supply_changed(smb->mains);
@@ -1154,6 +1271,15 @@ static int smb347_get_property_locked(struct power_supply *psy,
 		val->intval = ret;
 		break;
 
+	case POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT:
+		if (!smb->usb_online)
+			return -ENODATA;
+		ret = smb347_get_usb_input_limit(smb);
+		if (ret < 0)
+			return ret;
+		val->intval = ret;
+		break;
+
 	default:
 		return -EINVAL;
 	}
@@ -1188,6 +1314,45 @@ static enum power_supply_property smb347_properties[] = {
 	POWER_SUPPLY_PROP_CONSTANT_CHARGE_VOLTAGE,
 };
 
+static enum power_supply_property smb347_usb_properties[] = {
+	POWER_SUPPLY_PROP_STATUS,
+	POWER_SUPPLY_PROP_CHARGE_TYPE,
+	POWER_SUPPLY_PROP_ONLINE,
+	POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT,
+	POWER_SUPPLY_PROP_CONSTANT_CHARGE_VOLTAGE,
+	POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT,
+};
+
+static int smb347_set_property(struct power_supply *psy,
+			       enum power_supply_property prop,
+			       const union power_supply_propval *val)
+{
+	struct smb347_charger *smb = power_supply_get_drvdata(psy);
+	int ret;
+
+	if (prop != POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT)
+		return -EINVAL;
+
+	if (val->intval < 0)
+		return -EINVAL;
+
+	ret = smb347_set_writable(smb, true, true);
+	if (ret < 0)
+		return ret;
+
+	ret = smb347_set_usb_input_limit(smb, val->intval);
+
+	smb347_set_writable(smb, false, true);
+
+	return ret;
+}
+
+static int smb347_property_is_writeable(struct power_supply *psy,
+					enum power_supply_property prop)
+{
+	return prop == POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT;
+}
+
 static bool smb347_volatile_reg(struct device *dev, unsigned int reg)
 {
 	switch (reg) {
@@ -1212,6 +1377,7 @@ static bool smb347_readable_reg(struct device *dev, unsigned int reg)
 	case CFG_CHARGE_CURRENT:
 	case CFG_CURRENT_LIMIT:
 	case CFG_FLOAT_VOLTAGE:
+	case CFG_CHARGE_CONTROL:
 	case CFG_STAT:
 	case CFG_PIN:
 	case CFG_THERM:
@@ -1517,8 +1683,10 @@ static const struct power_supply_desc smb347_usb_desc = {
 	.name		= "smb347-usb",
 	.type		= POWER_SUPPLY_TYPE_USB,
 	.get_property	= smb347_get_property,
-	.properties	= smb347_properties,
-	.num_properties	= ARRAY_SIZE(smb347_properties),
+	.set_property	= smb347_set_property,
+	.property_is_writeable = smb347_property_is_writeable,
+	.properties	= smb347_usb_properties,
+	.num_properties	= ARRAY_SIZE(smb347_usb_properties),
 };
 
 static const struct regulator_desc smb347_usb_vbus_regulator_desc = {
