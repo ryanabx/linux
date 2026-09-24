@@ -17,6 +17,21 @@ config MTK_CMDQ
 	  time limitation, such as updating display configuration during the
 	  vblank.
 
+config MTK_CPU_MTCMOS
+	bool "MediaTek MT8173 CPU MTCMOS power sequences"
+	default ARCH_MEDIATEK
+	depends on ARM64 || COMPILE_TEST
+	select MFD_SYSCON
+	help
+	  On MT8173 boards whose firmware is MediaTek's own Android BL31 rather
+	  than upstream ARM Trusted Firmware, PSCI CPU_ON and CPU_OFF leave a
+	  secondary core's MTCMOS power domain alone, so the kernel has to
+	  power it up and down itself around those calls.
+
+	  Say yes here to build those register sequences. They do nothing
+	  unless a board's cpu nodes ask for them; boards that ship ARM Trusted
+	  Firmware are unaffected.
+
 config MTK_DEVAPC
 	tristate "Mediatek Device APC Support"
 	help
