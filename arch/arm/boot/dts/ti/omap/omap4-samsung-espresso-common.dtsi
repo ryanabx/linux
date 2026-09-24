@@ -664,6 +664,11 @@
 	};
 };
 
+/* No keypad matrix: the keys are on GPIOs */
+&keypad {
+	status = "disabled";
+};
+
 &dss {
 	status = "okay";
 
