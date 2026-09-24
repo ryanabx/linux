@@ -125,12 +125,26 @@
 };
 
 &i2c4 {
+	accelerometer@18 {
+		/* orientation 6 (BMA250 position 5) in the vendor kernel */
+		mount-matrix = "-1", "0", "0",
+			       "0", "1", "0",
+			       "0", "0", "-1";
+	};
+
 	light-sensor@23 {
 		compatible = "rohm,bh1721";
 		reg = <0x23>;
 		pinctrl-names = "default";
 		pinctrl-0 = <&als_pins>;
 		reset-gpios = <&gpio2 1 GPIO_ACTIVE_LOW>; /* GPIO_33 */
+	};
+
+	magnetometer@2e {
+		/* orientation 7 (YAS530 position 6) in the vendor kernel */
+		mount-matrix = "0", "1", "0",
+			       "1", "0", "0",
+			       "0", "0", "-1";
 	};
 };
 
