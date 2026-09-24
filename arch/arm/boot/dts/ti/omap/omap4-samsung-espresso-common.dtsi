@@ -20,6 +20,15 @@
 			reg = <0xbef00000 (1024 * 600 * 4)>;
 			no-map;
 		};
+
+		/*
+		 * The last 3 MB belong to the secure monitor on these HS
+		 * devices: the vendor kernel removes them from its memory.
+		 */
+		secure_memory: memory@bfd00000 {
+			reg = <0xbfd00000 0x300000>;
+			no-map;
+		};
 	};
 
 	chosen {
