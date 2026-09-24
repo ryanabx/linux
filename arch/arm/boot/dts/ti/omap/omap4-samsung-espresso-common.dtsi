@@ -229,13 +229,6 @@
 		pinctrl-0 = <&vibrator_default>;
 	};
 
-	gp2a_shunt: current-sense-shunt {
-		compatible = "current-sense-shunt";
-		io-channels = <&gpadc 4>;
-		shunt-resistor-micro-ohms = <24000000>; /* 24 ohms */
-		#io-channel-cells = <0>;
-	};
-
 	led-ir {
 		compatible = "gpio-ir-tx";
 		gpios = <&gpio2 27 GPIO_ACTIVE_HIGH>; /* GPIO_59 */
@@ -668,19 +661,6 @@
 		iovdd-supply = <&ldo5>;
 		reset-gpios = <&gpio5 29 GPIO_ACTIVE_LOW>;
 		interrupts = <&gpio6 10 IRQ_TYPE_EDGE_RISING>;
-	};
-
-	light-sensor@44 {
-		compatible = "sharp,gp2ap002a00f";
-		reg = <0x44>;
-		interrupt-parent = <&gpio1>;
-		interrupts = <1 IRQ_TYPE_EDGE_FALLING>;
-		vdd-supply = <&ldo4>;
-		vio-supply = <&ldo4>;
-		io-channels = <&gp2a_shunt>;
-		io-channel-names = "alsout";
-		sharp,proximity-far-hysteresis = /bits/ 8 <0x40>;
-		sharp,proximity-close-hysteresis = /bits/ 8 <0x20>;
 	};
 };
 
