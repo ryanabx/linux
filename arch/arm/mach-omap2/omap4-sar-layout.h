@@ -20,10 +20,16 @@
 #define SCU_OFFSET0				0xfe4
 #define SCU_OFFSET1				0xfe8
 #define OMAP_TYPE_OFFSET			0xfec
-#define L2X0_SAVE_OFFSET0			0xff0
-#define L2X0_SAVE_OFFSET1			0xff4
-#define L2X0_AUXCTRL_OFFSET			0xff8
-#define L2X0_PREFETCH_CTRL_OFFSET		0xffc
+
+/*
+ * OMAP4 only (PL310). Not at the end of the bank: bootloaders use
+ * 0xff4 and 0xff8 for their reboot reason, e.g. the Samsung Galaxy Tab 2
+ * one, which gets its boot mode from 0xff8.
+ */
+#define L2X0_SAVE_OFFSET0			0xd14
+#define L2X0_SAVE_OFFSET1			0xd18
+#define L2X0_AUXCTRL_OFFSET			0xd1c
+#define L2X0_PREFETCH_CTRL_OFFSET		0xd20
 
 /* CPUx Wakeup Non-Secure Physical Address offsets in SAR_BANK1 */
 #define CPU0_WAKEUP_NS_PA_ADDR_OFFSET		0xa04
