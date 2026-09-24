@@ -16,6 +16,23 @@
 		#size-cells = <1>;
 		ranges;
 
+		/*
+		 * Where the vendor kernel keeps its RAM console. Unbuffered, so
+		 * that a panic's last writes reach the DDR before the reset, and
+		 * with ECC like the vendor console. Not in the linear map, so
+		 * that the uncached mapping is the only one.
+		 */
+		ramoops@a0000000 {
+			compatible = "ramoops";
+			reg = <0xa0000000 0x200000>;
+			no-map;
+			record-size = <0x20000>;
+			console-size = <0x40000>;
+			pmsg-size = <0x20000>;
+			mem-type = <1>;
+			ecc-size = <16>;
+		};
+
 		continuous_splash: framebuffer@bef00000{
 			reg = <0xbef00000 (1024 * 600 * 4)>;
 			no-map;
