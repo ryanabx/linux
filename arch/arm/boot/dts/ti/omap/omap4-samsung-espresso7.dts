@@ -18,6 +18,13 @@
 		default-brightness-level = <2>;
 	};
 
+	gp2a_shunt: current-sense-shunt {
+		compatible = "current-sense-shunt";
+		io-channels = <&gpadc 4>;
+		shunt-resistor-micro-ohms = <24000000>; /* 24 ohms */
+		#io-channel-cells = <0>;
+	};
+
 	panel {
 		compatible = "samsung,ltn070nl01", "panel-lvds";
 		power-supply = <&reg_lcd>;
@@ -66,5 +73,20 @@
 		pinctrl-0 = <&touch_pins>;
 		avdd-supply = <&reg_touch_ldo_en>;
 		vdd-supply = <&ldo6>;
+	};
+};
+
+&i2c4 {
+	light-sensor@44 {
+		compatible = "sharp,gp2ap002a00f";
+		reg = <0x44>;
+		interrupt-parent = <&gpio1>;
+		interrupts = <1 IRQ_TYPE_EDGE_FALLING>;
+		vdd-supply = <&ldo4>;
+		vio-supply = <&ldo4>;
+		io-channels = <&gp2a_shunt>;
+		io-channel-names = "alsout";
+		sharp,proximity-far-hysteresis = /bits/ 8 <0x40>;
+		sharp,proximity-close-hysteresis = /bits/ 8 <0x20>;
 	};
 };
