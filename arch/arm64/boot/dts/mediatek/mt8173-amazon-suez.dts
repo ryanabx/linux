@@ -271,6 +271,11 @@
 		reg = <0 0x40000000 0 0x80000000>;
 	};
 
+	/* This BL31 reports PSCI 0.2, but SYSTEM_RESET and SYSTEM_OFF never return. */
+	psci {
+		compatible = "arm,psci";
+	};
+
 	/* USB ID pin on GPIO16 (IDDIG): low means an OTG adapter is attached. */
 	extcon_usb: extcon-usb {
 		compatible = "linux,extcon-usb-gpio";
@@ -1413,9 +1418,4 @@
  */
 &vpu {
 	status = "disabled";
-};
-
-&watchdog {
-	/* Ahead of PSCI (129): its SYSTEM_RESET never returns on this board. */
-	priority = <192>;
 };
