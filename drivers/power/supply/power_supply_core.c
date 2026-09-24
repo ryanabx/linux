@@ -206,8 +206,14 @@ static int __power_supply_populate_supplied_from(struct power_supply *epsy,
 		if (np == epsy->dev.fwnode) {
 			dev_dbg(&psy->dev, "%s: Found supply : %s\n",
 				psy->desc->name, epsy->desc->name);
-			psy->supplied_from[i-1] = (char *)epsy->desc->name;
-			psy->num_supplies++;
+			/*
+			 * A node can register more than one supply, e.g. mains
+			 * and USB of a charger. They share the entry, and the
+			 * array has one per phandle, so count it only once.
+			 */
+			if (!psy->supplied_from[i - 1])
+				psy->num_supplies++;
+			psy->supplied_from[i - 1] = (char *)epsy->desc->name;
 			fwnode_handle_put(np);
 			break;
 		}
