@@ -196,6 +196,7 @@ static int __power_supply_populate_supplied_from(struct power_supply *epsy,
 {
 	struct power_supply *psy = data;
 	struct fwnode_handle *np;
+	const char *name;
 	int i = 0;
 
 	do {
@@ -207,13 +208,25 @@ static int __power_supply_populate_supplied_from(struct power_supply *epsy,
 			dev_dbg(&psy->dev, "%s: Found supply : %s\n",
 				psy->desc->name, epsy->desc->name);
 			/*
+			 * Keep a copy: the supplier's name can live in a module
+			 * that is unloaded before this supply goes away.
+			 */
+			name = devm_kstrdup_const(&psy->dev, epsy->desc->name,
+						  GFP_KERNEL);
+			if (!name) {
+				fwnode_handle_put(np);
+				return -ENOMEM;
+			}
+			/*
 			 * A node can register more than one supply, e.g. mains
 			 * and USB of a charger. They share the entry, and the
 			 * array has one per phandle, so count it only once.
 			 */
-			if (!psy->supplied_from[i - 1])
+			if (psy->supplied_from[i - 1])
+				devm_kfree(&psy->dev, psy->supplied_from[i - 1]);
+			else
 				psy->num_supplies++;
-			psy->supplied_from[i - 1] = (char *)epsy->desc->name;
+			psy->supplied_from[i - 1] = (char *)name;
 			fwnode_handle_put(np);
 			break;
 		}
