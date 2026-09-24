@@ -36,14 +36,43 @@ static int __init cpu_psci_cpu_prepare(unsigned int cpu)
 	return 0;
 }
 
+/*
+ * Some firmware starts a core but leaves the power domain it lives in to the
+ * OS: CPU_ON succeeds, the entry point is programmed, and the core stays
+ * unpowered. A platform may register the power-up sequence here, to be run
+ * once CPU_ON has returned.
+ *
+ * There is deliberately no hook for the way down. A CPU hotplug teardown
+ * callback in the CPUHP_BP_PREPARE_DYN range already runs on the control CPU
+ * after CPUHP_TEARDOWN_CPU, i.e. after the core is dead, so the platform can
+ * power the domain off from there with no help from this file. Only the
+ * power-up has nowhere to go, because every dynamic hotplug state runs before
+ * CPUHP_BP_KICK_AP and therefore before CPU_ON.
+ */
+static int (*psci_cpu_power_on)(unsigned int cpu) __ro_after_init;
+
+int __init psci_set_cpu_power_on(int (*fn)(unsigned int cpu))
+{
+	if (psci_cpu_power_on)
+		return -EBUSY;
+
+	psci_cpu_power_on = fn;
+
+	return 0;
+}
+
 static int cpu_psci_cpu_boot(unsigned int cpu)
 {
 	phys_addr_t pa_secondary_entry = __pa_symbol(secondary_entry);
 	int err = psci_ops.cpu_on(cpu_logical_map(cpu), pa_secondary_entry);
-	if (err && err != -EPERM)
-		pr_err("failed to boot CPU%d (%d)\n", cpu, err);
 
-	return err;
+	if (err) {
+		if (err != -EPERM)
+			pr_err("failed to boot CPU%d (%d)\n", cpu, err);
+		return err;
+	}
+
+	return psci_cpu_power_on ? psci_cpu_power_on(cpu) : 0;
 }
 
 #ifdef CONFIG_HOTPLUG_CPU
