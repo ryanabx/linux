@@ -63,7 +63,7 @@
 		#address-cells = <1>;
 		#size-cells = <0>;
 
-		fuel-gauge@36 {
+		fuel_gauge: fuel-gauge@36 {
 			compatible = "maxim,max17042";
 			reg = <0x36>;
 			pinctrl-0 = <&fuel_alert_irq>;
