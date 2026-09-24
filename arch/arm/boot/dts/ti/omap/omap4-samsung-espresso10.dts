@@ -7,6 +7,19 @@
 	model = "Samsung Galaxy Tab 2 (10 inch)";
 	compatible = "samsung,espresso10", "ti,omap4430", "ti,omap4";
 
+	/* 7000 mAh pack; charge settings as in the vendor kernel */
+	battery: battery {
+		compatible = "simple-battery";
+		device-chemistry = "lithium-ion-polymer";
+		charge-full-design-microamp-hours = <7000000>;
+		voltage-min-design-microvolt = <3400000>;
+		voltage-max-design-microvolt = <4200000>;
+		constant-charge-voltage-max-microvolt = <4200000>;
+		constant-charge-current-max-microamp = <2200000>;
+		precharge-current-microamp = <250000>;
+		charge-term-current-microamp = <250000>;
+	};
+
 	i2c-gpio5 {
 		smb347: charger@6 {
 			compatible = "summit,smb347";
@@ -18,6 +31,7 @@
 			summit,enable-charge-control = <SMB3XX_CHG_ENABLE_SW>;
 			summit,chip-temperature-threshold-celsius = <120>;
 			summit,usb-current-limit-microamp = <1800000>;
+			monitored-battery = <&battery>;
 		};
 	};
 
@@ -98,4 +112,9 @@
 			syna,sensor-type = <1>;
 		};
 	};
+};
+
+&fuel_gauge {
+	power-supplies = <&smb347>;
+	monitored-battery = <&battery>;
 };
