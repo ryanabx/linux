@@ -32,6 +32,7 @@ snd-soc-omap-abe-twl6040-y := omap-abe-twl6040.o
 snd-soc-ams-delta-y := ams-delta.o
 snd-soc-omap-hdmi-y := omap-hdmi.o
 snd-soc-osk5912-y := osk5912.o
+snd-soc-samsung-espresso-y := samsung-espresso.o
 snd-soc-j721e-evm-y := j721e-evm.o
 
 obj-$(CONFIG_SND_SOC_DAVINCI_EVM) += snd-soc-davinci-evm.o
@@ -43,4 +44,5 @@ obj-$(CONFIG_SND_SOC_OMAP_ABE_TWL6040) += snd-soc-omap-abe-twl6040.o
 obj-$(CONFIG_SND_SOC_OMAP_AMS_DELTA) += snd-soc-ams-delta.o
 obj-$(CONFIG_SND_SOC_OMAP_HDMI) += snd-soc-omap-hdmi.o
 obj-$(CONFIG_SND_SOC_OMAP_OSK5912) += snd-soc-osk5912.o
+obj-$(CONFIG_SND_SOC_OMAP_SAMSUNG_ESPRESSO) += snd-soc-samsung-espresso.o
 obj-$(CONFIG_SND_SOC_J721E_EVM) += snd-soc-j721e-evm.o

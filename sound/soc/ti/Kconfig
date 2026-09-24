@@ -123,6 +123,19 @@ config SND_SOC_OMAP_ABE_TWL6040
 	  - PandaBoardES (4460)
 	  - OMAP5 uEVM
 
+config SND_SOC_OMAP_SAMSUNG_ESPRESSO
+	tristate "SoC Audio support for the Samsung Galaxy Tab 2 (espresso)"
+	depends on ARCH_OMAP4 || COMPILE_TEST
+	depends on I2C && COMMON_CLK
+	select SND_SOC_OMAP_MCBSP
+	select MFD_WM8994
+	select SND_SOC_WM8994
+	help
+	  Say Y or M if you want to add support for SoC audio on the Samsung
+	  Galaxy Tab 2 7.0 and 10.1 (espresso) tablets, which have a WM1811
+	  codec on McBSP3. The machine driver sets up the codec's FLL for
+	  each sample rate and switches the microphone biases.
+
 config SND_SOC_OMAP_AMS_DELTA
 	tristate "SoC Audio support for Amstrad E3 (Delta) videophone"
 	depends on MACH_AMS_DELTA || COMPILE_TEST
