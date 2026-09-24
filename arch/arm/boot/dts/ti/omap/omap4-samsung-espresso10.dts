@@ -123,3 +123,22 @@
 	power-supplies = <&smb347>;
 	monitored-battery = <&battery>;
 };
+
+&i2c4 {
+	light-sensor@23 {
+		compatible = "rohm,bh1721";
+		reg = <0x23>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&als_pins>;
+		reset-gpios = <&gpio2 1 GPIO_ACTIVE_LOW>; /* GPIO_33 */
+	};
+};
+
+&omap4_pmx_core {
+	als_pins: pinmux-als-pins {
+		pinctrl-single,pins = <
+			OMAP4_IOPAD(0x052, PIN_OUTPUT | MUX_MODE3)
+			/* gpmc_ad9.gpio_33 - ALS_INT_18 (BH1721 DVI) */
+		>;
+	};
+};
