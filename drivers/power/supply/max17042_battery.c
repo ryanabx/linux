@@ -1188,6 +1188,30 @@ static irqreturn_t max17042_thread_handler(int id, void *dev)
 	return IRQ_HANDLED;
 }
 
+/*
+ * After a power-on reset of a MAX17042/MAX17047/MAX17050 without platform
+ * config data, set only DesignCap from the monitored battery. FullCAP and the
+ * cell model keep their defaults and the chip learns FullCAP over the next
+ * cycles; an aged pack is reported by FullCAP and not overwritten, as it
+ * would be if FullCAP were programmed from the design value.
+ */
+static int max17042_por_set_design_cap(struct max17042_chip *chip)
+{
+	struct power_supply_battery_info *info = chip->battery->battery_info;
+	u64 data64;
+
+	if (!info || info->charge_full_design_uah <= 0 ||
+	    !chip->enable_current_sense)
+		return 0;
+
+	data64 = (u64)info->charge_full_design_uah * chip->r_sns;
+	do_div(data64, MAX17042_CAPACITY_LSB);
+	if (!data64 || data64 > U16_MAX)
+		return -ERANGE;
+
+	return regmap_write(chip->regmap, MAX17042_DesignCap, data64);
+}
+
 static void max17042_init_worker(struct work_struct *work)
 {
 	struct max17042_chip *chip = container_of(to_delayed_work(work),
@@ -1197,6 +1221,8 @@ static void max17042_init_worker(struct work_struct *work)
 	/* Initialize registers according to values from config_data */
 	if (chip->enable_por_init && chip->config_data)
 		ret = max17042_init_chip(chip);
+	else if (chip->chip_type != MAXIM_DEVICE_TYPE_MAX17055)
+		ret = max17042_por_set_design_cap(chip);
 
 	if (ret) {
 		if (chip->chip_type == MAXIM_DEVICE_TYPE_MAX17055) {
