@@ -56,12 +56,51 @@ properties:
   headset-mic-bias-supply:
     description: Supply for the mic bias of the headset microphone
 
+  headset-detect-gpios:
+    maxItems: 1
+    description: GPIO of the headphone jack's insertion switch (DET_3_5)
+
+  headset-key-gpios:
+    maxItems: 1
+    description: GPIO for headset key presses (EAR_SEND_END)
+
+  io-channels:
+    maxItems: 1
+    description:
+      ADC channel that reads the headset microphone line, for telling 4-pole
+      headsets from headphones and the headset keys apart
+
+  io-channel-names:
+    const: headset-detect
+
+  samsung,headset-4pole-threshold-microvolt:
+    minItems: 2
+    maxItems: 2
+    description:
+      Minimum and maximum ADC value of a 4-pole headset (with microphone);
+      outside of this range headphones are assumed.
+
+  samsung,headset-button-threshold-microvolt:
+    minItems: 3
+    maxItems: 3
+    description:
+      Minimum (inclusive) ADC values of the headset keys, in order "Media",
+      "Volume Up" and "Volume Down".
+
 required:
   - compatible
   - model
   - cpu
   - codec
   - audio-routing
+
+dependencies:
+  headset-detect-gpios:
+    - headset-key-gpios
+    - io-channels
+    - io-channel-names
+    - samsung,headset-4pole-threshold-microvolt
+    - samsung,headset-button-threshold-microvolt
 
 unevaluatedProperties: false
 

@@ -126,7 +126,7 @@ config SND_SOC_OMAP_ABE_TWL6040
 config SND_SOC_OMAP_SAMSUNG_ESPRESSO
 	tristate "SoC Audio support for the Samsung Galaxy Tab 2 (espresso)"
 	depends on ARCH_OMAP4 || COMPILE_TEST
-	depends on I2C && COMMON_CLK
+	depends on I2C && COMMON_CLK && IIO
 	select SND_SOC_OMAP_MCBSP
 	select MFD_WM8994
 	select SND_SOC_WM8994
