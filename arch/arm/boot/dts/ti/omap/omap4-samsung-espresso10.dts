@@ -35,6 +35,46 @@
 		};
 	};
 
+	/*
+	 * The jack GPIOs are in the USIM I/O cell, which the bootloader leaves
+	 * powered down: set USIM_PWRDNZ in CONTROL_USIMIO, as the vendor kernel
+	 * does.
+	 */
+	pinmux@4a31e600 {
+		compatible = "pinctrl-single";
+		reg = <0x4a31e600 4>;	/* CONTROL_USIMIO */
+		#address-cells = <1>;
+		#size-cells = <0>;
+		pinctrl-single,bit-per-mux;
+		pinctrl-single,register-width = <32>;
+		pinctrl-single,function-mask = <0x1>;
+		#pinctrl-cells = <2>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&usim_io_pins>;
+
+		usim_io_pins: usim-io-pins {
+			/*                   offset bits mask */
+			pinctrl-single,bits = <0x00 0x10000000 0x10000000>;
+		};
+	};
+
+	sound {
+		/*
+		 * Thresholds (mV) from the vendor's espresso10 jack zones, but
+		 * 4-pole only up to 2700 mV: the unloaded line (jack empty, or
+		 * a plug not fully in) reads about 2770 mV here, a headset
+		 * about 2080 mV.
+		 */
+		pinctrl-names = "default";
+		pinctrl-0 = <&jack_pins>;
+		headset-detect-gpios = <&gpio1 0 GPIO_ACTIVE_LOW>; /* DET_3_5 */
+		headset-key-gpios = <&gpio1 4 GPIO_ACTIVE_LOW>; /* EAR_SEND_END */
+		io-channels = <&stmpe_adc 0>; /* channel 4 */
+		io-channel-names = "headset-detect";
+		samsung,headset-4pole-threshold-microvolt = <1020 2700>;
+		samsung,headset-button-threshold-microvolt = <0 145 335>;
+	};
+
 	backlight: backlight {
 		compatible = "pwm-backlight";
 		pinctrl-names = "default";
@@ -153,6 +193,17 @@
 		pinctrl-single,pins = <
 			OMAP4_IOPAD(0x052, PIN_OUTPUT | MUX_MODE3)
 			/* gpmc_ad9.gpio_33 - ALS_INT_18 (BH1721 DVI) */
+		>;
+	};
+};
+
+&omap4_pmx_wkup {
+	jack_pins: pinmux-jack-pins {
+		pinctrl-single,pins = <
+			OMAP4_IOPAD(0x040, PIN_INPUT | MUX_MODE3)
+			/* sim_io.gpio_wk0 - DET_3.5 */
+			OMAP4_IOPAD(0x048, PIN_INPUT | MUX_MODE3)
+			/* sim_pwrctrl.gpio_wk4 - EAR_SEND_END */
 		>;
 	};
 };
