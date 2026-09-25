@@ -357,6 +357,17 @@ static int max17042_get_property(struct power_supply *psy,
 		val->intval = data >> 8;
 		break;
 	case POWER_SUPPLY_PROP_CHARGE_FULL_DESIGN:
+		/*
+		 * DesignCap is programmed from the battery info on the MAX17055
+		 * only; on the others it holds whatever the bootloader or a
+		 * platform config left there, so prefer the described battery.
+		 */
+		if (psy->battery_info &&
+		    psy->battery_info->charge_full_design_uah > 0) {
+			val->intval = psy->battery_info->charge_full_design_uah;
+			break;
+		}
+
 		ret = regmap_read(map, MAX17042_DesignCap, &data);
 		if (ret < 0)
 			return ret;
