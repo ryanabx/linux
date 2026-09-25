@@ -610,12 +610,18 @@ static int mt6397_bat_compensate(struct mt6397_battery *bat, int mv)
 	return comp;
 }
 
-static void mt6397_bat_update_temp(struct mt6397_battery *bat)
+/*
+ * @err and @temp_mc are the result of thermal_zone_get_temp(), which the
+ * caller reads before taking bat->lock: the power supply core's own zone for
+ * this battery calls get_property() with its zone lock held, and lockdep
+ * cannot tell one zone's lock from another's.
+ */
+static void mt6397_bat_update_temp(struct mt6397_battery *bat, int err,
+				   int temp_mc)
 {
 	int temp_c, avg, i;
 
-	if (thermal_zone_get_temp(bat->tz, &bat->temp_mc))
-		bat->temp_mc = bat->temp_c * MILLIDEGREE_PER_DEGREE;
+	bat->temp_mc = err ? bat->temp_c * MILLIDEGREE_PER_DEGREE : temp_mc;
 	temp_c = DIV_ROUND_CLOSEST(bat->temp_mc, MILLIDEGREE_PER_DEGREE);
 	bat->temp_c = temp_c;
 
@@ -725,8 +731,6 @@ static int mt6397_bat_transform_dod(struct mt6397_battery *bat, int d)
 static void mt6397_bat_meter_run(struct mt6397_battery *bat)
 {
 	int i, zcv, offset;
-
-	mt6397_bat_update_temp(bat);
 
 	if (mt6397_bat_read_vi(bat))
 		return;
@@ -995,13 +999,16 @@ static void mt6397_bat_work(struct work_struct *work)
 {
 	struct mt6397_battery *bat = container_of(to_delayed_work(work),
 						  struct mt6397_battery, work);
-	int ui_before, status_before;
+	int ui_before, status_before, temp_mc, err;
+
+	err = thermal_zone_get_temp(bat->tz, &temp_mc);
 
 	scoped_guard(mutex, &bat->lock) {
 		ui_before = bat->ui_soc;
 		status_before = bat->status;
 
 		mt6397_bat_read_charger(bat);
+		mt6397_bat_update_temp(bat, err, temp_mc);
 		mt6397_bat_meter_run(bat);
 		mt6397_bat_calibrate(bat);
 		mt6397_bat_update_ui(bat);
@@ -1031,7 +1038,6 @@ static void mt6397_bat_init_soc(struct mt6397_battery *bat)
 {
 	int hw_cap, sw_cap, cap, rtc;
 
-	mt6397_bat_update_temp(bat);
 	mt6397_bat_read_charger(bat);
 
 	if (mt6397_bat_read_vi(bat)) {
@@ -1338,7 +1344,7 @@ static int mt6397_battery_probe(struct platform_device *pdev)
 	struct device *dev = &pdev->dev;
 	struct mt6397_chip *chip = dev_get_drvdata(dev->parent);
 	struct mt6397_battery *bat;
-	int ret;
+	int ret, err, temp_mc;
 
 	bat = devm_kzalloc(dev, sizeof(*bat), GFP_KERNEL);
 	if (!bat)
@@ -1414,8 +1420,12 @@ static int mt6397_battery_probe(struct platform_device *pdev)
 	if (ret)
 		return ret;
 
-	scoped_guard(mutex, &bat->lock)
+	err = thermal_zone_get_temp(bat->tz, &temp_mc);
+
+	scoped_guard(mutex, &bat->lock) {
+		mt6397_bat_update_temp(bat, err, temp_mc);
 		mt6397_bat_init_soc(bat);
+	}
 
 	platform_set_drvdata(pdev, bat);
 	schedule_delayed_work(&bat->work, 0);
