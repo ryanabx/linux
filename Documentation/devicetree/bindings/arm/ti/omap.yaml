@@ -151,6 +151,13 @@ properties:
           - const: ti,omap4430
           - const: ti,omap4
 
+      - description: Samsung Galaxy Tab 2 10.1 "Best Buy" board variant
+        items:
+          - const: samsung,espresso10-bby
+          - const: samsung,espresso10
+          - const: ti,omap4430
+          - const: ti,omap4
+
       - description: OMAP4 PandaBoard Revision A4 and later
         items:
           - const: ti,omap4-panda-a4
