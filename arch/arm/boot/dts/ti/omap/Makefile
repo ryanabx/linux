@@ -82,6 +82,7 @@ dtb-$(CONFIG_ARCH_OMAP4) += \
 	omap4-var-stk-om44.dtb \
 	omap4-samsung-espresso7.dtb \
 	omap4-samsung-espresso10.dtb \
+	omap4-samsung-espresso10-bby.dtb \
 	omap4-xyboard-mz609.dtb \
 	omap4-xyboard-mz617.dtb
 

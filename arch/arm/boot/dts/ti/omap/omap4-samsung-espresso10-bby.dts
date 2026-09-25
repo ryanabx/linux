@@ -1,0 +1,45 @@
+// SPDX-License-Identifier: (GPL-2.0 OR MIT)
+/*
+ * Samsung Galaxy Tab 2 10.1, "Best Buy" board variant (the boards with the IR
+ * blaster, e.g. GT-P5113): the charger and ADC I2C buses are on other pins.
+ */
+/dts-v1/;
+
+#include "omap4-samsung-espresso10.dts"
+
+/ {
+	model = "Samsung Galaxy Tab 2 (10 inch, Best Buy variant)";
+	compatible = "samsung,espresso10-bby", "samsung,espresso10", "ti,omap4430", "ti,omap4";
+
+	i2c-gpio5 {
+		pinctrl-0 = <&i2c5_pins_bby>;
+		sda-gpios = <&gpio4 17 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>; /* GPIO_113 */
+		scl-gpios = <&gpio4 14 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>; /* GPIO_110 */
+	};
+
+	i2c-gpio6 {
+		pinctrl-0 = <&i2c6_pins_bby>;
+		sda-gpios = <&gpio5 9 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>; /* GPIO_137 */
+		scl-gpios = <&gpio5 6 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>; /* GPIO_134 */
+	};
+};
+
+&omap4_pmx_core {
+	i2c5_pins_bby: pinmux-i2c5-bby-pins {
+		pinctrl-single,pins = <
+			OMAP4_IOPAD(0x0fc, PIN_INPUT_PULLUP | MUX_MODE3)
+			/* abe_mcbsp2_fsx.gpio_113 - CHG_SDA */
+			OMAP4_IOPAD(0x0f6, PIN_INPUT_PULLUP | MUX_MODE3)
+			/* abe_mcbsp2_clkx.gpio_110 - CHG_SCL */
+		>;
+	};
+
+	i2c6_pins_bby: pinmux-i2c6-bby-pins {
+		pinctrl-single,pins = <
+			OMAP4_IOPAD(0x138, PIN_INPUT_PULLUP | MUX_MODE3)
+			/* mcspi1_cs0.gpio_137 - ADC_I2C_SDA */
+			OMAP4_IOPAD(0x132, PIN_INPUT_PULLUP | MUX_MODE3)
+			/* mcspi1_clk.gpio_134 - ADC_I2C_SCL */
+		>;
+	};
+};
