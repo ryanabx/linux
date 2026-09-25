@@ -202,6 +202,18 @@ static struct attribute *twl6030_attrs[] = {
 };
 ATTRIBUTE_GROUPS(twl6030);
 
+/* enable the USB LDO once for VBUS or ID; the interrupts can repeat */
+static void twl6030_usb_ldo_on(struct twl6030_usb *twl)
+{
+	if (twl->asleep)
+		return;
+
+	if (regulator_enable(twl->usb3v3))
+		dev_err(twl->dev, "Failed to enable usb3v3\n");
+	else
+		twl->asleep = 1;
+}
+
 static irqreturn_t twl6030_usb_irq(int irq, void *_twl)
 {
 	struct twl6030_usb *twl = _twl;
@@ -215,11 +227,7 @@ static irqreturn_t twl6030_usb_irq(int irq, void *_twl)
 						CONTROLLER_STAT1);
 	if (!(hw_state & STS_USB_ID)) {
 		if (vbus_state & VBUS_DET) {
-			ret = regulator_enable(twl->usb3v3);
-			if (ret)
-				dev_err(twl->dev, "Failed to enable usb3v3\n");
-
-			twl->asleep = 1;
+			twl6030_usb_ldo_on(twl);
 			status = MUSB_VBUS_VALID;
 			twl->linkstat = status;
 			ret = musb_mailbox(status);
@@ -254,11 +262,7 @@ static irqreturn_t twl6030_usbotg_irq(int irq, void *_twl)
 	hw_state = twl6030_readb(twl, TWL6030_MODULE_ID0, STS_HW_CONDITIONS);
 
 	if (hw_state & STS_USB_ID) {
-		ret = regulator_enable(twl->usb3v3);
-		if (ret)
-			dev_err(twl->dev, "Failed to enable usb3v3\n");
-
-		twl->asleep = 1;
+		twl6030_usb_ldo_on(twl);
 		twl6030_writeb(twl, TWL_MODULE_USB, 0x1, USB_ID_INT_EN_HI_CLR);
 		twl6030_writeb(twl, TWL_MODULE_USB, 0x10, USB_ID_INT_EN_HI_SET);
 		status = MUSB_ID_GROUND;
@@ -419,6 +423,8 @@ static void twl6030_usb_remove(struct platform_device *pdev)
 			REG_INT_MSK_STS_C);
 	free_irq(twl->irq1, twl);
 	free_irq(twl->irq2, twl);
+	if (twl->asleep)
+		regulator_disable(twl->usb3v3);
 	regulator_put(twl->usb3v3);
 	cancel_work_sync(&twl->set_vbus_work);
 }
