@@ -76,7 +76,31 @@
 		#address-cells = <1>;
 		#size-cells = <0>;
 
-		/* TODO: STMPE811 ADC at 0x41 */
+		stmpe811: adc@41 {
+			compatible = "st,stmpe811";
+			reg = <0x41>;
+			pinctrl-names = "default";
+			pinctrl-0 = <&stmpe811_pins>;
+			interrupt-parent = <&gpio2>;
+			interrupts = <4 IRQ_TYPE_LEVEL_LOW>; /* GPIO_36 */
+
+			/* vendor ADC setup: 80 clocks, 12 bit, internal reference, 6.5 MHz */
+			st,sample-time = <3>;
+			st,mod-12b = <1>;
+			st,ref-sel = <0>;
+			st,adc-freq = <3>;
+
+			/*
+			 * The vendor kernel uses channels 4-7: headset detection
+			 * (EAR_ADC_35), REMOTE_SENSE, charger type (ADC_CHECK_1)
+			 * and the accessory ID of the 30-pin connector.
+			 */
+			stmpe_adc: adc {
+				compatible = "st,stmpe-adc";
+				st,norequest-mask = <0x0f>;
+				#io-channel-cells = <1>;
+			};
+		};
 	};
 
 	i2c-gpio7 {
@@ -476,6 +500,13 @@
 			/* hdmi_ddc_scl.gpio_65 */
 			OMAP4_IOPAD(0x09e, PIN_INPUT_PULLUP | MUX_MODE3)
 			/* hdmi_ddc_sda.gpio_66 */
+		>;
+	};
+
+	stmpe811_pins: pinmux-stmpe811-pins {
+		pinctrl-single,pins = <
+			OMAP4_IOPAD(0x058, PIN_INPUT_PULLUP | MUX_MODE3)
+			/* gpmc_ad12.gpio_36 - ADC_INT */
 		>;
 	};
 
