@@ -35,6 +35,25 @@
 		};
 	};
 
+	sound {
+		/*
+		 * WIP, polarity unverified: the vendor kernel treats both lines
+		 * as active low (inserted, key pressed), but with the pad muxed
+		 * as GPIO, DET_3_5 reads low while the ADC shows an unloaded
+		 * headset mic line (about 2.78 V with the bias on), i.e. with
+		 * nothing plugged in. Thresholds (mV) from the vendor's
+		 * espresso10 jack zones.
+		 */
+		pinctrl-names = "default";
+		pinctrl-0 = <&jack_pins>;
+		headset-detect-gpios = <&gpio1 0 GPIO_ACTIVE_LOW>; /* DET_3_5 */
+		headset-key-gpios = <&gpio1 4 GPIO_ACTIVE_LOW>; /* EAR_SEND_END */
+		io-channels = <&stmpe_adc 0>; /* channel 4 */
+		io-channel-names = "headset-detect";
+		samsung,headset-4pole-threshold-microvolt = <1020 2800>;
+		samsung,headset-button-threshold-microvolt = <0 145 335>;
+	};
+
 	backlight: backlight {
 		compatible = "pwm-backlight";
 		pinctrl-names = "default";
@@ -153,6 +172,17 @@
 		pinctrl-single,pins = <
 			OMAP4_IOPAD(0x052, PIN_OUTPUT | MUX_MODE3)
 			/* gpmc_ad9.gpio_33 - ALS_INT_18 (BH1721 DVI) */
+		>;
+	};
+};
+
+&omap4_pmx_wkup {
+	jack_pins: pinmux-jack-pins {
+		pinctrl-single,pins = <
+			OMAP4_IOPAD(0x040, PIN_INPUT | MUX_MODE3)
+			/* sim_io.gpio_wk0 - DET_3.5 */
+			OMAP4_IOPAD(0x048, PIN_INPUT | MUX_MODE3)
+			/* sim_pwrctrl.gpio_wk4 - EAR_SEND_END */
 		>;
 	};
 };
