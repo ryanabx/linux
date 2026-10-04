@@ -318,6 +318,16 @@
 		#size-cells = <2>;
 		ranges;
 
+		/*
+		 * The EL2 firmware that provides PSCI 1.0 on this board. LK
+		 * loads it at the kernel load address, ahead of the kernel
+		 * image, and it stays resident for the life of the system.
+		 */
+		firmware@40080000 {
+			reg = <0 0x40080000 0 0x20000>;
+			no-map;
+		};
+
 		/* Not the vendor ram_console at 0x44400000; recovery clears that. */
 		ramoops@90000000 {
 			compatible = "ramoops";
