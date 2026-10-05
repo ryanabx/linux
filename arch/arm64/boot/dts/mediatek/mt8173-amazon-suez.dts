@@ -19,6 +19,7 @@
 		/* Pin the MMC indices; the SD slot otherwise renames the eMMC. */
 		mmc0 = &mmc0;
 		mmc1 = &mmc1;
+		mmc2 = &mmc3;
 
 		serial0 = &uart0;
 	};
@@ -224,6 +225,21 @@
 		regulator-name = "backlight_enable";
 		gpio = <&mt6397pin 14 GPIO_ACTIVE_HIGH>;
 		enable-active-high;
+	};
+
+	/* nothing on the board switches it; the chip's power control is PMU_EN */
+	wifi_fixed_3v3: regulator-wifi {
+		compatible = "regulator-fixed";
+		regulator-name = "wifi_fixed_3v3";
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+		regulator-always-on;
+	};
+
+	wifi_pwrseq: wifi-pwrseq {
+		compatible = "mmc-pwrseq-simple";
+		/* PMU_EN, RST */
+		reset-gpios = <&pio 8 GPIO_ACTIVE_LOW>, <&pio 38 GPIO_ACTIVE_LOW>;
 	};
 
 	sound {
@@ -500,6 +516,25 @@
 	mediatek,hs200-cmd-int-delay = <4>;
 };
 
+/* MediaTek MT6630 Wi-Fi/Bluetooth: function 1 is WLAN, function 2 Bluetooth */
+&mmc3 {
+	status = "okay";
+	pinctrl-names = "default", "state_uhs";
+	pinctrl-0 = <&mmc3_pins_default>;
+	pinctrl-1 = <&mmc3_pins_uhs>;
+	bus-width = <4>;
+	max-frequency = <200000000>;
+	cap-sd-highspeed;
+	cap-sdio-irq;
+	non-removable;
+	/* the chip keeps its ROM patch and firmware in RAM */
+	keep-power-in-suspend;
+	/* one fixed 3.3 V rail; the bus never switches to 1.8 V signalling */
+	vmmc-supply = <&wifi_fixed_3v3>;
+	vqmmc-supply = <&wifi_fixed_3v3>;
+	mmc-pwrseq = <&wifi_pwrseq>;
+};
+
 &pio {
 	/*
 	 * I2S2, which is how the RT5514 delivers the internal microphones.
@@ -633,6 +668,44 @@
 		pins-clk {
 			pinmux = <MT8173_PIN_77_MSDC1_CLK__FUNC_MSDC1_CLK>;
 			drive-strength = <10>;
+			bias-pull-down = <MTK_PUPD_SET_R1R0_10>;
+		};
+	};
+
+	mmc3_pins_default: mmc3-default-pins {
+		pins-cmd-dat {
+			pinmux = <MT8173_PIN_22_MSDC3_DAT0__FUNC_MSDC3_DAT0>,
+				 <MT8173_PIN_23_MSDC3_DAT1__FUNC_MSDC3_DAT1>,
+				 <MT8173_PIN_24_MSDC3_DAT2__FUNC_MSDC3_DAT2>,
+				 <MT8173_PIN_25_MSDC3_DAT3__FUNC_MSDC3_DAT3>,
+				 <MT8173_PIN_27_MSDC3_CMD__FUNC_MSDC3_CMD>;
+			input-enable;
+			drive-strength = <4>;
+			bias-pull-up = <MTK_PUPD_SET_R1R0_10>;
+		};
+
+		pins-clk {
+			pinmux = <MT8173_PIN_26_MSDC3_CLK__FUNC_MSDC3_CLK>;
+			drive-strength = <4>;
+			bias-pull-down = <MTK_PUPD_SET_R1R0_10>;
+		};
+	};
+
+	mmc3_pins_uhs: mmc3-uhs-pins {
+		pins-cmd-dat {
+			pinmux = <MT8173_PIN_22_MSDC3_DAT0__FUNC_MSDC3_DAT0>,
+				 <MT8173_PIN_23_MSDC3_DAT1__FUNC_MSDC3_DAT1>,
+				 <MT8173_PIN_24_MSDC3_DAT2__FUNC_MSDC3_DAT2>,
+				 <MT8173_PIN_25_MSDC3_DAT3__FUNC_MSDC3_DAT3>,
+				 <MT8173_PIN_27_MSDC3_CMD__FUNC_MSDC3_CMD>;
+			input-enable;
+			drive-strength = <4>;
+			bias-pull-up = <MTK_PUPD_SET_R1R0_10>;
+		};
+
+		pins-clk {
+			pinmux = <MT8173_PIN_26_MSDC3_CLK__FUNC_MSDC3_CLK>;
+			drive-strength = <4>;
 			bias-pull-down = <MTK_PUPD_SET_R1R0_10>;
 		};
 	};
