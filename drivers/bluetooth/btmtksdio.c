@@ -268,10 +268,20 @@ static int mtk_hci_wmt_sync(struct hci_dev *hdev,
 			status = BTMTK_WMT_PATCH_UNDONE;
 		break;
 	case BTMTK_WMT_REGISTER:
-		wmt_evt_reg = (struct btmtk_hci_wmt_evt_reg *)wmt_evt;
-		if (le16_to_cpu(wmt_evt->whdr.dlen) == 12)
+		/* Only the answer to a read carries the value */
+		if (le16_to_cpu(wmt_evt->whdr.dlen) != 12) {
+			if (wmt_params->flag != BTMTK_WMT_REG_READ)
+				break;
+		} else if (skb_pull_data(bdev->evt_skb,
+					 sizeof(*wmt_evt_reg) - sizeof(*wmt_evt))) {
+			wmt_evt_reg = (struct btmtk_hci_wmt_evt_reg *)wmt_evt;
 			status = le32_to_cpu(wmt_evt_reg->val);
-		break;
+			break;
+		}
+
+		bt_dev_err(hdev, "Malformed WMT register event");
+		err = -EINVAL;
+		goto err_free_skb;
 	}
 
 	if (wmt_params->status)
