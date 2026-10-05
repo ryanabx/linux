@@ -176,6 +176,12 @@ struct pvr_device {
 	/** @irq: IRQ number. */
 	int irq;
 
+	/**
+	 * @fw_irq_count: Firmware interrupt counts, as last sampled after
+	 *                clearing the interrupt.
+	 */
+	u32 fw_irq_count[MAX_THREAD_NUM];
+
 	/** @fwccb: Firmware CCB. */
 	struct pvr_ccb fwccb;
 
@@ -793,6 +799,15 @@ static __always_inline void
 pvr_fw_irq_clear(struct pvr_device *pvr_dev)
 {
 	pvr_dev->fw_dev.defs->irq_clear(pvr_dev);
+
+	/* A cleared interrupt counts as taken, whoever cleared it. */
+	if (READ_ONCE(pvr_dev->fw_dev.initialised)) {
+		struct rogue_fwif_osdata *osdata = pvr_dev->fw_dev.fwif_osdata;
+
+		for (u32 i = 0; i < MAX_THREAD_NUM; i++)
+			WRITE_ONCE(pvr_dev->fw_irq_count[i],
+				   READ_ONCE(osdata->interrupt_count[i]));
+	}
 }
 
 #endif /* PVR_DEVICE_H */
