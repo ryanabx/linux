@@ -98,6 +98,15 @@ struct btmtk_hci_wmt_evt_funcc {
 	__be16 status;
 } __packed;
 
+/* STP, the framing MediaTek's UART and combo-chip SDIO transports wrap
+ * around each packet
+ */
+struct mtk_stp_hdr {
+	u8	prefix;
+	__be16	dlen;
+	u8	cs;
+} __packed;
+
 struct btmtk_hci_wmt_evt_reg {
 	struct btmtk_hci_wmt_evt hwhdr;
 	u8 rsv[2];
