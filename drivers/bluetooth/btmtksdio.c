@@ -12,6 +12,8 @@
 
 #include <linux/unaligned.h>
 #include <linux/atomic.h>
+#include <linux/bitfield.h>
+#include <linux/firmware.h>
 #include <linux/gpio/consumer.h>
 #include <linux/init.h>
 #include <linux/iopoll.h>
@@ -41,8 +43,20 @@ static bool enable_autosuspend = true;
 struct btmtksdio_data {
 	const char *fwname;
 	u16 chipid;
+	u8 func_num;
+	bool stp_framing;
+	bool keep_drv_own;
 	bool lp_mbox_supported;
 	bool pm_runtime_supported;
+};
+
+static const struct btmtksdio_data mt6630_data = {
+	.chipid = 0x6630,
+	.func_num = 2,
+	.stp_framing = true,
+	.keep_drv_own = true,
+	.lp_mbox_supported = false,
+	.pm_runtime_supported = false,
 };
 
 static const struct btmtksdio_data mt7663_data = {
@@ -74,6 +88,8 @@ static const struct btmtksdio_data mt7902_data = {
 };
 
 static const struct sdio_device_id btmtksdio_table[] = {
+	{SDIO_DEVICE(SDIO_VENDOR_ID_MEDIATEK, SDIO_DEVICE_ID_MEDIATEK_MT6630),
+	 .driver_data = (kernel_ulong_t)&mt6630_data },
 	{SDIO_DEVICE(SDIO_VENDOR_ID_MEDIATEK, SDIO_DEVICE_ID_MEDIATEK_MT7663),
 	 .driver_data = (kernel_ulong_t)&mt7663_data },
 	{SDIO_DEVICE(SDIO_VENDOR_ID_MEDIATEK, SDIO_DEVICE_ID_MEDIATEK_MT7668),
@@ -140,6 +156,26 @@ struct mtkbtsdio_hdr {
 	u8	bt_type;
 } __packed;
 
+/* The MT6630 has no packet type in its SDIO header. The header is followed
+ * by STP frames instead: an STP header naming the channel, the payload and
+ * a CRC that is always zero over SDIO, padded to a multiple of four bytes.
+ */
+struct mtkbtsdio_stp_hdr {
+	__le16	len;
+	__le16	reserved;
+	struct mtk_stp_hdr stp;
+} __packed;
+
+#define MTK_STP_PREFIX		0x80
+#define MTK_STP_CHAN		GENMASK(14, 12)
+#define MTK_STP_DLEN		GENMASK(11, 0)
+#define MTK_STP_CRC_SIZE	2
+
+#define MTK_STP_CHAN_BT		0
+#define MTK_STP_CHAN_WMT	4
+#define MTK_STP_CHAN_FW_ASSERT	5
+#define MTK_STP_CHAN_FW_LOG	6
+
 struct btmtksdio_dev {
 	struct hci_dev *hdev;
 	struct sdio_func *func;
@@ -150,11 +186,33 @@ struct btmtksdio_dev {
 	struct sk_buff_head txq;
 
 	struct sk_buff *evt_skb;
+	u8 wmt_op;
 
 	const struct btmtksdio_data *data;
 
 	struct gpio_desc *reset;
 };
+
+/* WMT commands for the STP control channel are queued by the driver itself,
+ * marked with the vendor packet type.
+ */
+static int btmtksdio_send_wmt_stp(struct btmtksdio_dev *bdev,
+				  const void *data, unsigned int len)
+{
+	struct sk_buff *skb;
+
+	skb = bt_skb_alloc(len, GFP_KERNEL);
+	if (!skb)
+		return -ENOMEM;
+
+	hci_skb_pkt_type(skb) = HCI_VENDOR_PKT;
+	skb_put_data(skb, data, len);
+
+	skb_queue_tail(&bdev->txq, skb);
+	schedule_work(&bdev->txrx_work);
+
+	return 0;
+}
 
 static int mtk_hci_wmt_sync(struct hci_dev *hdev,
 			    struct btmtk_hci_wmt_params *wmt_params)
@@ -170,7 +228,7 @@ static int mtk_hci_wmt_sync(struct hci_dev *hdev,
 
 	/* Send the WMT command and wait until the WMT event returns */
 	hlen = sizeof(*hdr) + wmt_params->dlen;
-	if (hlen > 255)
+	if (hlen > (bdev->data->stp_framing ? FIELD_MAX(MTK_STP_DLEN) : 255))
 		return -EINVAL;
 
 	wc = kzalloc(hlen, GFP_KERNEL);
@@ -184,9 +242,13 @@ static int mtk_hci_wmt_sync(struct hci_dev *hdev,
 	hdr->flag = wmt_params->flag;
 	memcpy(wc->data, wmt_params->data, wmt_params->dlen);
 
+	bdev->wmt_op = hdr->op;
 	set_bit(BTMTKSDIO_TX_WAIT_VND_EVT, &bdev->tx_state);
 
-	err = __hci_cmd_send(hdev, 0xfc6f, hlen, wc);
+	if (bdev->data->stp_framing)
+		err = btmtksdio_send_wmt_stp(bdev, wc, hlen);
+	else
+		err = __hci_cmd_send(hdev, 0xfc6f, hlen, wc);
 	if (err < 0) {
 		clear_bit(BTMTKSDIO_TX_WAIT_VND_EVT, &bdev->tx_state);
 		goto err_free_wc;
@@ -296,12 +358,81 @@ err_free_wc:
 	return err;
 }
 
+static int btmtksdio_tx_packet_stp(struct btmtksdio_dev *bdev,
+				   struct sk_buff *skb)
+{
+	struct mtkbtsdio_stp_hdr *hdr;
+	unsigned int len, dlen, pad_len;
+	u8 chan = MTK_STP_CHAN_BT;
+	int err;
+
+	if (hci_skb_pkt_type(skb) == HCI_VENDOR_PKT)
+		chan = MTK_STP_CHAN_WMT;
+
+	err = skb_cow_head(skb, sizeof(*hdr) + 1);
+	if (err < 0)
+		return err;
+
+	/* HCI packets keep their H4 packet type byte inside the frame */
+	if (chan == MTK_STP_CHAN_BT)
+		*(u8 *)skb_push(skb, 1) = hci_skb_pkt_type(skb);
+
+	dlen = skb->len;
+	if (dlen > FIELD_MAX(MTK_STP_DLEN)) {
+		err = -EINVAL;
+		goto err_skb_restore;
+	}
+
+	len = sizeof(*hdr) + dlen + MTK_STP_CRC_SIZE;
+	pad_len = round_up(len, MTK_SDIO_BLOCK_SIZE) - sizeof(*hdr) - dlen;
+
+	if (unlikely(skb_tailroom(skb) < pad_len)) {
+		err = pskb_expand_head(skb, 0, pad_len, GFP_ATOMIC);
+		if (err < 0)
+			goto err_skb_restore;
+	}
+
+	hdr = skb_push(skb, sizeof(*hdr));
+	hdr->len = cpu_to_le16(len);
+	hdr->reserved = cpu_to_le16(0);
+	hdr->stp.prefix = MTK_STP_PREFIX;
+	hdr->stp.dlen = cpu_to_be16(FIELD_PREP(MTK_STP_CHAN, chan) |
+				    FIELD_PREP(MTK_STP_DLEN, dlen));
+	hdr->stp.cs = 0;
+
+	/* The zero CRC and the padding */
+	skb_put_zero(skb, pad_len);
+
+	clear_bit(BTMTKSDIO_HW_TX_READY, &bdev->tx_state);
+	err = sdio_writesb(bdev->func, MTK_REG_CTDR, skb->data, skb->len);
+	if (err < 0) {
+		skb_trim(skb, sizeof(*hdr) + dlen);
+		skb_pull(skb, sizeof(*hdr));
+		goto err_skb_restore;
+	}
+
+	bdev->hdev->stat.byte_tx += len;
+
+	kfree_skb(skb);
+
+	return 0;
+
+err_skb_restore:
+	if (chan == MTK_STP_CHAN_BT)
+		skb_pull(skb, 1);
+
+	return err;
+}
+
 static int btmtksdio_tx_packet(struct btmtksdio_dev *bdev,
 			       struct sk_buff *skb)
 {
 	struct mtkbtsdio_hdr *sdio_hdr;
 	unsigned int len, pad_len;
 	int err;
+
+	if (bdev->data->stp_framing)
+		return btmtksdio_tx_packet_stp(bdev, skb);
 
 	/* Make sure that the data buffer is not shared with anyone else and
 	 * that there is enough room for the SDIO header
@@ -371,6 +502,13 @@ static int btmtksdio_fw_pmctrl(struct btmtksdio_dev *bdev)
 	u32 status;
 	int err;
 
+	/* Handing the MT6630 back to its firmware before the WLAN function
+	 * has started its own firmware leaves the WLAN download unanswered,
+	 * so the driver keeps ownership for as long as it is bound.
+	 */
+	if (bdev->data->keep_drv_own)
+		return 0;
+
 	sdio_claim_host(bdev->func);
 
 	if (bdev->data->lp_mbox_supported &&
@@ -435,6 +573,10 @@ static int btmtksdio_recv_event(struct hci_dev *hdev, struct sk_buff *skb)
 	struct hci_event_hdr *hdr = (void *)skb->data;
 	u8 evt = hdr->evt;
 	int err;
+
+	/* WMT events come on their own STP channel */
+	if (bdev->data->stp_framing)
+		return hci_recv_frame(hdev, skb);
 
 	/* When someone waits for the WMT event, the skb is being cloned
 	 * and being processed the events from there then.
@@ -505,6 +647,170 @@ static const struct h4_recv_pkt mtk_recv_pkts[] = {
 	{ H4_RECV_EVENT,    .recv = btmtksdio_recv_event },
 };
 
+static void btmtksdio_recv_wmt_stp(struct btmtksdio_dev *bdev,
+				   const u8 *data, unsigned int len)
+{
+	struct hci_event_hdr *hdr;
+	struct sk_buff *skb;
+
+	/* Only the command waiting in mtk_hci_wmt_sync() is interested. The
+	 * firmware also sends events of its own, e.g. after a reset.
+	 */
+	if (!test_bit(BTMTKSDIO_TX_WAIT_VND_EVT, &bdev->tx_state) ||
+	    len < sizeof(struct btmtk_wmt_hdr) || len > HCI_MAX_EVENT_SIZE ||
+	    data[1] != bdev->wmt_op) {
+		bt_dev_dbg(bdev->hdev, "Unsolicited WMT event %*ph",
+			   min_t(int, len, 8), data);
+		return;
+	}
+
+	/* Hand it over in the HCI vendor event the WMT helpers parse */
+	skb = bt_skb_alloc(sizeof(*hdr) + len, GFP_KERNEL);
+	if (!skb)
+		return;
+
+	hdr = skb_put(skb, sizeof(*hdr));
+	hdr->evt = HCI_EV_WMT;
+	hdr->plen = len;
+	skb_put_data(skb, data, len);
+
+	bdev->evt_skb = skb;
+
+	if (test_and_clear_bit(BTMTKSDIO_TX_WAIT_VND_EVT, &bdev->tx_state)) {
+		/* Barrier to sync with other CPUs */
+		smp_mb__after_atomic();
+		wake_up_bit(&bdev->tx_state, BTMTKSDIO_TX_WAIT_VND_EVT);
+	}
+}
+
+static int btmtksdio_recv_stp_frame(struct btmtksdio_dev *bdev, u8 chan,
+				    const u8 *data, unsigned int len)
+{
+	const struct h4_recv_pkt *pkt = NULL;
+	struct sk_buff *skb;
+	unsigned int dlen;
+	int i;
+
+	switch (chan) {
+	case MTK_STP_CHAN_BT:
+		break;
+	case MTK_STP_CHAN_WMT:
+		btmtksdio_recv_wmt_stp(bdev, data, len);
+		return 0;
+	case MTK_STP_CHAN_FW_ASSERT:
+		/* the firmware has crashed, taking the WLAN function with it */
+		bt_dev_err_ratelimited(bdev->hdev, "Firmware assert: %*pE",
+				       min_t(int, len, 64), data);
+		fallthrough;
+	case MTK_STP_CHAN_FW_LOG:
+		/* The ROM patch is loaded before the HCI device is registered,
+		 * and there is no diag channel to hand anything to yet
+		 */
+		if (!test_bit(HCI_RUNNING, &bdev->hdev->flags))
+			return 0;
+
+		skb = bt_skb_alloc(len, GFP_KERNEL);
+		if (!skb)
+			return -ENOMEM;
+
+		skb_put_data(skb, data, len);
+		return hci_recv_diag(bdev->hdev, skb);
+	default:
+		return 0;
+	}
+
+	for (i = 0; len && i < ARRAY_SIZE(mtk_recv_pkts); i++) {
+		if (mtk_recv_pkts[i].type == data[0]) {
+			pkt = &mtk_recv_pkts[i];
+			break;
+		}
+	}
+
+	if (!pkt || len - 1 < pkt->hlen)
+		goto err_invalid;
+
+	data++;
+	len--;
+
+	if (pkt->lsize == 1)
+		dlen = data[pkt->loff];
+	else
+		dlen = get_unaligned_le16(data + pkt->loff);
+
+	if (pkt->hlen + dlen > len)
+		goto err_invalid;
+
+	skb = bt_skb_alloc(pkt->hlen + dlen, GFP_KERNEL);
+	if (!skb)
+		return -ENOMEM;
+
+	hci_skb_pkt_type(skb) = pkt->type;
+	skb_put_data(skb, data, pkt->hlen + dlen);
+
+	return pkt->recv(bdev->hdev, skb);
+
+err_invalid:
+	bt_dev_err_ratelimited(bdev->hdev, "Invalid bt packet (%u bytes)", len);
+
+	return -EILSEQ;
+}
+
+static int btmtksdio_rx_packet_stp(struct btmtksdio_dev *bdev, u16 rx_size)
+{
+	const struct mtk_stp_hdr *stp;
+	unsigned int off, dlen;
+	u16 val;
+	u8 *buf;
+	int err;
+
+	if (rx_size < sizeof(struct mtkbtsdio_stp_hdr))
+		return -EILSEQ;
+
+	buf = kmalloc(rx_size, GFP_KERNEL);
+	if (!buf)
+		return -ENOMEM;
+
+	err = sdio_readsb(bdev->func, buf, MTK_REG_CRDR, rx_size);
+	if (err < 0)
+		goto out;
+
+	err = -EILSEQ;
+	if (get_unaligned_le16(buf) != rx_size) {
+		bt_dev_err(bdev->hdev, "Rx size in sdio header is mismatched ");
+		goto out;
+	}
+
+	/* A packet may carry more than one frame */
+	off = offsetof(struct mtkbtsdio_stp_hdr, stp);
+	while (off + sizeof(*stp) <= rx_size) {
+		stp = (void *)(buf + off);
+		/* the rest is zero fill, which the chip also sends on its own */
+		if (!stp->prefix)
+			break;
+
+		val = be16_to_cpu(stp->dlen);
+		dlen = FIELD_GET(MTK_STP_DLEN, val);
+
+		if (stp->prefix != MTK_STP_PREFIX ||
+		    off + sizeof(*stp) + dlen + MTK_STP_CRC_SIZE > rx_size) {
+			bt_dev_err_ratelimited(bdev->hdev, "Invalid STP frame");
+			goto out;
+		}
+
+		btmtksdio_recv_stp_frame(bdev, FIELD_GET(MTK_STP_CHAN, val),
+					 (u8 *)(stp + 1), dlen);
+
+		off += round_up(sizeof(*stp) + dlen + MTK_STP_CRC_SIZE, 4);
+	}
+
+	bdev->hdev->stat.byte_rx += rx_size;
+	err = 0;
+out:
+	kfree(buf);
+
+	return err;
+}
+
 static int btmtksdio_rx_packet(struct btmtksdio_dev *bdev, u16 rx_size)
 {
 	const struct h4_recv_pkt *pkts = mtk_recv_pkts;
@@ -513,6 +819,9 @@ static int btmtksdio_rx_packet(struct btmtksdio_dev *bdev, u16 rx_size)
 	int err, i, pad_size;
 	struct sk_buff *skb;
 	u16 dlen;
+
+	if (bdev->data->stp_framing)
+		return btmtksdio_rx_packet_stp(bdev, rx_size);
 
 	if (rx_size < sizeof(*sdio_hdr))
 		return -EILSEQ;
@@ -1145,6 +1454,234 @@ static int btmtksdio_reset_setting(struct hci_dev *hdev)
 	return btmtksdio_mtk_reg_write(hdev, MT7921_BTSYS_RST, val, ~0);
 }
 
+#define MT6630_GEN_HVR		0x80000000
+#define MT6630_GEN_FVR		0x80000004
+#define MT6630_PATCH_CTRL	0x020903d4
+#define MT6630_PATCH_ADDR	0x020908fc
+#define MT6630_PATCH_BASE	0x00080000
+#define MT6630_PATCH_FRAG_SIZE	1000
+
+struct mt6630_patch_hdr {
+	char build_time[16];
+	char platform[4];
+	__be16 hw_ver;
+	__be16 sw_ver;
+	__le32 patch_ver;
+} __packed;
+
+/* The firmware boots with this address in place of a real one */
+static const bdaddr_t mt6630_default_bdaddr = {
+	{ 0x01, 0x30, 0x66, 0x46, 0x00, 0x00 }
+};
+
+static int mt6630_wmt_cmd(struct hci_dev *hdev, u8 op, u8 flag,
+			  const void *data, u16 dlen)
+{
+	struct btmtk_hci_wmt_params wmt_params = {
+		.op = op,
+		.flag = flag,
+		.dlen = dlen,
+		.data = data,
+	};
+
+	return mtk_hci_wmt_sync(hdev, &wmt_params);
+}
+
+static int mt6630_func_ctrl(struct hci_dev *hdev, bool on)
+{
+	u8 param = on;
+
+	return mt6630_wmt_cmd(hdev, BTMTK_WMT_FUNC_CTRL, 0, &param,
+			      sizeof(param));
+}
+
+static int mt6630_wmt_reset(struct hci_dev *hdev)
+{
+	struct btmtksdio_dev *bdev = hci_get_drvdata(hdev);
+	int err;
+
+	/* Restarts the firmware, which applies a downloaded patch */
+	err = mt6630_wmt_cmd(hdev, BTMTK_WMT_RST, 4, NULL, 0);
+	if (err < 0)
+		return err;
+
+	msleep(50);
+
+	return btmtksdio_drv_pmctrl(bdev);
+}
+
+static int mt6630_load_patch(struct hci_dev *hdev, const char *fwname,
+			     u16 rom_ver)
+{
+	struct btmtksdio_dev *bdev = hci_get_drvdata(hdev);
+	const struct mt6630_patch_hdr *hdr;
+	const struct firmware *fw;
+	size_t size, dlen;
+	const u8 *ptr;
+	u8 flag;
+	int err;
+
+	err = request_firmware(&fw, fwname, &hdev->dev);
+	if (err < 0) {
+		dev_err(bdev->dev, "Failed to load %s (%d)\n", fwname, err);
+		return err;
+	}
+
+	hdr = (const void *)fw->data;
+	if (fw->size <= sizeof(*hdr) || be16_to_cpu(hdr->hw_ver) != rom_ver) {
+		dev_err(bdev->dev, "%s is not a patch for ROM %04x\n", fwname,
+			rom_ver);
+		err = -EINVAL;
+		goto out;
+	}
+
+	dev_info(bdev->dev, "Patch %s, build time %.15s\n", fwname,
+		 hdr->build_time);
+
+	/* Point the ROM's patch loader at its download buffer */
+	err = btmtksdio_mtk_reg_write(hdev, MT6630_PATCH_CTRL, 0, ~0);
+	if (err < 0)
+		goto out;
+
+	err = btmtksdio_mtk_reg_write(hdev, MT6630_PATCH_ADDR,
+				      MT6630_PATCH_BASE, ~0);
+	if (err < 0)
+		goto out;
+
+	ptr = fw->data + sizeof(*hdr);
+	size = fw->size - sizeof(*hdr);
+
+	for (flag = BTMTK_WMT_PKT_START; size; flag = BTMTK_WMT_PKT_CONTINUE) {
+		dlen = min_t(size_t, MT6630_PATCH_FRAG_SIZE, size);
+		if (dlen == size)
+			flag = BTMTK_WMT_PKT_END;
+
+		err = mt6630_wmt_cmd(hdev, BTMTK_WMT_PATCH_DWNLD, flag, ptr,
+				     dlen);
+		if (err < 0) {
+			dev_err(bdev->dev, "Failed to send wmt patch dwnld (%d)\n",
+				err);
+			goto out;
+		}
+
+		ptr += dlen;
+		size -= dlen;
+	}
+
+	err = mt6630_wmt_reset(hdev);
+out:
+	release_firmware(fw);
+
+	return err;
+}
+
+static int mt6630_init(struct hci_dev *hdev)
+{
+	struct btmtksdio_dev *bdev = hci_get_drvdata(hdev);
+	u32 hw_ver, fw_ver, patched;
+	u8 param;
+	int err;
+
+	err = btmtksdio_mtk_reg_read(hdev, MT6630_GEN_HVR, &hw_ver);
+	if (err < 0)
+		return err;
+
+	err = btmtksdio_mtk_reg_read(hdev, MT6630_GEN_FVR, &fw_ver);
+	if (err < 0)
+		return err;
+
+	/* Set once a patch has been applied, which survives a re-probe */
+	err = btmtksdio_mtk_reg_read(hdev, MT6630_PATCH_CTRL, &patched);
+	if (err < 0)
+		return err;
+
+	dev_info(bdev->dev, "MT6630 hw version 0x%04x, rom version 0x%04x%s\n",
+		 hw_ver & 0xffff, fw_ver & 0xffff,
+		 patched ? ", already patched" : "");
+
+	if (patched)
+		return 0;
+
+	err = mt6630_load_patch(hdev, FIRMWARE_MT6630_E3_0, fw_ver & 0xffff);
+	if (err < 0)
+		return err;
+
+	err = mt6630_load_patch(hdev, FIRMWARE_MT6630_E3_1, fw_ver & 0xffff);
+	if (err < 0)
+		return err;
+
+	err = mt6630_wmt_reset(hdev);
+	if (err < 0)
+		return err;
+
+	/* Antenna mode 1, the vendor's default for the MT6630 */
+	param = 1;
+	return mt6630_wmt_cmd(hdev, BTMTK_WMT_COEX, 1, &param,
+			      sizeof(param));
+}
+
+/* The ROM patch serves the whole chip: the WLAN function cannot start its
+ * firmware without it, and only this function's WMT channel can load it.
+ * So it is loaded at probe time, before the WLAN function needs it, rather
+ * than at every power-on of the HCI device.
+ */
+static int mt6630_probe_init(struct btmtksdio_dev *bdev)
+{
+	int err;
+
+	err = btmtksdio_open(bdev->hdev);
+	if (err < 0)
+		return err;
+
+	set_bit(BTMTKSDIO_HW_TX_READY, &bdev->tx_state);
+	err = mt6630_init(bdev->hdev);
+
+	btmtksdio_close(bdev->hdev);
+	skb_queue_purge(&bdev->txq);
+
+	return err;
+}
+
+static int mt6630_setup(struct hci_dev *hdev)
+{
+	struct hci_rp_read_bd_addr *rp;
+	struct sk_buff *skb;
+	int err;
+
+	err = mt6630_func_ctrl(hdev, true);
+	if (err < 0)
+		return err;
+
+	skb = __hci_cmd_sync(hdev, HCI_OP_READ_BD_ADDR, 0, NULL,
+			     HCI_INIT_TIMEOUT);
+	if (IS_ERR(skb)) {
+		err = PTR_ERR(skb);
+		goto err_off;
+	}
+
+	rp = skb_pull_data(skb, sizeof(*rp));
+	if (!rp || rp->status) {
+		kfree_skb(skb);
+		err = -EIO;
+		goto err_off;
+	}
+
+	if (!bacmp(&rp->bdaddr, &mt6630_default_bdaddr))
+		hci_set_quirk(hdev, HCI_QUIRK_USE_BDADDR_PROPERTY);
+
+	kfree_skb(skb);
+
+	return 0;
+
+err_off:
+	/* ->shutdown() does not follow a failed setup, and the firmware
+	 * faults on a second enable
+	 */
+	mt6630_func_ctrl(hdev, false);
+
+	return err;
+}
+
 static int btmtksdio_setup(struct hci_dev *hdev)
 {
 	struct btmtksdio_dev *bdev = hci_get_drvdata(hdev);
@@ -1222,6 +1759,11 @@ static int btmtksdio_setup(struct hci_dev *hdev)
 	case 0x7663:
 	case 0x7668:
 		err = mt76xx_setup(hdev, bdev->data->fwname);
+		if (err < 0)
+			return err;
+		break;
+	case 0x6630:
+		err = mt6630_setup(hdev);
 		if (err < 0)
 			return err;
 		break;
@@ -1436,6 +1978,10 @@ static int btmtksdio_probe(struct sdio_func *func,
 	if (!bdev->data)
 		return -ENODEV;
 
+	/* All functions of a combo chip may carry the same IDs */
+	if (bdev->data->func_num && func->num != bdev->data->func_num)
+		return -ENODEV;
+
 	bdev->dev = &func->dev;
 	bdev->func = func;
 
@@ -1478,6 +2024,16 @@ static int btmtksdio_probe(struct sdio_func *func,
 	hci_set_quirk(hdev, HCI_QUIRK_NON_PERSISTENT_SETUP);
 
 	sdio_set_drvdata(func, bdev);
+
+	if (bdev->data->chipid == 0x6630) {
+		err = mt6630_probe_init(bdev);
+		if (err < 0) {
+			dev_err(&func->dev, "Failed to initialize MT6630 (%d)\n",
+				err);
+			hci_free_dev(hdev);
+			return err;
+		}
+	}
 
 	err = hci_register_dev(hdev);
 	if (err < 0) {
@@ -1539,6 +2095,12 @@ static void btmtksdio_remove(struct sdio_func *func)
 		return;
 
 	hdev = bdev->hdev;
+
+	/* Unregistering skips ->shutdown(), but the MT6630 firmware faults if
+	 * Bluetooth is enabled again while it is still enabled.
+	 */
+	if (bdev->data->chipid == 0x6630 && test_bit(HCI_UP, &hdev->flags))
+		mt6630_func_ctrl(hdev, false);
 
 	/* Make sure to call btmtksdio_close before removing sdio card */
 	if (test_bit(BTMTKSDIO_FUNC_ENABLED, &bdev->tx_state))
