@@ -1,6 +1,8 @@
 /* SPDX-License-Identifier: ISC */
 /* Copyright (C) 2021 MediaTek Inc. */
 
+#define FIRMWARE_MT6630_E3_0	"mediatek/mt6630/mt6630_patch_e3_0_hdr.bin"
+#define FIRMWARE_MT6630_E3_1	"mediatek/mt6630/mt6630_patch_e3_1_hdr.bin"
 #define FIRMWARE_MT7622		"mediatek/mt7622pr2h.bin"
 #define FIRMWARE_MT7663		"mediatek/mt7663pr2h.bin"
 #define FIRMWARE_MT7668		"mediatek/mt7668pr2h.bin"
@@ -54,6 +56,7 @@ enum {
 	BTMTK_WMT_FUNC_CTRL = 0x6,
 	BTMTK_WMT_RST = 0x7,
 	BTMTK_WMT_REGISTER = 0x8,
+	BTMTK_WMT_COEX = 0x10,
 	BTMTK_WMT_SEMAPHORE = 0x17,
 };
 
