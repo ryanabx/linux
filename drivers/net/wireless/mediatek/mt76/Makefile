@@ -42,6 +42,7 @@ mt792x-lib-y := mt792x_core.o mt792x_mac.o mt792x_trace.o \
 mt792x-lib-$(CONFIG_ACPI) += mt792x_acpi_sar.o
 mt792x-usb-y := mt792x_usb.o
 
+obj-$(CONFIG_MT6630S) += mt6630/
 obj-$(CONFIG_MT76x0_COMMON) += mt76x0/
 obj-$(CONFIG_MT76x2_COMMON) += mt76x2/
 obj-$(CONFIG_MT7603E) += mt7603/
