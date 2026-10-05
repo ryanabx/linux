@@ -46,6 +46,7 @@ struct btmtksdio_data {
 	u8 func_num;
 	bool stp_framing;
 	bool keep_drv_own;
+	bool keep_power;
 	bool lp_mbox_supported;
 	bool pm_runtime_supported;
 };
@@ -55,6 +56,7 @@ static const struct btmtksdio_data mt6630_data = {
 	.func_num = 2,
 	.stp_framing = true,
 	.keep_drv_own = true,
+	.keep_power = true,
 	.lp_mbox_supported = false,
 	.pm_runtime_supported = false,
 };
@@ -149,6 +151,7 @@ MODULE_DEVICE_TABLE(sdio, btmtksdio_table);
 #define BTMTKSDIO_PATCH_ENABLED		4
 #define BTMTKSDIO_HW_RESET_ACTIVE	5
 #define BTMTKSDIO_BT_WAKE_ENABLED	6
+#define BTMTKSDIO_SUSPENDED		7
 
 struct mtkbtsdio_hdr {
 	__le16	len;
@@ -209,7 +212,8 @@ static int btmtksdio_send_wmt_stp(struct btmtksdio_dev *bdev,
 	skb_put_data(skb, data, len);
 
 	skb_queue_tail(&bdev->txq, skb);
-	schedule_work(&bdev->txrx_work);
+	if (!test_bit(BTMTKSDIO_SUSPENDED, &bdev->tx_state))
+		schedule_work(&bdev->txrx_work);
 
 	return 0;
 }
@@ -979,7 +983,8 @@ static void btmtksdio_txrx_work(struct work_struct *work)
 	} while (int_status && time_is_after_jiffies(txrx_timeout));
 
 	/* Enable interrupt */
-	if (bdev->func->irq_handler)
+	if (bdev->func->irq_handler &&
+	    !test_bit(BTMTKSDIO_SUSPENDED, &bdev->tx_state))
 		sdio_writel(bdev->func, C_INT_EN_SET, MTK_REG_CHLPCR, NULL);
 
 	sdio_release_host(bdev->func);
@@ -1000,7 +1005,8 @@ static void btmtksdio_interrupt(struct sdio_func *func)
 	/* Disable interrupt */
 	sdio_writel(bdev->func, C_INT_EN_CLR, MTK_REG_CHLPCR, NULL);
 
-	schedule_work(&bdev->txrx_work);
+	if (!test_bit(BTMTKSDIO_SUSPENDED, &bdev->tx_state))
+		schedule_work(&bdev->txrx_work);
 }
 
 static int btmtksdio_open(struct hci_dev *hdev)
@@ -1856,7 +1862,8 @@ static int btmtksdio_send_frame(struct hci_dev *hdev, struct sk_buff *skb)
 
 	skb_queue_tail(&bdev->txq, skb);
 
-	schedule_work(&bdev->txrx_work);
+	if (!test_bit(BTMTKSDIO_SUSPENDED, &bdev->tx_state))
+		schedule_work(&bdev->txrx_work);
 
 	return 0;
 }
@@ -2016,6 +2023,9 @@ static int btmtksdio_probe(struct sdio_func *func,
 		hdev->wakeup = btmtksdio_sdio_inband_wakeup;
 	else
 		hdev->wakeup = btmtksdio_sdio_wakeup;
+	/* Its interrupt stays masked across system suspend */
+	if (bdev->data->keep_drv_own)
+		hdev->wakeup = NULL;
 	hdev->set_bdaddr = btmtk_set_bdaddr;
 
 	SET_HCIDEV_DEV(hdev, &func->dev);
@@ -2148,10 +2158,33 @@ static int btmtksdio_system_suspend(struct device *dev)
 	if (!bdev)
 		return 0;
 
+	/* The ROM patch, and the WLAN firmware that needs it, live in the
+	 * MT6630's RAM: keep the chip powered even while Bluetooth is down,
+	 * and do not suspend at all if the host cannot.
+	 */
+	if (bdev->data->keep_power) {
+		int err = sdio_set_host_pm_flags(func, MMC_PM_KEEP_POWER);
+
+		if (err)
+			return err;
+	}
+
 	if (!test_bit(BTMTKSDIO_FUNC_ENABLED, &bdev->tx_state))
 		return 0;
 
 	set_bit(BTMTKSDIO_BT_WAKE_ENABLED, &bdev->tx_state);
+
+	/* The MT6630 stays with the driver, so nothing stops it raising
+	 * interrupts: mask them and let the worker finish before the host
+	 * is suspended underneath it.
+	 */
+	if (bdev->data->keep_drv_own) {
+		set_bit(BTMTKSDIO_SUSPENDED, &bdev->tx_state);
+		sdio_claim_host(func);
+		sdio_writel(func, C_INT_EN_CLR, MTK_REG_CHLPCR, NULL);
+		sdio_release_host(func);
+		cancel_work_sync(&bdev->txrx_work);
+	}
 
 	return btmtksdio_runtime_suspend(dev);
 }
@@ -2178,7 +2211,16 @@ static int btmtksdio_runtime_resume(struct device *dev)
 
 static int btmtksdio_system_resume(struct device *dev)
 {
-	return btmtksdio_runtime_resume(dev);
+	struct sdio_func *func = dev_to_sdio_func(dev);
+	struct btmtksdio_dev *bdev = sdio_get_drvdata(func);
+	int err;
+
+	err = btmtksdio_runtime_resume(dev);
+
+	if (bdev && test_and_clear_bit(BTMTKSDIO_SUSPENDED, &bdev->tx_state))
+		schedule_work(&bdev->txrx_work);
+
+	return err;
 }
 
 static const struct dev_pm_ops btmtksdio_pm_ops = {
