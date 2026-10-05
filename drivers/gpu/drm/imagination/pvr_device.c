@@ -214,6 +214,12 @@ static irqreturn_t pvr_device_irq_thread_handler(int irq, void *data)
 		pvr_fw_irq_clear(pvr_dev);
 
 		if (READ_ONCE(pvr_dev->fw_dev.initialised)) {
+			struct rogue_fwif_osdata *osdata = pvr_dev->fw_dev.fwif_osdata;
+
+			for (u32 i = 0; i < MAX_THREAD_NUM; i++)
+				WRITE_ONCE(pvr_dev->fw_irq_count[i],
+					   READ_ONCE(osdata->interrupt_count[i]));
+
 			pvr_fwccb_process(pvr_dev);
 			pvr_kccb_wake_up_waiters(pvr_dev);
 			pvr_device_process_active_queues(pvr_dev);
