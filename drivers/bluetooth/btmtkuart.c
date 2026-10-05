@@ -41,12 +41,6 @@
 
 #define BTMTKUART_FLAG_STANDALONE_HW	 BIT(0)
 
-struct mtk_stp_hdr {
-	u8	prefix;
-	__be16	dlen;
-	u8	cs;
-} __packed;
-
 struct btmtkuart_data {
 	unsigned int flags;
 	const char *fwname;
