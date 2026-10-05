@@ -1,0 +1,15 @@
+# SPDX-License-Identifier: BSD-3-Clause-Clear
+config MT6630S
+	tristate "MediaTek MT6630 (SDIO) support"
+	select MT76_CORE
+	select MT76_SDIO
+	depends on MAC80211
+	depends on MMC
+	imply BT_MTKSDIO
+	help
+	  This adds support for the WLAN function of the MediaTek MT6630
+	  combo chip on SDIO. The chip's Bluetooth function loads the ROM
+	  patch the WLAN firmware needs, so the WLAN function waits for
+	  BT_MTKSDIO to bind first.
+
+	  To compile this driver as a module, choose M here.
