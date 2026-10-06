@@ -116,6 +116,10 @@
  */
 #define MT6397_BAT_LEARN_MIN_SPAN	85
 
+/* The capacity, per mille of design, that is taken as the pack's own. */
+#define MT6397_BAT_HEALTH_MIN		500
+#define MT6397_BAT_HEALTH_MAX		1100
+
 /*
  * Where the coulomb count may be pulled onto the curve, and by how much it has
  * to be out before it is worth doing. Only near empty: the discharge curve is
@@ -797,6 +801,11 @@ static void mt6397_bat_meter_reset(struct mt6397_battery *bat, int ui_soc)
  *
  * Kept as a proportion rather than an absolute, so that the capacity still
  * follows temperature the way the profiles describe.
+ *
+ * Nothing on the PMIC is left to keep it across a reboot: of the RTC's four
+ * spare bytes the bootloader keeps boot and shutdown reasons in three, and the
+ * fourth holds the state of charge. So, as in cpcap-battery, CHARGE_FULL is
+ * writable for userspace to restore it.
  */
 static void mt6397_bat_learn_qmax(struct mt6397_battery *bat, int span)
 {
@@ -814,7 +823,7 @@ static void mt6397_bat_learn_qmax(struct mt6397_battery *bat, int span)
 	 * keep what we had rather than take a figure the meter cannot recover
 	 * from until the next deep discharge.
 	 */
-	if (health < 500 || health > 1100)
+	if (health < MT6397_BAT_HEALTH_MIN || health > MT6397_BAT_HEALTH_MAX)
 		return;
 
 	if (health == bat->qmax_health)
@@ -826,6 +835,7 @@ static void mt6397_bat_learn_qmax(struct mt6397_battery *bat, int span)
 
 	bat->qmax_health = health;
 	mt6397_bat_update_qmax(bat);
+	power_supply_changed(bat->psy);
 }
 
 static void mt6397_bat_read_charger(struct mt6397_battery *bat)
@@ -1165,6 +1175,39 @@ static int mt6397_battery_get_property(struct power_supply *psy,
 	return ret;
 }
 
+static int mt6397_battery_set_property(struct power_supply *psy,
+				       enum power_supply_property psp,
+				       const union power_supply_propval *val)
+{
+	struct mt6397_battery *bat = power_supply_get_drvdata(psy);
+	int health;
+
+	if (psp != POWER_SUPPLY_PROP_CHARGE_FULL)
+		return -EINVAL;
+
+	guard(mutex)(&bat->lock);
+
+	/* the profiles that give the design capacity are built after register */
+	if (bat->qmax_mah <= 0)
+		return -EAGAIN;
+
+	/* microamp-hours over milliamp-hours: per mille of design */
+	health = DIV_ROUND_CLOSEST(val->intval, bat->qmax_mah);
+	if (health < MT6397_BAT_HEALTH_MIN || health > MT6397_BAT_HEALTH_MAX)
+		return -EINVAL;
+
+	bat->qmax_health = health;
+	mt6397_bat_update_qmax(bat);
+
+	return 0;
+}
+
+static int mt6397_battery_property_is_writeable(struct power_supply *psy,
+						enum power_supply_property psp)
+{
+	return psp == POWER_SUPPLY_PROP_CHARGE_FULL;
+}
+
 static void mt6397_battery_external_power_changed(struct power_supply *psy)
 {
 	struct mt6397_battery *bat = power_supply_get_drvdata(psy);
@@ -1177,6 +1220,8 @@ static const struct power_supply_desc mt6397_battery_desc = {
 	.name			= "mt6397-battery",
 	.type			= POWER_SUPPLY_TYPE_BATTERY,
 	.get_property		= mt6397_battery_get_property,
+	.set_property		= mt6397_battery_set_property,
+	.property_is_writeable	= mt6397_battery_property_is_writeable,
 	.external_power_changed	= mt6397_battery_external_power_changed,
 	.properties		= mt6397_battery_properties,
 	.num_properties		= ARRAY_SIZE(mt6397_battery_properties),
