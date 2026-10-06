@@ -871,19 +871,22 @@ static irqreturn_t smb347_interrupt(int irq, void *data)
 	}
 
 	/*
-	 * If we got an under voltage interrupt it means that AC/USB input
-	 * was connected or disconnected.
+	 * An under voltage interrupt means that AC/USB input was connected
+	 * or disconnected. Don't rely on its latched bit alone, though: when
+	 * the input drops out, the charger may reset its registers before we
+	 * get here. Compare the input state on every interrupt.
 	 */
-	if (irqstat_e & (IRQSTAT_E_USBIN_UV_IRQ | IRQSTAT_E_DCIN_UV_IRQ)) {
-		if (smb347_update_ps_status(smb) > 0) {
-			smb347_start_stop_charging(smb);
-			if (smb->use_mains)
-				power_supply_changed(smb->mains);
-			if (smb->use_usb)
-				power_supply_changed(smb->usb);
-		}
-		handled = true;
+	ret = smb347_update_ps_status(smb);
+	if (ret > 0) {
+		smb347_start_stop_charging(smb);
+		if (smb->use_mains)
+			power_supply_changed(smb->mains);
+		if (smb->use_usb)
+			power_supply_changed(smb->usb);
 	}
+	if (ret > 0 ||
+	    (irqstat_e & (IRQSTAT_E_USBIN_UV_IRQ | IRQSTAT_E_DCIN_UV_IRQ)))
+		handled = true;
 
 	return handled ? IRQ_HANDLED : IRQ_NONE;
 }
