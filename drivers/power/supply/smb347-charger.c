@@ -1191,6 +1191,14 @@ static enum power_supply_property smb347_properties[] = {
 static bool smb347_volatile_reg(struct device *dev, unsigned int reg)
 {
 	switch (reg) {
+	/*
+	 * The charger resets the command registers by itself: at power-on
+	 * reset, and on some boards when its input power goes away. A cached
+	 * copy would then make regmap skip writes that are still needed.
+	 */
+	case CMD_A:
+	case CMD_B:
+	case CMD_C:
 	case IRQSTAT_A:
 	case IRQSTAT_C:
 	case IRQSTAT_D:
