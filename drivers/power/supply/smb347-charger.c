@@ -809,18 +809,6 @@ static int smb347_set_writable(struct smb347_charger *smb, bool writable,
 	return ret;
 }
 
-/* Called from the interrupt handler when USB has come online */
-static void smb347_usb_plugged(struct smb347_charger *smb)
-{
-	if (smb347_set_writable(smb, true, false))
-		return;
-
-	if (smb347_set_usb_apsd(smb))
-		dev_warn(smb->dev, "failed to enable APSD\n");
-
-	smb347_set_writable(smb, false, false);
-}
-
 static int smb347_hw_init(struct smb347_charger *smb)
 {
 	unsigned int val;
@@ -921,11 +909,117 @@ fail:
 	return ret;
 }
 
+/*
+ * Configure the STAT output to be suitable for interrupts: disable all other
+ * output (except interrupts) and make it active low. The caller must have
+ * made the configuration registers writable.
+ */
+static int smb347_set_stat_irq_output(struct smb347_charger *smb)
+{
+	return regmap_update_bits(smb->regmap, CFG_STAT,
+				  CFG_STAT_ACTIVE_HIGH | CFG_STAT_DISABLED,
+				  CFG_STAT_DISABLED);
+}
+
+/*
+ * Enable/disable interrupts for:
+ *	- under voltage
+ *	- termination current reached
+ *	- charger timeout
+ *	- charger error
+ *
+ * The caller must have made the configuration registers writable.
+ */
+static int smb347_irq_config(struct smb347_charger *smb, bool enable)
+{
+	int ret;
+
+	ret = regmap_update_bits(smb->regmap, CFG_FAULT_IRQ, 0xff,
+				 enable ? CFG_FAULT_IRQ_DCIN_UV : 0);
+	if (ret < 0)
+		return ret;
+
+	ret = regmap_update_bits(smb->regmap, CFG_STATUS_IRQ, 0xff,
+				 enable ? (CFG_STATUS_IRQ_TERMINATION_OR_TAPER |
+					   CFG_STATUS_IRQ_CHARGE_TIMEOUT) : 0);
+	if (ret < 0)
+		return ret;
+
+	return regmap_update_bits(smb->regmap, CFG_PIN, CFG_PIN_EN_CHARGER_ERROR,
+				  enable ? CFG_PIN_EN_CHARGER_ERROR : 0);
+}
+
+/*
+ * smb347_config_lost - checks whether the charger reloaded its configuration
+ * @smb: pointer to smb347 charger instance
+ *
+ * The charger reloads its configuration registers from non-volatile memory
+ * at power-on reset, which on some boards also happens when its input power
+ * drops out. Compares the cached registers with the hardware; afterwards the
+ * cache holds the hardware values.
+ */
+static bool smb347_config_lost(struct smb347_charger *smb)
+{
+	unsigned int cached[CFG_ADDRESS + 1];
+	unsigned int reg, val;
+	bool lost = false;
+
+	for (reg = CFG_CHARGE_CURRENT; reg <= CFG_ADDRESS; reg++)
+		if (regmap_read(smb->regmap, reg, &cached[reg]) < 0)
+			cached[reg] = UINT_MAX;
+
+	regcache_drop_region(smb->regmap, CFG_CHARGE_CURRENT, CFG_ADDRESS);
+
+	for (reg = CFG_CHARGE_CURRENT; reg <= CFG_ADDRESS; reg++) {
+		if (cached[reg] == UINT_MAX)
+			continue;
+		if (regmap_read(smb->regmap, reg, &val) < 0 ||
+		    val != cached[reg])
+			lost = true;
+	}
+
+	return lost;
+}
+
+/*
+ * smb347_reinit - programs the charger again after it may have been reset
+ * @smb: pointer to smb347 charger instance
+ *
+ * Called from the interrupt handler with input power present.
+ */
+static void smb347_reinit(struct smb347_charger *smb)
+{
+	int ret;
+
+	/* Program from the hardware state, not from the cache */
+	regcache_drop_region(smb->regmap, CFG_CHARGE_CURRENT, CFG_ADDRESS);
+
+	ret = smb347_hw_init(smb);
+	if (ret < 0)
+		goto fail;
+
+	if (smb->irq_unsupported)
+		return;
+
+	ret = smb347_set_writable(smb, true, false);
+	if (ret < 0)
+		goto fail;
+
+	ret = smb347_set_stat_irq_output(smb);
+	if (ret >= 0)
+		ret = smb347_irq_config(smb, true);
+
+	smb347_set_writable(smb, false, false);
+fail:
+	if (ret < 0)
+		dev_warn(smb->dev, "failed to program the charger: %d\n", ret);
+}
+
 static irqreturn_t smb347_interrupt(int irq, void *data)
 {
 	struct smb347_charger *smb = data;
 	unsigned int stat_c, irqstat_c, irqstat_d, irqstat_e;
-	bool handled = false;
+	bool handled = false, input_event;
 	int ret;
 
 	/* SMB347 it needs at least 20ms for setting IRQSTAT_E_*IN_UV_IRQ */
@@ -1007,18 +1101,30 @@ static irqreturn_t smb347_interrupt(int irq, void *data)
 	 * get here. Compare the input state on every interrupt.
 	 */
 	ret = smb347_update_ps_status(smb);
-	if (ret > 0) {
-		if (smb->usb_online)
-			smb347_usb_plugged(smb);
+	input_event = ret > 0 ||
+		(irqstat_e & (IRQSTAT_E_USBIN_UV_IRQ | IRQSTAT_E_DCIN_UV_IRQ));
+
+	/*
+	 * On some boards the charger loses its configuration when the input
+	 * drops out, even for a dropout too short to show up here. Program
+	 * it again when the input is back.
+	 */
+	if (smb347_is_ps_online(smb) &&
+	    (input_event || smb347_config_lost(smb))) {
+		dev_dbg(smb->dev, "input event, programming the charger\n");
+		smb347_reinit(smb);
+		input_event = true;
+	} else if (ret > 0) {
 		smb347_start_stop_charging(smb);
+	}
+
+	if (input_event) {
 		if (smb->use_mains)
 			power_supply_changed(smb->mains);
 		if (smb->use_usb)
 			power_supply_changed(smb->usb);
-	}
-	if (ret > 0 ||
-	    (irqstat_e & (IRQSTAT_E_USBIN_UV_IRQ | IRQSTAT_E_DCIN_UV_IRQ)))
 		handled = true;
+	}
 
 	return handled ? IRQ_HANDLED : IRQ_NONE;
 }
@@ -1034,27 +1140,8 @@ static int smb347_irq_set(struct smb347_charger *smb, bool enable)
 	if (ret < 0)
 		return ret;
 
-	/*
-	 * Enable/disable interrupts for:
-	 *	- under voltage
-	 *	- termination current reached
-	 *	- charger timeout
-	 *	- charger error
-	 */
-	ret = regmap_update_bits(smb->regmap, CFG_FAULT_IRQ, 0xff,
-				 enable ? CFG_FAULT_IRQ_DCIN_UV : 0);
-	if (ret < 0)
-		goto fail;
+	ret = smb347_irq_config(smb, enable);
 
-	ret = regmap_update_bits(smb->regmap, CFG_STATUS_IRQ, 0xff,
-			enable ? (CFG_STATUS_IRQ_TERMINATION_OR_TAPER |
-					CFG_STATUS_IRQ_CHARGE_TIMEOUT) : 0);
-	if (ret < 0)
-		goto fail;
-
-	ret = regmap_update_bits(smb->regmap, CFG_PIN, CFG_PIN_EN_CHARGER_ERROR,
-				 enable ? CFG_PIN_EN_CHARGER_ERROR : 0);
-fail:
 	smb347_set_writable(smb, false, true);
 	return ret;
 }
@@ -1087,13 +1174,7 @@ static int smb347_irq_init(struct smb347_charger *smb,
 	if (ret < 0)
 		return ret;
 
-	/*
-	 * Configure the STAT output to be suitable for interrupts: disable
-	 * all other output (except interrupts) and make it active low.
-	 */
-	ret = regmap_update_bits(smb->regmap, CFG_STAT,
-				 CFG_STAT_ACTIVE_HIGH | CFG_STAT_DISABLED,
-				 CFG_STAT_DISABLED);
+	ret = smb347_set_stat_irq_output(smb);
 
 	smb347_set_writable(smb, false, false);
 
