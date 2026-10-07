@@ -1059,6 +1059,17 @@ static int aif_mclk_set(struct snd_soc_component *component, int aif, bool enabl
 	unsigned int offset, val, clk_idx;
 	int ret;
 
+	/*
+	 * Release the clock enabled when AIFnCLK powered up: the source may
+	 * have been switched since (e.g. from FLL1 to MCLK1 by the machine
+	 * driver), and dropping a reference never taken unbalances it.
+	 */
+	if (!enable) {
+		clk_disable_unprepare(wm8994->aifclk_mclk[aif]);
+		wm8994->aifclk_mclk[aif] = NULL;
+		return 0;
+	}
+
 	if (aif)
 		offset = 4;
 	else
@@ -1078,16 +1089,12 @@ static int aif_mclk_set(struct snd_soc_component *component, int aif, bool enabl
 		return 0;
 	}
 
-	if (enable) {
-		ret = clk_prepare_enable(wm8994->mclk[clk_idx].clk);
-		if (ret < 0) {
-			dev_err(component->dev,	"Failed to enable MCLK%d\n",
-				clk_idx);
-			return ret;
-		}
-	} else {
-		clk_disable_unprepare(wm8994->mclk[clk_idx].clk);
+	ret = clk_prepare_enable(wm8994->mclk[clk_idx].clk);
+	if (ret < 0) {
+		dev_err(component->dev,	"Failed to enable MCLK%d\n", clk_idx);
+		return ret;
 	}
+	wm8994->aifclk_mclk[aif] = wm8994->mclk[clk_idx].clk;
 
 	return 0;
 }
