@@ -921,6 +921,7 @@
 	#size-cells = <0>;
 
 	non-removable;
+	keep-power-in-suspend;
 	bus-width = <4>;
 	vmmc-supply = <&reg_espresso_wlan>;
 	mmc-pwrseq = <&wlan_pwrseq>;
