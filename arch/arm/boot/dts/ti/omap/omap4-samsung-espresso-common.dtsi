@@ -950,6 +950,8 @@
 		pinctrl-names = "default";
 		pinctrl-0 = <&bluetooth_pins>;
 		max-speed = <3000000>;
+		/* SCO over the UART (for HFP in the host), not to the PCM pins */
+		brcm,bt-pcm-int-params = [01 01 00 00 00];
 		shutdown-gpios = <&gpio4 7 GPIO_ACTIVE_HIGH>;
 		reset-gpios = <&gpio3 18 GPIO_ACTIVE_LOW>;
 		device-wakeup-gpios = <&gpio3 29 GPIO_ACTIVE_HIGH>;
