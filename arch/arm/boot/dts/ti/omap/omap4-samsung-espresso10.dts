@@ -121,6 +121,14 @@
 	};
 };
 
+/*
+ * The touch controller loses its I2C interface in sensor sleep, which the rmi4
+ * driver enters on suspend; only a power cycle brings it back.
+ */
+&reg_touch_ldo_en {
+	/delete-property/ regulator-always-on;
+};
+
 &i2c3 {
 	touchscreen@20 {
 		compatible = "syna,rmi4-i2c";
@@ -134,8 +142,8 @@
 		pinctrl-names = "default";
 		pinctrl-0 = <&touch_pins>;
 
-		//avdd-supply = <&reg_touch_ldo_en>;
-		vdd-supply = <&ldo6>;
+		vdd-supply = <&reg_touch_ldo_en>;
+		vio-supply = <&ldo6>;
 
 		syna,reset-delay-ms = <200>;
 		syna,startup-delay-ms = <200>;
