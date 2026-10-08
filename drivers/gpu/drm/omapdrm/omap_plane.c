@@ -198,6 +198,21 @@ static void omap_plane_atomic_disable(struct drm_plane *plane,
 
 #define FRAC_16_16(mult, div)    (((mult) << 16) / (div))
 
+static void omap_plane_reclaim_overlay(struct omap_global_state *global_state,
+				       struct drm_plane *plane,
+				       struct omap_hw_overlay **overlay)
+{
+	struct drm_plane **overlay_map = global_state->hwoverlay_to_plane;
+
+	if (!*overlay || overlay_map[(*overlay)->idx] == plane)
+		return;
+
+	if (!overlay_map[(*overlay)->idx])
+		overlay_map[(*overlay)->idx] = plane;
+	else
+		*overlay = NULL;
+}
+
 static int omap_plane_atomic_check(struct drm_plane *plane,
 				   struct drm_atomic_commit *state)
 {
@@ -249,6 +264,18 @@ static int omap_plane_atomic_check(struct drm_plane *plane,
 
 	DBG("%s: visible %d -> %d", plane->name,
 	    old_plane_state->visible, new_plane_state->visible);
+
+	/*
+	 * A plane state restored by drm_atomic_helper_resume() still points to
+	 * the overlays it had before suspend, but the global overlay map is a
+	 * private object, not part of that state, and the suspend commit
+	 * released them. Claim them again, or drop them if another plane got
+	 * them meanwhile so that new ones are assigned below.
+	 */
+	omap_plane_reclaim_overlay(omap_overlay_global_state, plane,
+				   &omap_state->overlay);
+	omap_plane_reclaim_overlay(omap_overlay_global_state, plane,
+				   &omap_state->r_overlay);
 
 	if (!new_plane_state->visible) {
 		omap_overlay_release(state, omap_state->overlay);
