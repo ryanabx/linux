@@ -2023,6 +2023,13 @@ static int omap_hsmmc_resume(struct device *dev)
 
 	pm_runtime_get_sync(host->dev);
 
+	/*
+	 * A host that stayed runtime active across suspend (e.g. for an SDIO
+	 * card kept powered) didn't go through runtime resume, but its module
+	 * may have been idled by the bus driver and lost its context.
+	 */
+	omap_hsmmc_context_restore(host);
+
 	clk_prepare_enable(host->dbclk);
 
 	if (!(host->mmc->pm_flags & MMC_PM_KEEP_POWER))
