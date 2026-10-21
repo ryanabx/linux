@@ -8,6 +8,7 @@
 
 /dts-v1/;
 #include "mt8695.dtsi"
+#include <dt-bindings/gpio/gpio.h>
 
 / {
 	model = "Amazon Fire TV Stick 3rd Gen (sheldonp)";
@@ -15,6 +16,8 @@
 	compatible = "amazon,sheldonp", "mediatek,mt8695";
 
 	aliases {
+		mmc0 = &mmc0;
+		mmc2 = &mmc2;
 		serial0 = &uart1;
 	};
 
@@ -42,6 +45,28 @@
 		regulator-min-microvolt = <1800000>;
 		regulator-max-microvolt = <1800000>;
 		regulator-always-on;
+	};
+
+	/*
+	 * The MT7663 Wi-Fi/BT module on MSDC2: a fixed 3.3 V supply, and a
+	 * 1.8 V I/O rail switched by GPIO126, which also powers the module up
+	 * and down with the SDIO host.
+	 */
+	sdio_power: regulator-sdio-power {
+		compatible = "regulator-fixed";
+		regulator-name = "sdio_power";
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+		regulator-always-on;
+	};
+
+	sdio_io: regulator-sdio-io {
+		compatible = "regulator-fixed";
+		regulator-name = "sdio_io";
+		regulator-min-microvolt = <1800000>;
+		regulator-max-microvolt = <1800000>;
+		gpio = <&pio 126 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
 	};
 
 	reserved-memory {
@@ -93,6 +118,29 @@
 	vmmc-supply = <&mmc_power>;
 	vqmmc-supply = <&mmc_io>;
 	non-removable;
+	status = "okay";
+};
+
+&mmc2 {
+	pinctrl-names = "default", "state_uhs";
+	pinctrl-0 = <&mmc2_pins_default>;
+	pinctrl-1 = <&mmc2_pins_uhs>;
+	bus-width = <4>;
+	max-frequency = <100000000>;
+	cap-sd-highspeed;
+	/*
+	 * The vendor DT also allows SDR104, but without the vendor driver's
+	 * tuning it gets data CRC errors on writes, and then the module stops
+	 * answering. SDR50 is still far faster than the Wi-Fi link.
+	 */
+	sd-uhs-sdr50;
+	keep-power-in-suspend;
+	cap-sdio-irq;
+	non-removable;
+	no-mmc;
+	no-sd;
+	vmmc-supply = <&sdio_power>;
+	vqmmc-supply = <&sdio_io>;
 	status = "okay";
 };
 
@@ -156,6 +204,45 @@
 		pins-rst {
 			pinmux = <MT8695_PIN_46_EMMC_RSTB__FUNC_MSDC0_RSTB>;
 			bias-pull-up;
+		};
+	};
+
+	mmc2_pins_default: mmc2-default-pins {
+		pins-cmd-dat {
+			pinmux = <MT8695_PIN_33_MSDC2_DATA0__FUNC_MSDC2_DAT0>,
+				 <MT8695_PIN_32_MSDC2_DATA1__FUNC_MSDC2_DAT1>,
+				 <MT8695_PIN_31_MSDC2_DATA2__FUNC_MSDC2_DAT2>,
+				 <MT8695_PIN_30_MSDC2_DATA3__FUNC_MSDC2_DAT3>,
+				 <MT8695_PIN_34_MSDC2_CMD__FUNC_MSDC2_CMD>;
+			input-enable;
+			drive-strength = <MTK_DRIVE_6mA>;
+			bias-pull-up = <MTK_PUPD_SET_R1R0_10>;
+		};
+
+		pins-clk {
+			pinmux = <MT8695_PIN_28_MSDC2_CLK__FUNC_MSDC2_CLK>;
+			drive-strength = <MTK_DRIVE_6mA>;
+			bias-pull-down = <MTK_PUPD_SET_R1R0_10>;
+		};
+	};
+
+	/* Same as the default state, as in the vendor DT */
+	mmc2_pins_uhs: mmc2-uhs-pins {
+		pins-cmd-dat {
+			pinmux = <MT8695_PIN_33_MSDC2_DATA0__FUNC_MSDC2_DAT0>,
+				 <MT8695_PIN_32_MSDC2_DATA1__FUNC_MSDC2_DAT1>,
+				 <MT8695_PIN_31_MSDC2_DATA2__FUNC_MSDC2_DAT2>,
+				 <MT8695_PIN_30_MSDC2_DATA3__FUNC_MSDC2_DAT3>,
+				 <MT8695_PIN_34_MSDC2_CMD__FUNC_MSDC2_CMD>;
+			input-enable;
+			drive-strength = <MTK_DRIVE_6mA>;
+			bias-pull-up = <MTK_PUPD_SET_R1R0_10>;
+		};
+
+		pins-clk {
+			pinmux = <MT8695_PIN_28_MSDC2_CLK__FUNC_MSDC2_CLK>;
+			drive-strength = <MTK_DRIVE_6mA>;
+			bias-pull-down = <MTK_PUPD_SET_R1R0_10>;
 		};
 	};
 };
