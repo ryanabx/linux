@@ -3,8 +3,8 @@
  * MediaTek MT8695 SoC
  *
  * Bring-up subset: CPUs, interrupt controllers, timers, the core clock
- * controllers, power domains, pinctrl, the UARTs, the eMMC controller and
- * USB.
+ * controllers, power domains, pinctrl, the UARTs, the eMMC and SDIO
+ * controllers and USB.
  */
 
 #include <dt-bindings/clock/mediatek,mt8695-clk.h>
@@ -269,6 +269,20 @@
 			clock-names = "source", "hclk", "source_cg";
 			assigned-clocks = <&topckgen CLK_TOP_MSDC50_0_SEL>;
 			assigned-clock-parents = <&topckgen CLK_TOP_MSDCPLL>;
+			status = "disabled";
+		};
+
+		mmc2: mmc@11250000 {
+			compatible = "mediatek,mt8695-mmc",
+				     "mediatek,mt2712-mmc";
+			reg = <0 0x11250000 0 0x1000>;
+			interrupts = <GIC_SPI 81 IRQ_TYPE_LEVEL_LOW>;
+			clocks = <&pericfg CLK_PERI_MSDC30_2>,
+				 <&pericfg CLK_PERI_MSDC50_2_HCLK_EN>,
+				 <&pericfg CLK_PERI_MSDC30_2_EN>;
+			clock-names = "source", "hclk", "source_cg";
+			assigned-clocks = <&topckgen CLK_TOP_MSDC30_2_SEL>;
+			assigned-clock-parents = <&topckgen CLK_TOP_MSDCPLL_D2>;
 			status = "disabled";
 		};
 
