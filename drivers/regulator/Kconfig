@@ -1012,6 +1012,17 @@ config REGULATOR_MT6380
 	  This driver supports the control of different power rails of device
 	  through regulator interface.
 
+config REGULATOR_MT6393
+	tristate "MediaTek MT6393 PMIC"
+	depends on I2C && OF
+	select REGMAP_I2C
+	help
+	  Say y here to enable the regulators of the MediaTek MT6393, an I2C
+	  PMIC used with the MT8695 SoC. Its first buck, the CPU supply, is
+	  adjustable; the other bucks and the LDO have fixed outputs and can
+	  only be switched on and off.
+	  This driver can also be built as a module, called mt6393-regulator.
+
 config REGULATOR_MT6397
 	tristate "MediaTek MT6397 PMIC"
 	depends on MFD_MT6397
