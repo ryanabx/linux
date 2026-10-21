@@ -2,11 +2,11 @@
 /*
  * MediaTek MT8695 SoC
  *
- * Bring-up subset: CPUs, interrupt controllers, timers and UARTs only. The
- * clock controllers are not described yet, so the UARTs run off the fixed
- * 26 MHz system clock the bootloader leaves them on.
+ * Bring-up subset: CPUs, interrupt controllers, timers, the core clock
+ * controllers, pinctrl and the UARTs.
  */
 
+#include <dt-bindings/clock/mediatek,mt8695-clk.h>
 #include <dt-bindings/interrupt-controller/arm-gic.h>
 #include <dt-bindings/interrupt-controller/irq.h>
 
@@ -104,10 +104,57 @@
 			interrupts = <GIC_PPI 9 IRQ_TYPE_LEVEL_HIGH>;
 		};
 
+		topckgen: clock-controller@10000000 {
+			compatible = "mediatek,mt8695-topckgen", "syscon";
+			reg = <0 0x10000000 0 0x1000>;
+			#clock-cells = <1>;
+		};
+
+		infracfg: clock-controller@10001000 {
+			compatible = "mediatek,mt8695-infracfg", "syscon";
+			reg = <0 0x10001000 0 0x1000>;
+			#clock-cells = <1>;
+		};
+
+		pericfg: clock-controller@10003000 {
+			compatible = "mediatek,mt8695-pericfg", "syscon";
+			reg = <0 0x10003000 0 0x1000>;
+			#clock-cells = <1>;
+		};
+
+		syscfg_pctl_a: syscon@10005000 {
+			compatible = "mediatek,mt8695-pctl-a-syscfg", "syscon";
+			reg = <0 0x10005000 0 0x1000>;
+		};
+
 		watchdog: watchdog@10007000 {
 			compatible = "mediatek,mt8695-wdt",
 				     "mediatek,mt6589-wdt";
 			reg = <0 0x10007000 0 0x100>;
+		};
+
+		pio: pinctrl@1000b000 {
+			compatible = "mediatek,mt8695-pinctrl";
+			reg = <0 0x1000b000 0 0x1000>;
+			mediatek,pctl-regmap = <&syscfg_pctl_a>;
+			pins-are-numbered;
+			gpio-controller;
+			#gpio-cells = <2>;
+			interrupt-controller;
+			#interrupt-cells = <2>;
+			interrupts = <GIC_SPI 153 IRQ_TYPE_LEVEL_HIGH>;
+		};
+
+		apmixedsys: clock-controller@10209000 {
+			compatible = "mediatek,mt8695-apmixedsys", "syscon";
+			reg = <0 0x10209000 0 0x1000>;
+			#clock-cells = <1>;
+		};
+
+		mcucfg: clock-controller@10220000 {
+			compatible = "mediatek,mt8695-mcucfg", "syscon";
+			reg = <0 0x10220000 0 0x1000>;
+			#clock-cells = <1>;
 		};
 
 		sysirq: interrupt-controller@10220a80 {
@@ -124,7 +171,7 @@
 				     "mediatek,mt6577-uart";
 			reg = <0 0x11002000 0 0x1000>;
 			interrupts = <GIC_SPI 91 IRQ_TYPE_LEVEL_LOW>;
-			clocks = <&clk26m>, <&clk26m>;
+			clocks = <&pericfg CLK_PERI_UART0_SEL>, <&pericfg CLK_PERI_UART0>;
 			clock-names = "baud", "bus";
 			status = "disabled";
 		};
@@ -134,7 +181,7 @@
 				     "mediatek,mt6577-uart";
 			reg = <0 0x11003000 0 0x1000>;
 			interrupts = <GIC_SPI 92 IRQ_TYPE_LEVEL_LOW>;
-			clocks = <&clk26m>, <&clk26m>;
+			clocks = <&pericfg CLK_PERI_UART1_SEL>, <&pericfg CLK_PERI_UART1>;
 			clock-names = "baud", "bus";
 			status = "disabled";
 		};
