@@ -32,6 +32,7 @@
 #include "mt8195-pm-domains.h"
 #include "mt8196-pm-domains.h"
 #include "mt8365-pm-domains.h"
+#include "mt8695-pm-domains.h"
 
 #define MTK_POLL_DELAY_US		10
 #define MTK_POLL_TIMEOUT		USEC_PER_SEC
@@ -1350,6 +1351,10 @@ static const struct of_device_id scpsys_of_match[] = {
 	{
 		.compatible = "mediatek,mt8365-power-controller",
 		.data = &mt8365_scpsys_data,
+	},
+	{
+		.compatible = "mediatek,mt8695-power-controller",
+		.data = &mt8695_scpsys_data,
 	},
 	{ }
 };
