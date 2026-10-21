@@ -14,6 +14,15 @@ config SERIAL_EARLYCON
 	  the console before standard serial driver is probed. The console is
 	  enabled when early_param is processed.
 
+config SERIAL_EARLYCON_RAMLOG
+	bool "Early console logging to a RAM page (bring-up only)"
+	depends on SERIAL_CORE
+	select SERIAL_EARLYCON
+	help
+	  An earlycon that writes into one page of RAM instead of a UART, for
+	  bringing up boards with no serial console whose RAM survives a warm
+	  reset. Use with "earlycon=ramlog,<page address> keep_bootcon".
+
 source "drivers/tty/serial/8250/Kconfig"
 
 comment "Non-8250 serial port support"
