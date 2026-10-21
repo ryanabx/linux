@@ -160,6 +160,23 @@
 	};
 };
 
+&ssusb {
+	/* Device mode only for now; the ID pin (GPIO55) reads high. */
+	dr_mode = "peripheral";
+	status = "okay";
+};
+
+&tphy {
+	status = "okay";
+};
+
+/* The micro-USB port; eye-pattern tuning from the vendor DT */
+&u2port0 {
+	mediatek,eye-src = <3>;
+	mediatek,eye-vrt = <4>;
+	mediatek,eye-term = <4>;
+};
+
 &uart1 {
 	status = "okay";
 };
