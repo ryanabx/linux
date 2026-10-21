@@ -168,6 +168,20 @@
 #define CALIB_BUF1_O_SLOPE_SIGN_V3(x)	(((x) >> 19) & 0x1)
 #define CALIB_BUF1_ID_V3(x)		(((x) >> 20) & 0x1)
 
+/*
+ * Layout of the fuses providing the calibration data
+ * These macros are used for MT8695.
+ */
+#define CALIB_BUF0_ADC_GE_MT8695(x)	(((x) >> 0) & 0x3ff)
+#define CALIB_BUF0_DEGC_CALI_MT8695(x)	(((x) >> 20) & 0x3f)
+#define CALIB_BUF0_O_SLOPE_MT8695(x)	(((x) >> 26) & 0x3f)
+#define CALIB_BUF1_VTS_TS1_MT8695(x)	(((x) >> 9) & 0x1ff)
+#define CALIB_BUF1_VTS_TS2_MT8695(x)	(((x) >> 18) & 0x1ff)
+#define CALIB_BUF1_VALID_MT8695(x)	(((x) >> 27) & 0x1)
+#define CALIB_BUF1_O_SLOPE_SIGN_MT8695(x) (((x) >> 28) & 0x1)
+#define CALIB_BUF1_ID_MT8695(x)		(((x) >> 29) & 0x1)
+#define CALIB_BUF2_VTS_TS3_MT8695(x)	(((x) >> 0) & 0x1ff)
+
 enum {
 	VTS1,
 	VTS2,
@@ -296,6 +310,9 @@ enum mtk_thermal_version {
 #define MT8365_TS2 1
 #define MT8365_TS3 2
 
+/* MT8695: like MT8365, one bank of three sensors on AUXADC channel 11 */
+#define MT8695_CALIBRATION 160
+
 struct mtk_thermal;
 
 struct thermal_bank_cfg {
@@ -325,6 +342,7 @@ struct mtk_thermal_data {
 	u32 apmixed_buffer_ctl_reg;
 	u32 apmixed_buffer_ctl_mask;
 	u32 apmixed_buffer_ctl_set;
+	int (*extract_efuse)(struct mtk_thermal *mt, u32 *buf);
 };
 
 struct mtk_thermal {
@@ -574,6 +592,33 @@ static const struct mtk_thermal_data mt8365_thermal_data = {
 	.apmixed_buffer_ctl_reg = APMIXED_SYS_TS_CON0,
 	.apmixed_buffer_ctl_mask = (u32) ~GENMASK(29, 28),
 	.apmixed_buffer_ctl_set = 0,
+};
+
+static int mtk_thermal_extract_efuse_mt8695(struct mtk_thermal *mt, u32 *buf);
+
+static const struct mtk_thermal_data mt8695_thermal_data = {
+	.auxadc_channel = MT8365_TEMP_AUXADC_CHANNEL,
+	.num_banks = MT8365_NUM_BANKS,
+	.num_sensors = MT8365_NUM_SENSORS,
+	.vts_index = mt8365_vts_index,
+	.cali_val = MT8695_CALIBRATION,
+	.num_controller = MT8365_NUM_CONTROLLER,
+	.controller_offset = mt8365_tc_offset,
+	.need_switch_bank = false,
+	.bank_data = {
+		{
+			.num_sensors = MT8365_NUM_SENSORS,
+			.sensors = mt8365_bank_data
+		},
+	},
+	.msr = mt8365_msr,
+	.adcpnp = mt8365_adcpnp,
+	.sensor_mux_values = mt8365_mux_values,
+	.version = MTK_THERMAL_V1,
+	.apmixed_buffer_ctl_reg = APMIXED_SYS_TS_CON1,
+	.apmixed_buffer_ctl_mask = (u32)~GENMASK(5, 4),
+	.apmixed_buffer_ctl_set = 0,
+	.extract_efuse = mtk_thermal_extract_efuse_mt8695,
 };
 
 /*
@@ -1070,6 +1115,31 @@ static int mtk_thermal_extract_efuse_v3(struct mtk_thermal *mt, u32 *buf)
 	return 0;
 }
 
+static int mtk_thermal_extract_efuse_mt8695(struct mtk_thermal *mt, u32 *buf)
+{
+	if (!CALIB_BUF1_VALID_MT8695(buf[1]))
+		return -EINVAL;
+
+	/*
+	 * raw_to_mcelsius_v1() takes the gain error in units of 1/10000; the
+	 * fuse holds it in codes of the 12-bit ADC, offset by 512.
+	 */
+	mt->adc_ge = (CALIB_BUF0_ADC_GE_MT8695(buf[0]) - 512) * 10000 / 4096;
+	mt->degc_cali = CALIB_BUF0_DEGC_CALI_MT8695(buf[0]);
+	mt->vts[VTS1] = CALIB_BUF1_VTS_TS1_MT8695(buf[1]);
+	mt->vts[VTS2] = CALIB_BUF1_VTS_TS2_MT8695(buf[1]);
+	mt->vts[VTS3] = CALIB_BUF2_VTS_TS3_MT8695(buf[2]);
+
+	if (!CALIB_BUF1_ID_MT8695(buf[1]))
+		mt->o_slope = 0;
+	else if (CALIB_BUF1_O_SLOPE_SIGN_MT8695(buf[1]))
+		mt->o_slope = -CALIB_BUF0_O_SLOPE_MT8695(buf[0]);
+	else
+		mt->o_slope = CALIB_BUF0_O_SLOPE_MT8695(buf[0]);
+
+	return 0;
+}
+
 static int mtk_thermal_get_calibration_data(struct device *dev,
 					    struct mtk_thermal *mt)
 {
@@ -1106,19 +1176,23 @@ static int mtk_thermal_get_calibration_data(struct device *dev,
 		goto out;
 	}
 
-	switch (mt->conf->version) {
-	case MTK_THERMAL_V1:
-		ret = mtk_thermal_extract_efuse_v1(mt, buf);
-		break;
-	case MTK_THERMAL_V2:
-		ret = mtk_thermal_extract_efuse_v2(mt, buf);
-		break;
-	case MTK_THERMAL_V3:
-		ret = mtk_thermal_extract_efuse_v3(mt, buf);
-		break;
-	default:
-		ret = -EINVAL;
-		break;
+	if (mt->conf->extract_efuse) {
+		ret = mt->conf->extract_efuse(mt, buf);
+	} else {
+		switch (mt->conf->version) {
+		case MTK_THERMAL_V1:
+			ret = mtk_thermal_extract_efuse_v1(mt, buf);
+			break;
+		case MTK_THERMAL_V2:
+			ret = mtk_thermal_extract_efuse_v2(mt, buf);
+			break;
+		case MTK_THERMAL_V3:
+			ret = mtk_thermal_extract_efuse_v3(mt, buf);
+			break;
+		default:
+			ret = -EINVAL;
+			break;
+		}
 	}
 
 	if (ret) {
@@ -1160,6 +1234,10 @@ static const struct of_device_id mtk_thermal_of_match[] = {
 	{
 		.compatible = "mediatek,mt8365-thermal",
 		.data = (void *)&mt8365_thermal_data,
+	},
+	{
+		.compatible = "mediatek,mt8695-thermal",
+		.data = (void *)&mt8695_thermal_data,
 	}, {
 	},
 };
