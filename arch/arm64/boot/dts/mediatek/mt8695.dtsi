@@ -300,6 +300,21 @@
 			status = "disabled";
 		};
 
+		i2c1: i2c@11008000 {
+			compatible = "mediatek,mt8695-i2c",
+				     "mediatek,mt2712-i2c";
+			reg = <0 0x11008000 0 0x90>,
+			      <0 0x11000100 0 0x80>;
+			interrupts = <GIC_SPI 85 IRQ_TYPE_LEVEL_LOW>;
+			clock-div = <4>;
+			clocks = <&pericfg CLK_PERI_I2C1>,
+				 <&pericfg CLK_PERI_AP_DMA>;
+			clock-names = "main", "dma";
+			#address-cells = <1>;
+			#size-cells = <0>;
+			status = "disabled";
+		};
+
 		thermal: thermal@1100b000 {
 			compatible = "mediatek,mt8695-thermal";
 			reg = <0 0x1100b000 0 0x1000>;
