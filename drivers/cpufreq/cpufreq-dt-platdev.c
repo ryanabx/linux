@@ -144,6 +144,7 @@ static const struct of_device_id blocklist[] __initconst = {
 	{ .compatible = "mediatek,mt8186", },
 	{ .compatible = "mediatek,mt8365", },
 	{ .compatible = "mediatek,mt8516", },
+	{ .compatible = "mediatek,mt8695", },
 
 	{ .compatible = "nvidia,tegra20", },
 	{ .compatible = "nvidia,tegra30", },
