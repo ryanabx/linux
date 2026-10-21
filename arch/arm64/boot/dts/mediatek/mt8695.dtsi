@@ -83,6 +83,28 @@
 		};
 	};
 
+	thermal-zones {
+		cpu_thermal: cpu-thermal {
+			polling-delay-passive = <100>;
+			polling-delay = <1000>;
+			thermal-sensors = <&thermal>;
+
+			trips {
+				cpu_alert: cpu-alert {
+					temperature = <90000>;
+					hysteresis = <2000>;
+					type = "passive";
+				};
+
+				cpu_crit: cpu-crit {
+					temperature = <110000>;
+					hysteresis = <2000>;
+					type = "critical";
+				};
+			};
+		};
+	};
+
 	timer {
 		compatible = "arm,armv8-timer";
 		interrupt-parent = <&gic>;
@@ -217,6 +239,17 @@
 			interrupts = <GIC_SPI 153 IRQ_TYPE_LEVEL_HIGH>;
 		};
 
+		efuse: efuse@10206000 {
+			compatible = "mediatek,mt8695-efuse", "mediatek,efuse";
+			reg = <0 0x10206000 0 0x1000>;
+			#address-cells = <1>;
+			#size-cells = <1>;
+
+			thermal_calibration: calib@180 {
+				reg = <0x180 0xc>;
+			};
+		};
+
 		apmixedsys: clock-controller@10209000 {
 			compatible = "mediatek,mt8695-apmixedsys", "syscon";
 			reg = <0 0x10209000 0 0x1000>;
@@ -238,6 +271,15 @@
 			reg = <0 0x10220a80 0 0x28>;
 		};
 
+		auxadc: adc@11001000 {
+			compatible = "mediatek,mt8695-auxadc",
+				     "mediatek,mt2701-auxadc";
+			reg = <0 0x11001000 0 0x1000>;
+			clocks = <&pericfg CLK_PERI_AUXADC>;
+			clock-names = "main";
+			#io-channel-cells = <1>;
+		};
+
 		uart0: serial@11002000 {
 			compatible = "mediatek,mt8695-uart",
 				     "mediatek,mt6577-uart";
@@ -256,6 +298,20 @@
 			clocks = <&pericfg CLK_PERI_UART1_SEL>, <&pericfg CLK_PERI_UART1>;
 			clock-names = "baud", "bus";
 			status = "disabled";
+		};
+
+		thermal: thermal@1100b000 {
+			compatible = "mediatek,mt8695-thermal";
+			reg = <0 0x1100b000 0 0x1000>;
+			interrupts = <GIC_SPI 110 IRQ_TYPE_LEVEL_LOW>;
+			clocks = <&pericfg CLK_PERI_THERM>,
+				 <&pericfg CLK_PERI_AUXADC>;
+			clock-names = "therm", "auxadc";
+			mediatek,auxadc = <&auxadc>;
+			mediatek,apmixedsys = <&apmixedsys>;
+			nvmem-cells = <&thermal_calibration>;
+			nvmem-cell-names = "calibration-data";
+			#thermal-sensor-cells = <0>;
 		};
 
 		mmc0: mmc@11230000 {
