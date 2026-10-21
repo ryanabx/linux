@@ -323,6 +323,13 @@ config PINCTRL_MT8516
 	default ARM64 && ARCH_MEDIATEK
 	select PINCTRL_MTK
 
+config PINCTRL_MT8695
+	tristate "MediaTek MT8695 pin control"
+	depends on OF
+	depends on ARM || ARM64 || COMPILE_TEST
+	default ARCH_MEDIATEK
+	select PINCTRL_MTK
+
 # For PMIC
 config PINCTRL_MT6397
 	tristate "MediaTek MT6397 pin control"
