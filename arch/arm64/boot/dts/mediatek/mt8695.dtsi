@@ -3,12 +3,15 @@
  * MediaTek MT8695 SoC
  *
  * Bring-up subset: CPUs, interrupt controllers, timers, the core clock
- * controllers, pinctrl, the UARTs and the eMMC controller.
+ * controllers, power domains, pinctrl, the UARTs, the eMMC controller and
+ * USB.
  */
 
 #include <dt-bindings/clock/mediatek,mt8695-clk.h>
 #include <dt-bindings/interrupt-controller/arm-gic.h>
 #include <dt-bindings/interrupt-controller/irq.h>
+#include <dt-bindings/phy/phy.h>
+#include <dt-bindings/power/mediatek,mt8695-power.h>
 #include "mt8695-pinfunc.h"
 
 / {
@@ -128,6 +131,74 @@
 			reg = <0 0x10005000 0 0x1000>;
 		};
 
+		scpsys: syscon@10006000 {
+			compatible = "mediatek,mt8695-scpsys", "syscon", "simple-mfd";
+			reg = <0 0x10006000 0 0x1000>;
+
+			spm: power-controller {
+				compatible = "mediatek,mt8695-power-controller";
+				#address-cells = <1>;
+				#size-cells = <0>;
+				#power-domain-cells = <1>;
+
+				power-domain@MT8695_POWER_DOMAIN_MM {
+					reg = <MT8695_POWER_DOMAIN_MM>;
+					clocks = <&topckgen CLK_TOP_MM_SEL>;
+					clock-names = "mm";
+					#address-cells = <1>;
+					#size-cells = <0>;
+					#power-domain-cells = <1>;
+
+					power-domain@MT8695_POWER_DOMAIN_VDEC {
+						reg = <MT8695_POWER_DOMAIN_VDEC>;
+						#power-domain-cells = <0>;
+					};
+
+					power-domain@MT8695_POWER_DOMAIN_DIS_M {
+						reg = <MT8695_POWER_DOMAIN_DIS_M>;
+						#address-cells = <1>;
+						#size-cells = <0>;
+						#power-domain-cells = <1>;
+
+						power-domain@MT8695_POWER_DOMAIN_DIS_S {
+							reg = <MT8695_POWER_DOMAIN_DIS_S>;
+							#power-domain-cells = <0>;
+						};
+
+						power-domain@MT8695_POWER_DOMAIN_DIS_C {
+							reg = <MT8695_POWER_DOMAIN_DIS_C>;
+							#power-domain-cells = <0>;
+						};
+					};
+
+					power-domain@MT8695_POWER_DOMAIN_DOLBY {
+						reg = <MT8695_POWER_DOMAIN_DOLBY>;
+						#power-domain-cells = <0>;
+					};
+
+					power-domain@MT8695_POWER_DOMAIN_VENC {
+						reg = <MT8695_POWER_DOMAIN_VENC>;
+						clocks = <&topckgen CLK_TOP_VENC_SEL>,
+							 <&topckgen CLK_TOP_DMX_SEL>;
+						clock-names = "venc", "demux";
+						#power-domain-cells = <0>;
+					};
+				};
+
+				power-domain@MT8695_POWER_DOMAIN_ETH {
+					reg = <MT8695_POWER_DOMAIN_ETH>;
+					clocks = <&topckgen CLK_TOP_ETHER_125M_SEL>;
+					clock-names = "eth";
+					#power-domain-cells = <0>;
+				};
+
+				power-domain@MT8695_POWER_DOMAIN_USB {
+					reg = <MT8695_POWER_DOMAIN_USB>;
+					#power-domain-cells = <0>;
+				};
+			};
+		};
+
 		watchdog: watchdog@10007000 {
 			compatible = "mediatek,mt8695-wdt",
 				     "mediatek,mt6589-wdt";
@@ -199,6 +270,61 @@
 			assigned-clocks = <&topckgen CLK_TOP_MSDC50_0_SEL>;
 			assigned-clock-parents = <&topckgen CLK_TOP_MSDCPLL>;
 			status = "disabled";
+		};
+
+		ssusb: usb@11271000 {
+			compatible = "mediatek,mt8695-mtu3", "mediatek,mtu3";
+			reg = <0 0x11271000 0 0x3000>,
+			      <0 0x11280700 0 0x0100>;
+			reg-names = "mac", "ippc";
+			interrupts = <GIC_SPI 122 IRQ_TYPE_LEVEL_LOW>;
+			phys = <&u2port0 PHY_TYPE_USB2>,
+			       <&u2port1 PHY_TYPE_USB2>;
+			power-domains = <&spm MT8695_POWER_DOMAIN_USB>;
+			clocks = <&topckgen CLK_TOP_USB30_SEL>,
+				 <&clk26m>,
+				 <&pericfg CLK_PERI_USB>,
+				 <&pericfg CLK_PERI_USB>;
+			clock-names = "sys_ck", "ref_ck", "mcu_ck", "dma_ck";
+			#address-cells = <2>;
+			#size-cells = <2>;
+			ranges;
+			status = "disabled";
+
+			usb_host: usb@11270000 {
+				compatible = "mediatek,mt8695-xhci",
+					     "mediatek,mtk-xhci";
+				reg = <0 0x11270000 0 0x1000>;
+				reg-names = "mac";
+				interrupts = <GIC_SPI 123 IRQ_TYPE_LEVEL_LOW>;
+				power-domains = <&spm MT8695_POWER_DOMAIN_USB>;
+				clocks = <&topckgen CLK_TOP_USB30_SEL>, <&clk26m>;
+				clock-names = "sys_ck", "ref_ck";
+				status = "disabled";
+			};
+		};
+
+		tphy: t-phy@11500000 {
+			compatible = "mediatek,mt8695-tphy",
+				     "mediatek,generic-tphy-v2";
+			#address-cells = <1>;
+			#size-cells = <1>;
+			ranges = <0 0 0x11500000 0x2000>;
+			status = "disabled";
+
+			u2port1: usb-phy@0 {
+				reg = <0x0 0x400>;
+				clocks = <&clk26m>;
+				clock-names = "ref";
+				#phy-cells = <1>;
+			};
+
+			u2port0: usb-phy@1000 {
+				reg = <0x1000 0x400>;
+				clocks = <&clk26m>;
+				clock-names = "ref";
+				#phy-cells = <1>;
+			};
 		};
 	};
 };
