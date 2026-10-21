@@ -1149,4 +1149,13 @@ config COMMON_CLK_MT8516_AUDSYS
 	help
 	  This driver supports MediaTek MT8516 audsys clocks.
 
+config COMMON_CLK_MT8695
+	tristate "Clock driver for MediaTek MT8695"
+	depends on ARCH_MEDIATEK || COMPILE_TEST
+	select COMMON_CLK_MEDIATEK
+	default ARCH_MEDIATEK
+	help
+	  This driver supports MediaTek MT8695 basic clocks: the PLLs
+	  (apmixedsys), topckgen, infracfg, pericfg and mcucfg.
+
 endmenu
