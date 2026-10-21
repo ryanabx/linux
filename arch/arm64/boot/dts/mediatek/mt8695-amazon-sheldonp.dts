@@ -27,6 +27,23 @@
 		reg = <0 0x40000000 0 0x40000000>;
 	};
 
+	/* Both rails are fixed on the board; nothing in software switches them. */
+	mmc_power: regulator-mmc-power {
+		compatible = "regulator-fixed";
+		regulator-name = "mmc_power";
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
+		regulator-always-on;
+	};
+
+	mmc_io: regulator-mmc-io {
+		compatible = "regulator-fixed";
+		regulator-name = "mmc_io";
+		regulator-min-microvolt = <1800000>;
+		regulator-max-microvolt = <1800000>;
+		regulator-always-on;
+	};
+
 	reserved-memory {
 		/* Preloader/LK debug buffers, kept intact across warm resets */
 		ram-console@44400000 {
@@ -56,6 +73,89 @@
 		tee-reserved-memory@79bc0000 {
 			reg = <0 0x79bc0000 0 0x6440000>;
 			no-map;
+		};
+	};
+};
+
+&mmc0 {
+	pinctrl-names = "default", "state_uhs";
+	pinctrl-0 = <&mmc0_pins_default>;
+	pinctrl-1 = <&mmc0_pins_uhs>;
+	bus-width = <8>;
+	max-frequency = <200000000>;
+	cap-mmc-highspeed;
+	mmc-hs200-1_8v;
+	mmc-hs400-1_8v;
+	hs400-ds-delay = <0x14019>;
+	cap-mmc-hw-reset;
+	no-sd;
+	no-sdio;
+	vmmc-supply = <&mmc_power>;
+	vqmmc-supply = <&mmc_io>;
+	non-removable;
+	status = "okay";
+};
+
+&pio {
+	mmc0_pins_default: mmc0-default-pins {
+		pins-cmd-dat {
+			pinmux = <MT8695_PIN_44_EMMC_DAT0__FUNC_MSDC0_DAT0>,
+				 <MT8695_PIN_43_EMMC_DAT1__FUNC_MSDC0_DAT1>,
+				 <MT8695_PIN_42_EMMC_DAT2__FUNC_MSDC0_DAT2>,
+				 <MT8695_PIN_41_EMMC_DAT3__FUNC_MSDC0_DAT3>,
+				 <MT8695_PIN_40_EMMC_DAT4__FUNC_MSDC0_DAT4>,
+				 <MT8695_PIN_39_EMMC_DAT5__FUNC_MSDC0_DAT5>,
+				 <MT8695_PIN_38_EMMC_DAT6__FUNC_MSDC0_DAT6>,
+				 <MT8695_PIN_37_EMMC_DAT7__FUNC_MSDC0_DAT7>,
+				 <MT8695_PIN_45_EMMC_CMD__FUNC_MSDC0_CMD>;
+			input-enable;
+			drive-strength = <MTK_DRIVE_6mA>;
+			bias-pull-up = <MTK_PUPD_SET_R1R0_01>;
+		};
+
+		pins-clk {
+			pinmux = <MT8695_PIN_36_EMMC_CLK__FUNC_MSDC0_CLK>;
+			drive-strength = <MTK_DRIVE_6mA>;
+			bias-pull-down = <MTK_PUPD_SET_R1R0_10>;
+		};
+
+		pins-rst {
+			pinmux = <MT8695_PIN_46_EMMC_RSTB__FUNC_MSDC0_RSTB>;
+			bias-pull-up;
+		};
+	};
+
+	mmc0_pins_uhs: mmc0-uhs-pins {
+		pins-cmd-dat {
+			pinmux = <MT8695_PIN_44_EMMC_DAT0__FUNC_MSDC0_DAT0>,
+				 <MT8695_PIN_43_EMMC_DAT1__FUNC_MSDC0_DAT1>,
+				 <MT8695_PIN_42_EMMC_DAT2__FUNC_MSDC0_DAT2>,
+				 <MT8695_PIN_41_EMMC_DAT3__FUNC_MSDC0_DAT3>,
+				 <MT8695_PIN_40_EMMC_DAT4__FUNC_MSDC0_DAT4>,
+				 <MT8695_PIN_39_EMMC_DAT5__FUNC_MSDC0_DAT5>,
+				 <MT8695_PIN_38_EMMC_DAT6__FUNC_MSDC0_DAT6>,
+				 <MT8695_PIN_37_EMMC_DAT7__FUNC_MSDC0_DAT7>,
+				 <MT8695_PIN_45_EMMC_CMD__FUNC_MSDC0_CMD>;
+			input-enable;
+			drive-strength = <MTK_DRIVE_6mA>;
+			bias-pull-up = <MTK_PUPD_SET_R1R0_01>;
+		};
+
+		pins-clk {
+			pinmux = <MT8695_PIN_36_EMMC_CLK__FUNC_MSDC0_CLK>;
+			drive-strength = <MTK_DRIVE_6mA>;
+			bias-pull-down = <MTK_PUPD_SET_R1R0_10>;
+		};
+
+		pins-ds {
+			pinmux = <MT8695_PIN_35_EMMC_DSL__FUNC_MSDC0_DSL>;
+			drive-strength = <MTK_DRIVE_6mA>;
+			bias-pull-down = <MTK_PUPD_SET_R1R0_10>;
+		};
+
+		pins-rst {
+			pinmux = <MT8695_PIN_46_EMMC_RSTB__FUNC_MSDC0_RSTB>;
+			bias-pull-up;
 		};
 	};
 };
