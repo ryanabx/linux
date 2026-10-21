@@ -1,0 +1,65 @@
+// SPDX-License-Identifier: (GPL-2.0 OR MIT)
+/*
+ * Amazon Fire TV Stick 3rd Gen (sheldonp)
+ *
+ * The Fire TV Stick Lite (sheldon) has the same board as far as the vendor
+ * DT is concerned.
+ */
+
+/dts-v1/;
+#include "mt8695.dtsi"
+
+/ {
+	model = "Amazon Fire TV Stick 3rd Gen (sheldonp)";
+	chassis-type = "embedded";
+	compatible = "amazon,sheldonp", "mediatek,mt8695";
+
+	aliases {
+		serial0 = &uart1;
+	};
+
+	chosen {
+		stdout-path = "serial0:921600n8";
+	};
+
+	memory@40000000 {
+		device_type = "memory";
+		reg = <0 0x40000000 0 0x40000000>;
+	};
+
+	reserved-memory {
+		/* Preloader/LK debug buffers, kept intact across warm resets */
+		ram-console@44400000 {
+			reg = <0 0x44400000 0 0x10000>;
+			no-map;
+		};
+
+		/*
+		 * Same region and layout as the bring-up ramoops in the vendor
+		 * 4.4 kernel, so either kernel can read what the other logged
+		 * before a warm reset.
+		 */
+		ramoops@44440000 {
+			compatible = "ramoops";
+			reg = <0 0x44440000 0 0x80000>;
+			record-size = <0x10000>;
+			console-size = <0x40000>;
+			no-map;
+		};
+
+		minirdump@444f0000 {
+			reg = <0 0x444f0000 0 0x10000>;
+			no-map;
+		};
+
+		/* Secure world and bootloader carveouts above System RAM */
+		tee-reserved-memory@79bc0000 {
+			reg = <0 0x79bc0000 0 0x6440000>;
+			no-map;
+		};
+	};
+};
+
+&uart1 {
+	status = "okay";
+};
