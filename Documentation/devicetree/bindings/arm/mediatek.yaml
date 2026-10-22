@@ -462,6 +462,10 @@ properties:
           - enum:
               - mediatek,mt8516-pumpkin
           - const: mediatek,mt8516
+      - items:
+          - enum:
+              - amazon,sheldonp
+          - const: mediatek,mt8695
 
 additionalProperties: true
 
