@@ -3,8 +3,9 @@
  * MediaTek VDOUT: OSD3, the primary plane
  *
  * The OSD reads a chain of region headers from memory; each describes one
- * buffer. One region covers the screen here, at 1:1, in ARGB8888. The OSD
- * latches its registers and the header on every vsync from VDOUT.
+ * buffer. One region is used here, in ARGB8888, and the plane's scaler
+ * takes it to a window of the screen. The OSD latches its registers and
+ * the header on every vsync from VDOUT.
  */
 
 #include <linux/clk.h>
@@ -49,9 +50,29 @@
 #define OSD_PLA_EN		0x100
 #define OSD_PLA_HEADER		0x104
 #define OSD_SYNC_THRES		0x1e4
+#define OSD_POS			0x028	/* x [27:16], y [11:0] */
+#define OSD_SC_CFG		0x200
+#define  OSD_SC_VUSC_EN		BIT(2)
+#define  OSD_SC_VDSC_EN		BIT(3)
+#define  OSD_SC_HUSC_EN		BIT(4)
+#define  OSD_SC_HDSC_EN		BIT(5)
+#define  OSD_SC_EN		BIT(7)
+#define  OSD_SC_BIT26		BIT(26)	/* undocumented, set by the bootloader */
 #define OSD_SC_SRC_SIZE		0x204
 #define OSD_SC_DST_SIZE		0x208
-#define OSD_SC_DST_WIDTH	0x20c
+#define OSD_SC_VSC_WIDTH	0x20c	/* the line width into the vertical scaler */
+#define OSD_SC_HDSC		0x210	/* offset [29:16], step [13:0] */
+#define OSD_SC_HUSC		0x214
+#define OSD_SC_VSC_OFST		0x218	/* top [29:16], bottom [13:0] */
+#define OSD_SC_VSC_STEP		0x21c
+
+/* Scaler steps are 1.14 fixed point */
+#define OSD_SC_STEP_SHIFT	14
+
+/* Up to 8x up, 2x down: the vendor never enables the scaler's filter */
+#define OSD_MIN_SCALE		(DRM_PLANE_NO_SCALING / 8)
+#define OSD_MAX_SCALE		(DRM_PLANE_NO_SCALING * 2)
+#define OSD_MAX_LINE		1920
 
 #define OSD_HDR_WORDS		16
 #define OSD_HDR_SIZE		(OSD_HDR_WORDS * sizeof(u32))
@@ -137,7 +158,7 @@ void mtk_vdout_osd_setup(struct mtk_vdout_osd *osd,
 	writel(t->sync_thres, osd->regs + OSD_SYNC_THRES);
 	writel(size, osd->regs + OSD_SC_SRC_SIZE);
 	writel(size, osd->regs + OSD_SC_DST_SIZE);
-	writel(mode->hdisplay, osd->regs + OSD_SC_DST_WIDTH);
+	writel(mode->hdisplay, osd->regs + OSD_SC_VSC_WIDTH);
 
 	/* Latch on every vsync, so updates need no interrupt handling */
 	rmw(osd->regs, OSD_UPDATE, OSD_SYNC_VDOUT | OSD_ALWAYS_UPDATE,
@@ -174,6 +195,57 @@ static void mtk_vdout_osd_write_header(u32 *hdr, struct drm_framebuffer *fb,
 	dma_wmb();
 }
 
+struct mtk_vdout_osd_scaler {
+	u32 cfg;
+	u32 vsc_width;
+	u32 hdsc;
+	u32 husc;
+	u32 vsc_ofst;
+	u32 vsc_step;
+};
+
+/*
+ * OSD_SC_Scale() in MediaTek's driver: each direction scales up, down or
+ * not at all. The scaler runs horizontal downscaling, then vertical
+ * scaling, then horizontal upscaling.
+ */
+static void mtk_vdout_osd_scaler(u32 sw, u32 sh, u32 dw, u32 dh,
+				 struct mtk_vdout_osd_scaler *sc)
+{
+	u32 step;
+
+	sc->cfg = OSD_SC_BIT26 | OSD_SC_EN;
+	sc->vsc_width = sw;
+	sc->hdsc = 0;
+	sc->husc = 0;
+	sc->vsc_ofst = 0x20002000;		/* as booted, for no scaling */
+	sc->vsc_step = 0;
+
+	if (dw > sw) {
+		sc->cfg |= OSD_SC_HUSC_EN;
+		sc->husc = ((sw - 1) << OSD_SC_STEP_SHIFT) / (dw - 1);
+		/* The vendor's offset for a 1280-pixel source */
+		if (sw == 1280)
+			sc->husc |= 0x1800 << 16;
+	} else if (dw < sw) {
+		step = DIV_ROUND_UP(dw << OSD_SC_STEP_SHIFT, sw);
+		sc->cfg |= OSD_SC_HDSC_EN;
+		sc->hdsc = step << 16 | step;
+		sc->vsc_width = dw;
+	}
+
+	if (dh > sh) {
+		sc->cfg |= OSD_SC_VUSC_EN;
+		sc->vsc_ofst = 0;
+		sc->vsc_step = ((sh - 1) << OSD_SC_STEP_SHIFT) / (dh - 1);
+	} else if (dh < sh) {
+		step = DIV_ROUND_UP(dh << OSD_SC_STEP_SHIFT, sh);
+		sc->cfg |= OSD_SC_VDSC_EN;
+		sc->vsc_ofst = step << 16 | step;
+		sc->vsc_step = step;
+	}
+}
+
 static int mtk_vdout_osd_atomic_check(struct drm_plane *plane,
 				      struct drm_atomic_commit *state)
 {
@@ -186,13 +258,16 @@ static int mtk_vdout_osd_atomic_check(struct drm_plane *plane,
 	if (new_state->crtc)
 		crtc_state = drm_atomic_get_new_crtc_state(state, new_state->crtc);
 
-	/* No scaler or windows yet: the plane covers the screen */
 	ret = drm_atomic_helper_check_plane_state(new_state, crtc_state,
-						  DRM_PLANE_NO_SCALING,
-						  DRM_PLANE_NO_SCALING,
-						  false, true);
+						  OSD_MIN_SCALE, OSD_MAX_SCALE,
+						  true, true);
 	if (ret || !new_state->visible)
 		return ret;
+
+	/* The line into the vertical scaler: the narrower of source and screen */
+	if (min(drm_rect_width(&new_state->src) >> 16,
+		drm_rect_width(&new_state->dst)) > OSD_MAX_LINE)
+		return -EINVAL;
 
 	/* The header holds the address and the pitch in 16-byte units */
 	offset = fb->offsets[0] + (new_state->src.x1 >> 16) * fb->format->cpp[0];
@@ -211,19 +286,37 @@ static void mtk_vdout_osd_atomic_update(struct drm_plane *plane,
 	unsigned int idx = osd->hdr_idx ^ 1;
 	u32 *hdr = osd->hdr + idx * OSD_HDR_WORDS;
 	dma_addr_t hdr_dma = osd->hdr_dma + idx * OSD_HDR_SIZE;
+	const struct drm_rect *dst = &new_state->dst;
+	struct mtk_vdout_osd_scaler sc;
+	u32 sw, sh, dw, dh;
 
 	if (!new_state->visible) {
 		mtk_vdout_osd_off(osd);
 		return;
 	}
 
+	/* The header describes the source; the scaler takes it to the window */
+	sw = drm_rect_width(&new_state->src) >> 16;
+	sh = drm_rect_height(&new_state->src) >> 16;
+	dw = drm_rect_width(dst);
+	dh = drm_rect_height(dst);
 	mtk_vdout_osd_write_header(hdr, fb,
 				   drm_fb_dma_get_gem_addr(fb, new_state, 0),
-				   drm_rect_width(&new_state->src) >> 16,
-				   drm_rect_height(&new_state->src) >> 16);
+				   sw, sh);
+	mtk_vdout_osd_scaler(sw, sh, dw, dh, &sc);
 
+	/* All of it latches together at the next vsync */
 	rmw(osd->regs, OSD_UPDATE, OSD_UPDATE_EN, 0);
 	writel(hdr_dma >> 4, osd->regs + OSD_PLA_HEADER);
+	writel(dst->x1 << 16 | dst->y1, osd->regs + OSD_POS);
+	writel(sc.cfg, osd->regs + OSD_SC_CFG);
+	writel(sw << 16 | sh, osd->regs + OSD_SC_SRC_SIZE);
+	writel(dw << 16 | dh, osd->regs + OSD_SC_DST_SIZE);
+	writel(sc.vsc_width, osd->regs + OSD_SC_VSC_WIDTH);
+	writel(sc.hdsc, osd->regs + OSD_SC_HDSC);
+	writel(sc.husc, osd->regs + OSD_SC_HUSC);
+	writel(sc.vsc_ofst, osd->regs + OSD_SC_VSC_OFST);
+	writel(sc.vsc_step, osd->regs + OSD_SC_VSC_STEP);
 	writel(1, osd->regs + OSD_PLA_EN);
 	rmw(osd->regs, OSD_UPDATE, OSD_UPDATE_EN, OSD_UPDATE_EN);
 	osd->hdr_idx = idx;

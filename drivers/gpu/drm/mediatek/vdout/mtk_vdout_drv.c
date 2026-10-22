@@ -124,9 +124,8 @@ static int mtk_vdout_kms_init(struct mtk_vdout *vd)
 	ret = drmm_mode_config_init(drm);
 	if (ret)
 		return ret;
-	drm->mode_config.min_width = 1280;
+	/* The OSD scaler takes smaller buffers to the screen */
 	drm->mode_config.max_width = 1920;
-	drm->mode_config.min_height = 720;
 	drm->mode_config.max_height = 1080;
 	drm->mode_config.funcs = &mtk_vdout_mode_config_funcs;
 	drm->mode_config.helper_private = &mtk_vdout_mode_config_helpers;
