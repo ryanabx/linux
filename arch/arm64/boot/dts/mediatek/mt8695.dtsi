@@ -522,5 +522,32 @@
 			#clock-cells = <1>;
 			#reset-cells = <1>;
 		};
+
+		hdmi: hdmi@14006000 {
+			compatible = "mediatek,mt8695-hdmi-tx";
+			reg = <0 0x14006000 0 0x1000>;
+			interrupts = <GIC_SPI 195 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&mmsys CLK_MM_HDMITX>,
+				 <&topckgen CLK_TOP_HDCP_SEL>,
+				 <&topckgen CLK_TOP_HDCP_24M_SEL>;
+			clock-names = "bus", "hdcp", "hdcp24m";
+			phys = <&hdmi_phy>;
+			phy-names = "hdmi";
+			power-domains = <&spm MT8695_POWER_DOMAIN_MM>;
+			status = "disabled";
+
+			ports {
+				#address-cells = <1>;
+				#size-cells = <0>;
+
+				hdmi_port_in: port@0 {
+					reg = <0>;
+				};
+
+				hdmi_port_out: port@1 {
+					reg = <1>;
+				};
+			};
+		};
 	};
 };
