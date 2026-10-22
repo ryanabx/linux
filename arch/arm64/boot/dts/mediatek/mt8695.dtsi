@@ -534,6 +534,95 @@
 			#reset-cells = <1>;
 		};
 
+		vdout: display-controller@14001000 {
+			compatible = "mediatek,mt8695-vdout";
+			reg = <0 0x14001000 0 0x1000>,
+			      <0 0x14002000 0 0x1000>;
+			reg-names = "vdout", "hdr";
+			interrupts = <GIC_SPI 185 IRQ_TYPE_LEVEL_LOW>,
+				     <GIC_SPI 186 IRQ_TYPE_LEVEL_LOW>;
+			power-domains = <&spm MT8695_POWER_DOMAIN_MM>;
+			clocks = <&topckgen CLK_TOP_HD_SEL>,
+				 <&mmsys CLK_MM_VDOUT>,
+				 <&mmsys CLK_MM_FMT_TG>,
+				 <&mmsys CLK_MM_OSD_PREMIX>,
+				 <&mmsys CLK_MM_RGB2HDMI>,
+				 <&mmsys CLK_MM_OSD_SDR2HDR>,
+				 <&apmixedsys CLK_APMIXED_TVDPLL>;
+			clock-names = "hd", "vdout", "fmt", "premix", "rgb2hdmi",
+				      "sdr2hdr", "tvdpll";
+			resets = <&mmsys 9>;
+			reset-names = "rgb2hdmi";
+			mediatek,mmsys = <&mmsys>;
+			status = "disabled";
+
+			ports {
+				#address-cells = <1>;
+				#size-cells = <0>;
+
+				port@0 {
+					reg = <0>;
+
+					vdout_in_fhd: endpoint {
+						remote-endpoint = <&osd_fhd_out>;
+					};
+				};
+
+				port@1 {
+					reg = <1>;
+
+					vdout_in_uhd: endpoint {
+						remote-endpoint = <&osd_uhd_out>;
+					};
+				};
+
+				port@2 {
+					reg = <2>;
+
+					vdout_out: endpoint {
+						remote-endpoint = <&hdmi_in>;
+					};
+				};
+			};
+		};
+
+		osd_fhd: osd@14003000 {
+			compatible = "mediatek,mt8695-osd-fhd";
+			reg = <0 0x14003000 0 0x300>;
+			interrupts = <GIC_SPI 190 IRQ_TYPE_LEVEL_LOW>;
+			power-domains = <&spm MT8695_POWER_DOMAIN_MM>;
+			clocks = <&topckgen CLK_TOP_OSD_SEL>,
+				 <&mmsys CLK_MM_OSD_FHD>;
+			clock-names = "osd", "plane";
+			assigned-clocks = <&apmixedsys CLK_APMIXED_OSDPLL>;
+			assigned-clock-rates = <648000000>;
+			iommus = <&iommu M4U_PORT_FHD_OSD>;
+			status = "disabled";
+
+			port {
+				osd_fhd_out: endpoint {
+					remote-endpoint = <&vdout_in_fhd>;
+				};
+			};
+		};
+
+		osd_uhd: osd@14004300 {
+			compatible = "mediatek,mt8695-osd-uhd";
+			reg = <0 0x14004300 0 0x300>;
+			power-domains = <&spm MT8695_POWER_DOMAIN_MM>;
+			clocks = <&topckgen CLK_TOP_OSD_SEL>,
+				 <&mmsys CLK_MM_OSD_UHD>;
+			clock-names = "osd", "plane";
+			iommus = <&iommu M4U_PORT_UHD_OSD>;
+			status = "disabled";
+
+			port {
+				osd_uhd_out: endpoint {
+					remote-endpoint = <&vdout_in_uhd>;
+				};
+			};
+		};
+
 		hdmi: hdmi@14006000 {
 			compatible = "mediatek,mt8695-hdmi-tx";
 			reg = <0 0x14006000 0 0x1000>;
@@ -553,6 +642,10 @@
 
 				hdmi_port_in: port@0 {
 					reg = <0>;
+
+					hdmi_in: endpoint {
+						remote-endpoint = <&vdout_out>;
+					};
 				};
 
 				hdmi_port_out: port@1 {
