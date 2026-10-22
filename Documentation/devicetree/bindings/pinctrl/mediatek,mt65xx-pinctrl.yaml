@@ -25,6 +25,7 @@ properties:
       - mediatek,mt8167-pinctrl
       - mediatek,mt8173-pinctrl
       - mediatek,mt8516-pinctrl
+      - mediatek,mt8695-pinctrl
 
   reg:
     maxItems: 1
