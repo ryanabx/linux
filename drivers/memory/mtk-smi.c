@@ -576,6 +576,11 @@ static const struct mtk_smi_larb_gen mtk_smi_larb_mt8195 = {
 	.ostd		            = mtk_smi_larb_mt8195_ostd,
 };
 
+static const struct mtk_smi_larb_gen mtk_smi_larb_mt8695 = {
+	.config_port                = mtk_smi_larb_config_port_gen2_general,
+	.larb_direct_to_common_mask = BIT(8),	/* bdpsys */
+};
+
 static const struct of_device_id mtk_smi_larb_of_ids[] = {
 	{.compatible = "mediatek,mt2701-smi-larb", .data = &mtk_smi_larb_mt2701},
 	{.compatible = "mediatek,mt2712-smi-larb", .data = &mtk_smi_larb_mt2712},
@@ -590,6 +595,7 @@ static const struct of_device_id mtk_smi_larb_of_ids[] = {
 	{.compatible = "mediatek,mt8189-smi-larb", .data = &mtk_smi_larb_mt8189},
 	{.compatible = "mediatek,mt8192-smi-larb", .data = &mtk_smi_larb_mt8192},
 	{.compatible = "mediatek,mt8195-smi-larb", .data = &mtk_smi_larb_mt8195},
+	{.compatible = "mediatek,mt8695-smi-larb", .data = &mtk_smi_larb_mt8695},
 	{}
 };
 MODULE_DEVICE_TABLE(of, mtk_smi_larb_of_ids);
@@ -883,6 +889,16 @@ static const struct mtk_smi_common_plat mtk_smi_common_mt8365 = {
 	.bus_sel  = F_MMU1_LARB(2) | F_MMU1_LARB(4),
 };
 
+static const struct mtk_smi_reg_pair mtk_smi_common_mt8695_init[SMI_COMMON_INIT_REGS_NR] = {
+	{SMI_L1LEN, 0xb},
+};
+
+static const struct mtk_smi_common_plat mtk_smi_common_mt8695 = {
+	.type     = MTK_SMI_GEN2,
+	.bus_sel  = F_MMU1_LARB(0),
+	.init     = mtk_smi_common_mt8695_init,
+};
+
 static const struct of_device_id mtk_smi_common_of_ids[] = {
 	{.compatible = "mediatek,mt2701-smi-common", .data = &mtk_smi_common_gen1},
 	{.compatible = "mediatek,mt2712-smi-common", .data = &mtk_smi_common_gen2},
@@ -902,6 +918,7 @@ static const struct of_device_id mtk_smi_common_of_ids[] = {
 	{.compatible = "mediatek,mt8195-smi-common-vpp", .data = &mtk_smi_common_mt8195_vpp},
 	{.compatible = "mediatek,mt8195-smi-sub-common", .data = &mtk_smi_sub_common_mt8195},
 	{.compatible = "mediatek,mt8365-smi-common", .data = &mtk_smi_common_mt8365},
+	{.compatible = "mediatek,mt8695-smi-common", .data = &mtk_smi_common_mt8695},
 	{}
 };
 MODULE_DEVICE_TABLE(of, mtk_smi_common_of_ids);
