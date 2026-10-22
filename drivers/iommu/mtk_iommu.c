@@ -35,6 +35,8 @@
 
 #include <dt-bindings/memory/mtk-memory-port.h>
 
+#include "dma-iommu.h"
+
 #define REG_MMU_PT_BASE_ADDR			0x000
 
 #define REG_MMU_INVALIDATE			0x020
@@ -814,6 +816,13 @@ static int mtk_iommu_map(struct iommu_domain *domain, unsigned long iova,
 {
 	struct mtk_iommu_domain *dom = to_mtk_domain(domain);
 
+	/*
+	 * The page table comes with the first attach. Until then, fail, and
+	 * the core installs a device's direct mappings after attaching it.
+	 */
+	if (!dom->iop)
+		return -ENODEV;
+
 	/* The "4GB mode" M4U physically can not use the lower remap of Dram. */
 	if (dom->bank->parent_data->enable_4GB)
 		paddr |= BIT_ULL(32);
@@ -827,6 +836,9 @@ static size_t mtk_iommu_unmap(struct iommu_domain *domain,
 			      struct iommu_iotlb_gather *gather)
 {
 	struct mtk_iommu_domain *dom = to_mtk_domain(domain);
+
+	if (!dom->iop)
+		return 0;
 
 	iommu_iotlb_gather_add_range(gather, iova, pgsize * pgcount);
 	return dom->iop->unmap_pages(dom->iop, iova, pgsize, pgcount, gather);
@@ -863,6 +875,9 @@ static phys_addr_t mtk_iommu_iova_to_phys(struct iommu_domain *domain,
 {
 	struct mtk_iommu_domain *dom = to_mtk_domain(domain);
 	phys_addr_t pa;
+
+	if (!dom->iop)
+		return 0;
 
 	pa = dom->iop->iova_to_phys(dom->iop, iova);
 	if (IS_ENABLED(CONFIG_PHYS_ADDR_T_64BIT) &&
@@ -1052,6 +1067,12 @@ static void mtk_iommu_get_resv_regions(struct device *dev,
 
 		list_add_tail(&region->list, head);
 	}
+
+	/*
+	 * And the device tree's, such as a framebuffer that the bootloader
+	 * left scanning out, mapped 1:1 with iommu-addresses.
+	 */
+	iommu_dma_get_resv_regions(dev, head);
 }
 
 static const struct iommu_ops mtk_iommu_ops = {
