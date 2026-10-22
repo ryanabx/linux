@@ -1,0 +1,164 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/display/mediatek/mediatek,mt8695-vdout.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: MediaTek MT8695 VDOUT Display Output
+
+maintainers:
+  - Ryan Brue <ryanbrue.dev@gmail.com>
+
+description:
+  VDOUT is the display output of the MediaTek MT8695 TV SoC. Its format
+  timing generator (FMT) makes the video timings; the premix in front of it
+  mixes the OSD planes and a video plane, the OSD path's HDR block converts
+  the mix, and RGB2HDMI behind the FMT converts the output for the HDMI
+  transmitter. The FHD and UHD OSD planes come in through ports 0 and 1,
+  the HDMI transmitter is on port 2.
+
+properties:
+  compatible:
+    const: mediatek,mt8695-vdout
+
+  reg:
+    items:
+      - description: FMT, VDOUT system, RGB2HDMI and premix registers
+      - description: The OSD path's HDR block (BT.2020 and SDR to HDR)
+
+  reg-names:
+    items:
+      - const: vdout
+      - const: hdr
+
+  interrupts:
+    items:
+      - description: FMT vertical sync
+      - description: FMT active area start
+
+  power-domains:
+    maxItems: 1
+
+  clocks:
+    items:
+      - description: HD pixel clock mux
+      - description: VDOUT system clock
+      - description: FMT timing generator clock
+      - description: OSD premix clock
+      - description: RGB2HDMI clock
+      - description: SDR to HDR clock, for the HDR block
+      - description: TVDPLL, the source of the pixel clock
+
+  clock-names:
+    items:
+      - const: hd
+      - const: vdout
+      - const: fmt
+      - const: premix
+      - const: rgb2hdmi
+      - const: sdr2hdr
+      - const: tvdpll
+
+  resets:
+    maxItems: 1
+
+  reset-names:
+    items:
+      - const: rgb2hdmi
+
+  mediatek,mmsys:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description:
+      The MMSYS system controller, which holds the HDMI reference clock
+      selection.
+
+  ports:
+    $ref: /schemas/graph.yaml#/properties/ports
+
+    properties:
+      port@0:
+        $ref: /schemas/graph.yaml#/properties/port
+        description: Input from the FHD OSD plane
+
+      port@1:
+        $ref: /schemas/graph.yaml#/properties/port
+        description: Input from the UHD OSD plane
+
+      port@2:
+        $ref: /schemas/graph.yaml#/properties/port
+        description: Output to the HDMI transmitter
+
+    required:
+      - port@0
+      - port@2
+
+required:
+  - compatible
+  - reg
+  - reg-names
+  - interrupts
+  - power-domains
+  - clocks
+  - clock-names
+  - resets
+  - reset-names
+  - mediatek,mmsys
+  - ports
+
+additionalProperties: false
+
+examples:
+  - |
+    #include <dt-bindings/clock/mediatek,mt8695-clk.h>
+    #include <dt-bindings/interrupt-controller/arm-gic.h>
+    #include <dt-bindings/power/mediatek,mt8695-power.h>
+
+    display-controller@14001000 {
+        compatible = "mediatek,mt8695-vdout";
+        reg = <0x14001000 0x1000>, <0x14002000 0x1000>;
+        reg-names = "vdout", "hdr";
+        interrupts = <GIC_SPI 185 IRQ_TYPE_LEVEL_LOW>,
+                     <GIC_SPI 186 IRQ_TYPE_LEVEL_LOW>;
+        power-domains = <&spm MT8695_POWER_DOMAIN_MM>;
+        clocks = <&topckgen CLK_TOP_HD_SEL>,
+                 <&mmsys CLK_MM_VDOUT>,
+                 <&mmsys CLK_MM_FMT_TG>,
+                 <&mmsys CLK_MM_OSD_PREMIX>,
+                 <&mmsys CLK_MM_RGB2HDMI>,
+                 <&mmsys CLK_MM_OSD_SDR2HDR>,
+                 <&apmixedsys CLK_APMIXED_TVDPLL>;
+        clock-names = "hd", "vdout", "fmt", "premix", "rgb2hdmi", "sdr2hdr",
+                      "tvdpll";
+        resets = <&mmsys 9>;
+        reset-names = "rgb2hdmi";
+        mediatek,mmsys = <&mmsys>;
+
+        ports {
+            #address-cells = <1>;
+            #size-cells = <0>;
+
+            port@0 {
+                reg = <0>;
+
+                endpoint {
+                    remote-endpoint = <&osd_fhd_out>;
+                };
+            };
+
+            port@1 {
+                reg = <1>;
+
+                endpoint {
+                    remote-endpoint = <&osd_uhd_out>;
+                };
+            };
+
+            port@2 {
+                reg = <2>;
+
+                endpoint {
+                    remote-endpoint = <&hdmi_in>;
+                };
+            };
+        };
+    };
