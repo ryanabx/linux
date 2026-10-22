@@ -62,6 +62,7 @@ properties:
               - mediatek,mt8183-mfgcfg
               - mediatek,mt8183-vdecsys
               - mediatek,mt8183-vencsys
+              - mediatek,mt8695-mcucfg
           - const: syscon
       - items:
           - const: mediatek,mt7623-bdpsys
