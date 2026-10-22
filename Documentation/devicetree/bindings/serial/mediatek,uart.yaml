@@ -51,6 +51,7 @@ properties:
               - mediatek,mt8195-uart
               - mediatek,mt8365-uart
               - mediatek,mt8516-uart
+              - mediatek,mt8695-uart
           - const: mediatek,mt6577-uart
 
   reg:
