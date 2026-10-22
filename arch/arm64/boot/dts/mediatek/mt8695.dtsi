@@ -325,6 +325,10 @@
 			thermal_calibration: calib@180 {
 				reg = <0x180 0xc>;
 			};
+
+			hdmi_calibration: calib@188 {
+				reg = <0x188 0x10>;
+			};
 		};
 
 		apmixedsys: clock-controller@10209000 {
@@ -495,6 +499,21 @@
 				clock-names = "ref";
 				#phy-cells = <1>;
 			};
+		};
+
+		hdmi_phy: hdmi-phy@11702000 {
+			compatible = "mediatek,mt8695-hdmi-phy";
+			reg = <0 0x11702000 0 0x100>;
+			clocks = <&apmixedsys CLK_APMIXED_HDMITX20_CKSEL>;
+			clock-names = "pll_ref";
+			clock-output-names = "hdmitx20_pll";
+			nvmem-cells = <&hdmi_calibration>;
+			nvmem-cell-names = "intr-cal";
+			mediatek,ibias = <0x10>;
+			mediatek,ibias_up = <0x1a>;
+			#clock-cells = <0>;
+			#phy-cells = <0>;
+			status = "disabled";
 		};
 
 		mmsys: syscon@14000000 {
