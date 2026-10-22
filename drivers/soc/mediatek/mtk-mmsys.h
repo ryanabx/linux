@@ -120,6 +120,8 @@ struct mtk_mmsys_routes {
  * @num_resets: Number of reset bits that are defined
  * @is_vppsys: Whether the mmsys is VPPSYS (Video Processing Pipe)
  *             or VDOSYS (Video). Only VDOSYS needs to be added to drm driver.
+ * @no_ddp: The display has none of the DDP blocks the drm driver drives,
+ *          and a driver of its own, so the drm driver isn't added either.
  * @vsync_len: VSYNC length of the MIXER.
  *             VSYNC is usually triggered by the connector, so its length is a
  *             fixed value when the frame rate is decided, but ETHDR and
@@ -145,6 +147,7 @@ struct mtk_mmsys_driver_data {
 	const u8 *rst_tb;
 	const u32 num_resets;
 	const bool is_vppsys;
+	const bool no_ddp;
 	const u8 vsync_len;
 };
 
