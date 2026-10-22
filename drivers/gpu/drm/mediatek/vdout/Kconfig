@@ -1,0 +1,17 @@
+# SPDX-License-Identifier: GPL-2.0-only
+config DRM_MEDIATEK_VDOUT
+	tristate "DRM support for the MediaTek VDOUT display"
+	depends on DRM && OF && COMMON_CLK
+	depends on ARCH_MEDIATEK || COMPILE_TEST
+	select DRM_BRIDGE_CONNECTOR
+	select DRM_CLIENT_SELECTION
+	select DRM_DISPLAY_HELPER
+	select DRM_GEM_DMA_HELPER
+	select DRM_KMS_HELPER
+	select MFD_SYSCON
+	help
+	  Choose this option for the display output of MediaTek's TV SoCs,
+	  such as the MT8695: the OSD planes, the VDOUT timing generator and
+	  RGB2HDMI, in front of the HDMI TX (DRM_MEDIATEK_HDMI_V2).
+
+	  If M is selected, the module will be called mtk-vdout.

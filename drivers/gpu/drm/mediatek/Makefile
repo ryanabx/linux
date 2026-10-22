@@ -28,3 +28,5 @@ obj-$(CONFIG_DRM_MEDIATEK_HDMI_V2) += mtk_hdmi_v2.o
 obj-$(CONFIG_DRM_MEDIATEK_HDMI_V2) += mtk_hdmi_ddc_v2.o
 
 obj-$(CONFIG_DRM_MEDIATEK_DP) += mtk_dp.o
+
+obj-$(CONFIG_DRM_MEDIATEK_VDOUT) += vdout/
