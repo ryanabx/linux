@@ -10,6 +10,7 @@
 
 #include <linux/bitfield.h>
 #include <linux/delay.h>
+#include <linux/math.h>
 #include <linux/nvmem-consumer.h>
 #include <linux/slab.h>
 #include <linux/unaligned.h>
@@ -191,7 +192,7 @@ static int mtk_hdmi_pll_set_rate(struct clk_hw *hw, unsigned long rate,
 	writel(0x00480000, base + HDMI20_PLL_CFG_3);
 	mtk_phy_update_field(base + HDMI20_CFG_7, RG_CFG7_ANA, 0x1ff4);
 
-	/* vSetHDMITxPLL(): the TMDS clock from the 74.25 MHz reference */
+	/* vSetHDMITxPLL(): the TMDS clock from its reference */
 	mtk_phy_update_field(base + HDMI20_PLL_CFG_0, RG_PLL_BAND, 0x37);
 	mtk_phy_update_bits(base + HDMI20_PLL_CFG_1,
 			    RG_PLL_BC | RG_PLL_BP | RG_PLL_BP2 | RG_PLL_BR |
@@ -262,10 +263,56 @@ static void mtk_hdmi_phy_disable_tmds(struct mtk_hdmi_phy *hdmi_phy)
 	usleep_range(100, 150);
 }
 
+/*
+ * The PLL runs its reference times 40 and divides by 10 << TX_POSDIV for
+ * the TMDS clock, so each row needs its own reference: TVDPLL / 8 for the
+ * HD rates, OSDPLL / 12 (54 MHz) for 27 MHz, as MediaTek's driver selects
+ * with HDMITX20_CKSEL. Pick the parent of that mux that runs closest to
+ * the rate needed; it can't be left to clk_set_rate(), which could retune
+ * TVDPLL, the pixel clock, instead.
+ */
+static int mtk_hdmi_pll_select_ref(struct mtk_hdmi_phy *hdmi_phy,
+				   unsigned long rate)
+{
+	const struct mtk_hdmi_pll_row *row = mtk_hdmi_pll_find(rate);
+	struct clk_hw *mux = clk_hw_get_parent(&hdmi_phy->pll_hw);
+	struct clk_hw *best = NULL, *p;
+	unsigned long ref, diff, best_diff = ULONG_MAX;
+	unsigned int i;
+
+	if (!row || !mux)
+		return -EINVAL;
+
+	ref = (rate << row->tx_posdiv) / 4;
+	for (i = 0; i < clk_hw_get_num_parents(mux); i++) {
+		p = clk_hw_get_parent_by_index(mux, i);
+		if (!p)
+			continue;
+		diff = abs_diff(clk_hw_get_rate(p), ref);
+		if (diff < best_diff) {
+			best = p;
+			best_diff = diff;
+		}
+	}
+
+	/* Within 0.1%: the /1.001 rates come from TVDPLL itself */
+	if (!best || best_diff > ref / 1000) {
+		dev_err(hdmi_phy->dev, "no reference for %lu Hz\n", rate);
+		return -EINVAL;
+	}
+
+	return clk_hw_set_parent(mux, best);
+}
+
 /* The PLL makes the TMDS clock; its rate can only change while it is off */
 static int mtk_hdmi_phy_configure(struct phy *phy, union phy_configure_opts *opts)
 {
 	struct mtk_hdmi_phy *hdmi_phy = phy_get_drvdata(phy);
+	int ret;
+
+	ret = mtk_hdmi_pll_select_ref(hdmi_phy, opts->dp.link_rate);
+	if (ret)
+		return ret;
 
 	return clk_set_rate(hdmi_phy->pll, opts->dp.link_rate);
 }
