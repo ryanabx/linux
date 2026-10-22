@@ -19,6 +19,7 @@ properties:
     enum:
       - mediatek,mt8188-hdmi-tx
       - mediatek,mt8195-hdmi-tx
+      - mediatek,mt8695-hdmi-tx
 
   reg:
     maxItems: 1
@@ -27,6 +28,7 @@ properties:
     maxItems: 1
 
   clocks:
+    minItems: 3
     items:
       - description: HDMI Peripheral Bus (APB) clock
       - description: HDCP and HDMI_TOP clock
@@ -34,6 +36,7 @@ properties:
       - description: VPP HDMI Split clock
 
   clock-names:
+    minItems: 3
     items:
       - const: bus
       - const: hdcp
@@ -93,6 +96,23 @@ required:
 
 allOf:
   - $ref: /schemas/sound/dai-common.yaml#
+  - if:
+      properties:
+        compatible:
+          contains:
+            const: mediatek,mt8695-hdmi-tx
+    then:
+      properties:
+        clocks:
+          maxItems: 3
+        clock-names:
+          maxItems: 3
+    else:
+      properties:
+        clocks:
+          minItems: 4
+        clock-names:
+          minItems: 4
 
 additionalProperties: false
 
