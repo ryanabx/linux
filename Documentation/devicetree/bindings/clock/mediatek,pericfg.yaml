@@ -32,6 +32,7 @@ properties:
               - mediatek,mt8188-pericfg
               - mediatek,mt8195-pericfg
               - mediatek,mt8516-pericfg
+              - mediatek,mt8695-pericfg
           - const: syscon
       - items:
           # Special case for mt7623 for backward compatibility
