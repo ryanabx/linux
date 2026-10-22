@@ -45,6 +45,7 @@ properties:
               - mediatek,mt8189-wdt
               - mediatek,mt8365-wdt
               - mediatek,mt8516-wdt
+              - mediatek,mt8695-wdt
           - const: mediatek,mt6589-wdt
 
   reg:
