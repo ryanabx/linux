@@ -1157,4 +1157,12 @@ config COMMON_CLK_MT8695
 	  This driver supports MediaTek MT8695 basic clocks: the PLLs
 	  (apmixedsys), topckgen, infracfg, pericfg and mcucfg.
 
+config COMMON_CLK_MT8695_MMSYS
+	tristate "Clock driver for MediaTek MT8695 mmsys"
+	depends on COMMON_CLK_MT8695
+	default COMMON_CLK_MT8695
+	help
+	  This driver supports MediaTek MT8695 mmsys clocks: the SMI and
+	  display output (OSD, VDOUT, HDMI TX) gates.
+
 endmenu
