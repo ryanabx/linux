@@ -180,6 +180,7 @@ enum mtk_iommu_plat {
 	M4U_MT8192,
 	M4U_MT8195,
 	M4U_MT8365,
+	M4U_MT8695,
 };
 
 struct mtk_iommu_iova_region {
@@ -1927,6 +1928,21 @@ static const struct mtk_iommu_plat_data mt8365_data = {
 	.larbid_remap	= {{0}, {1}, {2}, {3}, {4}, {5}}, /* Linear mapping. */
 };
 
+/*
+ * The MT2712 M4U, but only one of them, so no shared page table; larb2 is
+ * missing and larb8 (bdpsys) takes its ID.
+ */
+static const struct mtk_iommu_plat_data mt8695_data = {
+	.m4u_plat     = M4U_MT8695,
+	.flags        = HAS_BCLK | RESET_AXI | WR_THROT_EN | MTK_IOMMU_TYPE_MM,
+	.inv_sel_reg  = REG_MMU_INV_SEL_GEN1,
+	.iova_region  = single_domain,
+	.iova_region_nr = ARRAY_SIZE(single_domain),
+	.banks_num    = 1,
+	.banks_enable = {true},
+	.larbid_remap = {{0}, {1}, {8}, {3}, {4}, {5}, {6}, {7}},
+};
+
 static const struct of_device_id mtk_iommu_of_ids[] = {
 	{ .compatible = "mediatek,mt2712-m4u", .data = &mt2712_data},
 	{ .compatible = "mediatek,mt6779-m4u", .data = &mt6779_data},
@@ -1947,6 +1963,7 @@ static const struct of_device_id mtk_iommu_of_ids[] = {
 	{ .compatible = "mediatek,mt8195-iommu-vdo",   .data = &mt8195_data_vdo},
 	{ .compatible = "mediatek,mt8195-iommu-vpp",   .data = &mt8195_data_vpp},
 	{ .compatible = "mediatek,mt8365-m4u", .data = &mt8365_data},
+	{ .compatible = "mediatek,mt8695-m4u", .data = &mt8695_data},
 	{}
 };
 MODULE_DEVICE_TABLE(of, mtk_iommu_of_ids);
