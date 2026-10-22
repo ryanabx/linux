@@ -333,6 +333,14 @@
 			#clock-cells = <1>;
 		};
 
+		rng: rng@1020f000 {
+			compatible = "mediatek,mt8695-rng",
+				     "mediatek,mt7623-rng";
+			reg = <0 0x1020f000 0 0x100>;
+			clocks = <&infracfg CLK_INFRA_TRNG>;
+			clock-names = "rng";
+		};
+
 		mcucfg: clock-controller@10220000 {
 			compatible = "mediatek,mt8695-mcucfg", "syscon";
 			reg = <0 0x10220000 0 0x1000>;
