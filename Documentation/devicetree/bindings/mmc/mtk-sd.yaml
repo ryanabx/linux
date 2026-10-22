@@ -40,6 +40,9 @@ properties:
               - mediatek,mt8195-mmc
               - mediatek,mt8365-mmc
           - const: mediatek,mt8183-mmc
+      - items:
+          - const: mediatek,mt8695-mmc
+          - const: mediatek,mt2712-mmc
 
   reg:
     minItems: 1
