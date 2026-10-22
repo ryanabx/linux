@@ -316,9 +316,15 @@
 };
 
 &ssusb {
-	/* Device mode only for now; the ID pin (GPIO55) reads high. */
-	dr_mode = "peripheral";
+	dr_mode = "otg";
+	usb-role-switch;
 	status = "okay";
+
+	connector {
+		compatible = "gpio-usb-b-connector", "usb-b-connector";
+		type = "micro";
+		id-gpios = <&pio 55 GPIO_ACTIVE_HIGH>;
+	};
 };
 
 &tphy {
@@ -330,6 +336,10 @@
 	mediatek,eye-src = <3>;
 	mediatek,eye-vrt = <4>;
 	mediatek,eye-term = <4>;
+};
+
+&usb_host {
+	status = "okay";
 };
 
 &uart1 {
