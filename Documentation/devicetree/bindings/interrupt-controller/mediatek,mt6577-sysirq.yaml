@@ -40,6 +40,7 @@ properties:
               - mediatek,mt8183-sysirq
               - mediatek,mt8365-sysirq
               - mediatek,mt8516-sysirq
+              - mediatek,mt8695-sysirq
           - const: mediatek,mt6577-sysirq
 
   reg:
