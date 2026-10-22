@@ -85,6 +85,7 @@
 
 /* mmsys */
 #define MMSYS_HDMI_REFCLK	0x228
+#define  MMSYS_HDMI_REFCLK_SD	BIT(16)
 
 struct reg_val {
 	u16 off;
@@ -129,6 +130,7 @@ struct mtk_vdout_mode {
 	struct drm_display_mode mode;
 	unsigned long tvdpll;
 	bool hd_half;		/* 74.25 MHz pixel clock: TVDPLL / 8 */
+	bool sd;		/* 27 MHz pixel clock, TMDS reference from OSDPLL */
 	u32 fmt_mode;
 	u32 vsync_pulse_osd;
 	struct mtk_vdout_osd_timing osd;
@@ -175,12 +177,31 @@ struct mtk_vdout_mode {
 	.r2h_sync_delay = 0x00010026, .r2h_delay = 0x00111000,		\
 }
 
+/* 720x480p59.94 (CEA VIC 2 and 3): MediaTek has no 27.027 MHz variant */
+#define VDOUT_480P {							\
+	.mode = { DRM_MODE("720x480", DRM_MODE_TYPE_DRIVER, 27000,	\
+			   720, 736, 798, 858, 0, 480, 489, 495, 525, 0,\
+			   DRM_MODE_FLAG_NHSYNC | DRM_MODE_FLAG_NVSYNC) },	\
+	.tvdpll = 594000000,						\
+	.sd = true,							\
+	.fmt_mode = 0x9420,						\
+	.vsync_pulse_osd = 0x04160333,					\
+	.osd = {							\
+		.sync = 0x0040320d, .htotal = 0x35a,			\
+		.start = 0x007b0000, .vstart = 0x002b002b,		\
+		.sync_thres = 0x18f,					\
+	},								\
+	.r2h_time = { 0x033e060c, 0x007b034a, 0x002b020a },		\
+	.r2h_sync_delay = 0x00010021, .r2h_delay = 0x00111000,		\
+}
+
 /* The first one is what the bootloader sets up */
 static const struct mtk_vdout_mode mtk_vdout_modes[] = {
 	VDOUT_1080P(148352, 593400000),
 	VDOUT_1080P(148500, 594000000),
 	VDOUT_720P(74250, 594000000),
 	VDOUT_720P(74176, 593400000),
+	VDOUT_480P,
 };
 
 static inline struct mtk_vdout *crtc_to_vdout(struct drm_crtc *crtc)
@@ -233,11 +254,11 @@ static void mtk_vdout_fmt_setup(struct mtk_vdout *vd, const struct mtk_vdout_mod
 	fmt_write(vd, FMT_ACTIVE_Y1, 0);
 	fmt_reset(vd);
 
-	/* vdout_sys_hal_set_hdmi() */
+	/* vdout_sys_hal_set_hdmi(): the HD clock path, or the 27 MHz one */
 	rmw(v, HDMI_CONFIG_SUB, SELF_OPT_HDMI | VDOUT_CLK_HDMI_HD | HDMI_PRGS27M,
-	    SELF_OPT_HDMI | VDOUT_CLK_HDMI_HD);
+	    m->sd ? HDMI_PRGS27M : SELF_OPT_HDMI | VDOUT_CLK_HDMI_HD);
 	rmw(v, HDMI_CONFIG_SUB, VDOUT_CLK_HDMI_1080P,
-	    m->hd_half ? 0 : VDOUT_CLK_HDMI_1080P);
+	    m->hd_half || m->sd ? 0 : VDOUT_CLK_HDMI_1080P);
 	rmw(v, VDOUT_CLK, VDOUT_CLK_HD_HALF, m->hd_half ? VDOUT_CLK_HD_HALF : 0);
 	rmw(v, VDTCLK_CFG3, BIT(16) | BIT(17), 0);
 	rmw(v, HDMI_CONFIG_SUB, RGB2HDMI_296M_EN, 0);
@@ -278,14 +299,20 @@ static void mtk_vdout_r2h_setup(struct mtk_vdout *vd, const struct mtk_vdout_mod
 	bool full = !rgb || !limited;
 
 	rmw(v, HDMI_CONFIG_SUB, HDMI_422_TO_420, 0);
-	regmap_update_bits(vd->mmsys, MMSYS_HDMI_REFCLK, BIT(16), 0);
+	regmap_update_bits(vd->mmsys, MMSYS_HDMI_REFCLK, MMSYS_HDMI_REFCLK_SD,
+			   m->sd ? MMSYS_HDMI_REFCLK_SD : 0);
 
 	rmw(v, R2H_CTRL, BIT(21) | BIT(20) | BIT(16) | BIT(3) | BIT(2),
 	    rgb ? BIT(2) : 0);
 	rmw(v, R2H_CTRL, BIT(0) | BIT(6) | BIT(11), BIT(0) | BIT(6) | BIT(11));
 	writel(1, v + R2H_HSYNC_DELAY);
 	rmw(v, R2H_CTRL, BIT(8) | BIT(10), BIT(8) | BIT(10));
-	/* RGB: BT.709 to RGB, 16-235 (mode 4) or 0-255 (mode 6) */
+	/*
+	 * RGB: BT.709 to RGB, 16-235 (mode 4) or 0-255 (mode 6). The OSD path
+	 * makes BT.709 YCbCr at every resolution, so SD modes take the same
+	 * matrix; MediaTek's driver picks BT.601 for them, which shifts the
+	 * colours.
+	 */
 	rmw(v, R2H_MATRIX, BIT(31), rgb ? BIT(31) : 0);
 	rmw(v, R2H_709, GENMASK(30, 28), rgb ? (full ? 6 : 4) << 28 : 0);
 	writel(full ? 0xfeff0100 : 0xebff0000, v + R2H_CLIP);
