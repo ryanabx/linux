@@ -30,6 +30,7 @@ properties:
           - mediatek,mt8189-smi-larb
           - mediatek,mt8192-smi-larb
           - mediatek,mt8195-smi-larb
+          - mediatek,mt8695-smi-larb
 
       - description: for mt7623
         items:
@@ -88,6 +89,7 @@ allOf:
             - mediatek,mt8188-smi-larb
             - mediatek,mt8189-smi-larb
             - mediatek,mt8195-smi-larb
+            - mediatek,mt8695-smi-larb
 
     then:
       properties:
@@ -124,6 +126,7 @@ allOf:
               - mediatek,mt8189-smi-larb
               - mediatek,mt8192-smi-larb
               - mediatek,mt8195-smi-larb
+              - mediatek,mt8695-smi-larb
 
     then:
       required:
