@@ -22,6 +22,7 @@
 #include "mt8192-mmsys.h"
 #include "mt8195-mmsys.h"
 #include "mt8365-mmsys.h"
+#include "mt8695-mmsys.h"
 
 #define MMSYS_SW_RESET_PER_REG 32
 
@@ -57,6 +58,17 @@ static const struct mtk_mmsys_driver_data mt8167_mmsys_driver_data = {
 	.clk_driver = "clk-mt8167-mm",
 	.routes = mt8167_mmsys_routing_table,
 	.num_routes = ARRAY_SIZE(mt8167_mmsys_routing_table),
+};
+
+/*
+ * MT8695 has no DDP routing: the OSD and video planes feed a fixed-format
+ * timing generator. VDOUT_SW_RST holds the HDMI TX (8) and RGB2HDMI (9)
+ * resets.
+ */
+static const struct mtk_mmsys_driver_data mt8695_mmsys_driver_data = {
+	.clk_driver = "clk-mt8695-mm",
+	.sw0_rst_offset = MT8695_MMSYS_VDOUT_SW_RST,
+	.num_resets = 32,
 };
 
 static const struct mtk_mmsys_driver_data mt8173_mmsys_driver_data = {
@@ -465,6 +477,7 @@ static const struct of_device_id of_match_mtk_mmsys[] = {
 	{ .compatible = "mediatek,mt6797-mmsys", .data = &mt6797_mmsys_driver_data },
 	{ .compatible = "mediatek,mt8167-mmsys", .data = &mt8167_mmsys_driver_data },
 	{ .compatible = "mediatek,mt8173-mmsys", .data = &mt8173_mmsys_driver_data },
+	{ .compatible = "mediatek,mt8695-mmsys", .data = &mt8695_mmsys_driver_data },
 	{ .compatible = "mediatek,mt8183-mmsys", .data = &mt8183_mmsys_driver_data },
 	{ .compatible = "mediatek,mt8186-mmsys", .data = &mt8186_mmsys_driver_data },
 	{ .compatible = "mediatek,mt8188-vdosys0", .data = &mt8188_vdosys0_driver_data },
