@@ -69,6 +69,7 @@ static const struct mtk_mmsys_driver_data mt8695_mmsys_driver_data = {
 	.clk_driver = "clk-mt8695-mm",
 	.sw0_rst_offset = MT8695_MMSYS_VDOUT_SW_RST,
 	.num_resets = 32,
+	.no_ddp = true,
 };
 
 static const struct mtk_mmsys_driver_data mt8173_mmsys_driver_data = {
@@ -446,7 +447,7 @@ static int mtk_mmsys_probe(struct platform_device *pdev)
 		return PTR_ERR(clks);
 	mmsys->clks_pdev = clks;
 
-	if (mmsys->data->is_vppsys)
+	if (mmsys->data->is_vppsys || mmsys->data->no_ddp)
 		goto out_probe_done;
 
 	drm = platform_device_register_data(&pdev->dev, "mediatek-drm",
