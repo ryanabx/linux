@@ -15,6 +15,11 @@
  */
 
 static const struct scpsys_domain_data scpsys_domain_data_mt8695[] = {
+	/*
+	 * The HDMI TX in MM comes back from a power cycle with its HDCP
+	 * control at mute overrides that only the secure world can clear,
+	 * so the output would stay muted for good.
+	 */
 	[MT8695_POWER_DOMAIN_MM] = {
 		.name = "mm",
 		.sta_mask = BIT(11),
@@ -23,7 +28,7 @@ static const struct scpsys_domain_data scpsys_domain_data_mt8695[] = {
 		.pwr_sta2nd_offs = SPM_PWR_STATUS_2ND,
 		.sram_pdn_bits = GENMASK(11, 8),
 		.sram_pdn_ack_bits = GENMASK(12, 12),
-		.caps = MTK_SCPD_ACTIVE_WAKEUP,
+		.caps = MTK_SCPD_ACTIVE_WAKEUP | MTK_SCPD_ALWAYS_ON,
 	},
 	[MT8695_POWER_DOMAIN_VDEC] = {
 		.name = "vdec",
