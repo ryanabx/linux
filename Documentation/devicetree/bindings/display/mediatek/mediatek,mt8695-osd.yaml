@@ -1,0 +1,90 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/display/mediatek/mediatek,mt8695-osd.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: MediaTek MT8695 OSD Plane
+
+maintainers:
+  - Ryan Brue <ryanbrue.dev@gmail.com>
+
+description:
+  The on-screen display (OSD) of the MediaTek MT8695 TV SoC has two
+  graphics planes, FHD and UHD, each with its own timing, plane and scaler
+  registers. A plane reads region headers and buffers from memory through
+  the M4U and feeds one input of the VDOUT premix, which stacks the UHD
+  plane above the FHD plane.
+
+properties:
+  compatible:
+    enum:
+      - mediatek,mt8695-osd-fhd
+      - mediatek,mt8695-osd-uhd
+
+  reg:
+    maxItems: 1
+
+  interrupts:
+    items:
+      - description: The plane's vertical sync
+
+  power-domains:
+    maxItems: 1
+
+  clocks:
+    items:
+      - description: OSD clock mux
+      - description: The plane's clock
+
+  clock-names:
+    items:
+      - const: osd
+      - const: plane
+
+  iommus:
+    maxItems: 1
+
+  memory-region:
+    maxItems: 1
+    description:
+      The bootloader's framebuffer, still scanned out on this plane when
+      the operating system starts.
+
+  port:
+    $ref: /schemas/graph.yaml#/properties/port
+    description: Output to the VDOUT premix
+
+required:
+  - compatible
+  - reg
+  - power-domains
+  - clocks
+  - clock-names
+  - iommus
+  - port
+
+additionalProperties: false
+
+examples:
+  - |
+    #include <dt-bindings/clock/mediatek,mt8695-clk.h>
+    #include <dt-bindings/interrupt-controller/arm-gic.h>
+    #include <dt-bindings/memory/mediatek,mt8695-memory-port.h>
+    #include <dt-bindings/power/mediatek,mt8695-power.h>
+
+    osd@14003000 {
+        compatible = "mediatek,mt8695-osd-fhd";
+        reg = <0x14003000 0x300>;
+        interrupts = <GIC_SPI 190 IRQ_TYPE_LEVEL_LOW>;
+        power-domains = <&spm MT8695_POWER_DOMAIN_MM>;
+        clocks = <&topckgen CLK_TOP_OSD_SEL>, <&mmsys CLK_MM_OSD_FHD>;
+        clock-names = "osd", "plane";
+        iommus = <&iommu M4U_PORT_FHD_OSD>;
+
+        port {
+            endpoint {
+                remote-endpoint = <&vdout_in_fhd>;
+            };
+        };
+    };
