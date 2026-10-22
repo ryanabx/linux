@@ -55,6 +55,7 @@ properties:
               - mediatek,mt8192-efuse
               - mediatek,mt8195-efuse
               - mediatek,mt8516-efuse
+              - mediatek,mt8695-efuse
           - const: mediatek,efuse
       - const: mediatek,mt8173-efuse
         deprecated: true
