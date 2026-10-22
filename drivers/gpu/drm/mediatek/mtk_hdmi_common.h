@@ -146,6 +146,12 @@ struct mtk_hdmi_conf {
 	bool cea_modes_only;
 	unsigned long max_mode_clock;
 	u32 reg_hdmi_tx_cfg;
+	/*
+	 * No HDMITX_CONFIG register: the TX can't be soft reset, and its HDCP
+	 * control stays as the bootloader left it (MT8695, where it is
+	 * secure-only and a reset would leave the output muted).
+	 */
+	bool no_tx_cfg;
 };
 
 struct mtk_hdmi {

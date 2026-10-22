@@ -58,6 +58,13 @@ static const char *const mtk_hdmi_v2_clk_names[MTK_HDMI_V2_CLK_COUNT] = {
 	[MTK_HDMI_V2_CLK_VPP_SPLIT_HDMI] = "hdmi-split",
 };
 
+/* MT8695 has no VPP split clock */
+static const char *const mtk_hdmi_v2_mt8695_clk_names[] = {
+	[MTK_HDMI_V2_CLK_HDCP_SEL] = "hdcp",
+	[MTK_HDMI_V2_CLK_HDCP_24M_SEL] = "hdcp24m",
+	[MTK_HDMI_V2_CLK_HDMI_APB_SEL] = "bus",
+};
+
 static inline void mtk_hdmi_v2_hwirq_disable(struct mtk_hdmi *hdmi)
 {
 	regmap_write(hdmi->regs, TOP_INT_ENABLE00, 0);
@@ -75,13 +82,17 @@ static inline void mtk_hdmi_v2_enable_hpd_pord_irq(struct mtk_hdmi *hdmi, bool e
 static inline void mtk_hdmi_v2_set_sw_hpd(struct mtk_hdmi *hdmi, bool enable)
 {
 	if (enable) {
-		regmap_set_bits(hdmi->regs, hdmi->conf->reg_hdmi_tx_cfg, HDMITX_SW_HPD);
+		if (!hdmi->conf->no_tx_cfg)
+			regmap_set_bits(hdmi->regs, hdmi->conf->reg_hdmi_tx_cfg,
+					HDMITX_SW_HPD);
 		regmap_set_bits(hdmi->regs, HDCP2X_CTRL_0, HDCP2X_HPD_OVR);
 		regmap_set_bits(hdmi->regs, HDCP2X_CTRL_0, HDCP2X_HPD_SW);
 	} else {
 		regmap_clear_bits(hdmi->regs, HDCP2X_CTRL_0, HDCP2X_HPD_OVR);
 		regmap_clear_bits(hdmi->regs, HDCP2X_CTRL_0, HDCP2X_HPD_SW);
-		regmap_clear_bits(hdmi->regs, hdmi->conf->reg_hdmi_tx_cfg, HDMITX_SW_HPD);
+		if (!hdmi->conf->no_tx_cfg)
+			regmap_clear_bits(hdmi->regs, hdmi->conf->reg_hdmi_tx_cfg,
+					  HDMITX_SW_HPD);
 	}
 }
 
@@ -130,6 +141,9 @@ static void mtk_hdmi_v2_hw_aud_mute(struct mtk_hdmi *hdmi, bool enable)
 
 static void mtk_hdmi_v2_hw_reset(struct mtk_hdmi *hdmi)
 {
+	if (hdmi->conf->no_tx_cfg)
+		return;
+
 	regmap_clear_bits(hdmi->regs, hdmi->conf->reg_hdmi_tx_cfg, HDMITX_SW_RSTB);
 	udelay(5);
 	regmap_set_bits(hdmi->regs, hdmi->conf->reg_hdmi_tx_cfg, HDMITX_SW_RSTB);
@@ -243,7 +257,9 @@ static void mtk_hdmi_yuv420_downsampling(struct mtk_hdmi *hdmi, bool enable)
 	regmap_read(hdmi->regs, VID_DOWNSAMPLE_CONFIG, &val);
 
 	if (enable) {
-		regmap_set_bits(hdmi->regs, hdmi->conf->reg_hdmi_tx_cfg, HDMI_YUV420_MODE);
+		if (!hdmi->conf->no_tx_cfg)
+			regmap_set_bits(hdmi->regs, hdmi->conf->reg_hdmi_tx_cfg,
+					HDMI_YUV420_MODE);
 
 		val |= C444_C422_CONFIG_ENABLE | C422_C420_CONFIG_ENABLE;
 		val |= C422_C420_CONFIG_OUT_CB_OR_CR;
@@ -252,7 +268,9 @@ static void mtk_hdmi_yuv420_downsampling(struct mtk_hdmi *hdmi, bool enable)
 
 		regmap_set_bits(hdmi->regs, VID_OUT_FORMAT, OUTPUT_FORMAT_DEMUX_420_ENABLE);
 	} else {
-		regmap_clear_bits(hdmi->regs, hdmi->conf->reg_hdmi_tx_cfg, HDMI_YUV420_MODE);
+		if (!hdmi->conf->no_tx_cfg)
+			regmap_clear_bits(hdmi->regs, hdmi->conf->reg_hdmi_tx_cfg,
+					  HDMI_YUV420_MODE);
 
 		val &= ~(C444_C422_CONFIG_ENABLE | C422_C420_CONFIG_ENABLE);
 		val &= ~C422_C420_CONFIG_OUT_CB_OR_CR;
@@ -706,7 +724,8 @@ static void mtk_hdmi_v2_change_video_resolution(struct mtk_hdmi *hdmi,
 	mtk_hdmi_v2_set_sw_hpd(hdmi, true);
 	udelay(2);
 
-	regmap_write(hdmi->regs, HDCP_TOP_CTRL, 0);
+	if (!hdmi->conf->no_tx_cfg)
+		regmap_write(hdmi->regs, HDCP_TOP_CTRL, 0);
 
 	/*
 	 * Enable HDCP reauthentication interrupt: the HW uses this internally
@@ -1137,9 +1156,14 @@ mtk_hdmi_v2_hdmi_tmds_char_rate_valid(const struct drm_bridge *bridge,
 				      const struct drm_display_mode *mode,
 				      unsigned long long tmds_rate)
 {
+	const struct mtk_hdmi *hdmi = container_of_const(bridge, struct mtk_hdmi, bridge);
+
 	if (mode->clock < MTK_HDMI_V2_CLOCK_MIN)
 		return MODE_CLOCK_LOW;
 	else if (mode->clock > MTK_HDMI_V2_CLOCK_MAX)
+		return MODE_CLOCK_HIGH;
+	else if (hdmi->conf->max_mode_clock &&
+		 mode->clock > hdmi->conf->max_mode_clock)
 		return MODE_CLOCK_HIGH;
 	else
 		return MODE_OK;
@@ -1440,6 +1464,21 @@ static const struct mtk_hdmi_conf mtk_hdmi_conf_mt8195 = {
 	.reg_hdmi_tx_cfg = HDMITX_CONFIG_MT8195
 };
 
+static const struct mtk_hdmi_ver_conf mtk_hdmi_conf_v2_mt8695 = {
+	.bridge_funcs = &mtk_v2_hdmi_bridge_funcs,
+	.codec_ops = &mtk_hdmi_v2_audio_codec_ops,
+	.mtk_hdmi_clock_names = mtk_hdmi_v2_mt8695_clk_names,
+	.num_clocks = ARRAY_SIZE(mtk_hdmi_v2_mt8695_clk_names),
+	.interlace_allowed = true,
+};
+
+/* The PHY supports TMDS rates below 1.65 Gbps so far */
+static const struct mtk_hdmi_conf mtk_hdmi_conf_mt8695 = {
+	.ver_conf = &mtk_hdmi_conf_v2_mt8695,
+	.max_mode_clock = 148500,
+	.no_tx_cfg = true,
+};
+
 static int mtk_hdmi_v2_probe(struct platform_device *pdev)
 {
 	struct mtk_hdmi *hdmi;
@@ -1456,6 +1495,20 @@ static int mtk_hdmi_v2_probe(struct platform_device *pdev)
 
 	hdmi->hpd = HDMI_PLUG_OUT;
 
+	/* The registers need the bus clock, which may be gated by now */
+	ret = mtk_hdmi_v2_clk_enable(hdmi);
+	if (ret)
+		return dev_err_probe(&pdev->dev, ret, "Cannot enable clocks\n");
+
+	if (hdmi->conf->no_tx_cfg) {
+		u32 hdcp;
+
+		/* OTP mute overrides, which only the secure world can clear */
+		regmap_read(hdmi->regs, HDCP_TOP_CTRL, &hdcp);
+		if (hdcp & (BIT(4) | BIT(8) | BIT(12)))
+			dev_warn(&pdev->dev, "TX muted by HDCP_TOP_CTRL %#x\n", hdcp);
+	}
+
 	/* Disable all HW interrupts at probe stage */
 	mtk_hdmi_v2_hwirq_disable(hdmi);
 
@@ -1470,6 +1523,8 @@ static int mtk_hdmi_v2_probe(struct platform_device *pdev)
 	/* Restore interrupt clearing registers to zero */
 	regmap_write(hdmi->regs, TOP_INT_CLR00, 0);
 	regmap_write(hdmi->regs, TOP_INT_CLR01, 0);
+
+	mtk_hdmi_v2_clk_disable(hdmi);
 
 	/*
 	 * Install the ISR but keep it disabled: as the interrupts are
@@ -1494,6 +1549,7 @@ static int mtk_hdmi_v2_probe(struct platform_device *pdev)
 static const struct of_device_id mtk_drm_hdmi_v2_of_ids[] = {
 	{ .compatible = "mediatek,mt8188-hdmi-tx", .data = &mtk_hdmi_conf_mt8188 },
 	{ .compatible = "mediatek,mt8195-hdmi-tx", .data = &mtk_hdmi_conf_mt8195 },
+	{ .compatible = "mediatek,mt8695-hdmi-tx", .data = &mtk_hdmi_conf_mt8695 },
 	{ /* sentinel */ }
 };
 MODULE_DEVICE_TABLE(of, mtk_drm_hdmi_v2_of_ids);
