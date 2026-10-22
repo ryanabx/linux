@@ -60,6 +60,45 @@
 		regulator-always-on;
 	};
 
+	hdmi-connector {
+		compatible = "hdmi-connector";
+		label = "hdmi";
+		type = "a";
+		ddc-i2c-bus = <&hdmi_ddc>;
+		hdmi-pwr-supply = <&hdmi_5v>;
+
+		port {
+			hdmi_connector_in: endpoint {
+				remote-endpoint = <&hdmi_out>;
+			};
+		};
+	};
+
+	/* The TX's own DDC master is secure-only */
+	hdmi_ddc: i2c-hdmi {
+		compatible = "i2c-gpio";
+		sda-gpios = <&pio 75 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
+		scl-gpios = <&pio 74 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
+		i2c-gpio,delay-us = <5>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&hdmi_ddc_pins>;
+	};
+
+	hdmi_5v: regulator-hdmi-5v {
+		compatible = "regulator-fixed";
+		regulator-name = "hdmi_5v";
+		regulator-min-microvolt = <5000000>;
+		regulator-max-microvolt = <5000000>;
+		gpio = <&pio 60 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+		/*
+		 * On from the bootloader, and must stay on: driving GPIO60 low
+		 * wedged the running board (2026-10-22).
+		 */
+		regulator-always-on;
+		regulator-boot-on;
+	};
+
 	sdio_io: regulator-sdio-io {
 		compatible = "regulator-fixed";
 		regulator-name = "sdio_io";
@@ -95,6 +134,17 @@
 		};
 
 		/* Secure world and bootloader carveouts above System RAM */
+		/*
+		 * LK's splash, still scanning out when larb4 switches to
+		 * translation: mapped 1:1 through the M4U until the display
+		 * driver replaces it.
+		 */
+		splash_mem: framebuffer@783c0000 {
+			reg = <0 0x783c0000 0 0x1800000>;
+			iommu-addresses = <&osd_fhd 0x0 0x783c0000 0x0 0x1800000>;
+			no-map;
+		};
+
 		tee-reserved-memory@79bc0000 {
 			reg = <0 0x79bc0000 0 0x6440000>;
 			no-map;
@@ -116,6 +166,20 @@
 
 &cpu3 {
 	proc-supply = <&mt6393_vproc>;
+};
+
+&hdmi {
+	status = "okay";
+};
+
+&hdmi_phy {
+	status = "okay";
+};
+
+&hdmi_port_out {
+	hdmi_out: endpoint {
+		remote-endpoint = <&hdmi_connector_in>;
+	};
 };
 
 &i2c1 {
@@ -204,6 +268,16 @@
 	status = "okay";
 };
 
+&osd_fhd {
+	/* For its 1:1 mapping through the M4U, not as a buffer pool */
+	memory-region = <&splash_mem>;
+	status = "okay";
+};
+
+&osd_uhd {
+	status = "okay";
+};
+
 &pio {
 	mmc0_pins_default: mmc0-default-pins {
 		pins-cmd-dat {
@@ -264,6 +338,15 @@
 		pins-rst {
 			pinmux = <MT8695_PIN_46_EMMC_RSTB__FUNC_MSDC0_RSTB>;
 			bias-pull-up;
+		};
+	};
+
+	/* Pulled up on the board (and by the sink) */
+	hdmi_ddc_pins: hdmi-ddc-pins {
+		pins-ddc {
+			pinmux = <MT8695_PIN_74_HDMITX20_HDMISCK__FUNC_GPIO74>,
+				 <MT8695_PIN_75_HDMITX20_HDMISD__FUNC_GPIO75>;
+			bias-disable;
 		};
 	};
 
@@ -343,5 +426,9 @@
 };
 
 &uart1 {
+	status = "okay";
+};
+
+&vdout {
 	status = "okay";
 };
