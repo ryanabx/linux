@@ -35,6 +35,7 @@ properties:
           - enum:
               - mediatek,mt7629-i2c
               - mediatek,mt8516-i2c
+              - mediatek,mt8695-i2c
           - const: mediatek,mt2712-i2c
       - items:
           - enum:
