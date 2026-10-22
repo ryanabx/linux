@@ -29,6 +29,7 @@ properties:
           - mediatek,mt8173-thermal
           - mediatek,mt8183-thermal
           - mediatek,mt8365-thermal
+          - mediatek,mt8695-thermal
       - items:
           - enum:
               - mediatek,mt8516-thermal
