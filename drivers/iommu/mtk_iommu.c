@@ -272,6 +272,7 @@ struct mtk_iommu_data {
 
 	struct regmap			*pericfg;
 	struct mutex			mutex; /* Protect m4u_group/m4u_dom above */
+	bool				boot_dma; /* powered for a bootloader's DMA */
 
 	/*
 	 * In the sharing pgtable case, list data->list to the global list like m4ulist.
@@ -754,6 +755,23 @@ static int mtk_iommu_attach_device(struct iommu_domain *domain,
 
 	mutex_lock(&data->mutex);
 	bank = &data->bank[bankid];
+
+	/*
+	 * A device with direct mappings is one the bootloader left running,
+	 * such as a display still scanning out its splash through the M4U.
+	 * Until its driver takes over, nothing else keeps the M4U powered,
+	 * and gating the M4U's clock under that DMA leaves its transactions
+	 * stuck in the larb for good. Keep the M4U powered from here on.
+	 */
+	if (dev->iommu->require_direct && !data->boot_dma) {
+		ret = pm_runtime_resume_and_get(m4udev);
+		if (ret < 0) {
+			dev_err(m4udev, "pm get fail(%d) in attach.\n", ret);
+			goto err_unlock;
+		}
+		data->boot_dma = true;
+	}
+
 	if (!bank->m4u_dom) { /* Initialize the M4U HW for each a BANK */
 		ret = pm_runtime_resume_and_get(m4udev);
 		if (ret < 0) {
