@@ -42,11 +42,12 @@
 
 #define HPD_PORD_HWIRQS		(HTPLG_R_INT | HTPLG_F_INT | PORD_F_INT | PORD_R_INT)
 
+/* In the order they are enabled */
 enum mtk_hdmi_v2_clk_id {
 	MTK_HDMI_V2_CLK_HDCP_SEL,
 	MTK_HDMI_V2_CLK_HDCP_24M_SEL,
-	MTK_HDMI_V2_CLK_VPP_SPLIT_HDMI,
 	MTK_HDMI_V2_CLK_HDMI_APB_SEL,
+	MTK_HDMI_V2_CLK_VPP_SPLIT_HDMI,
 	MTK_HDMI_V2_CLK_COUNT,
 };
 
@@ -788,42 +789,29 @@ static void mtk_hdmi_v2_output_set_display_mode(struct mtk_hdmi *hdmi,
 
 static int mtk_hdmi_v2_clk_enable(struct mtk_hdmi *hdmi)
 {
-	int ret;
+	int i, ret;
 
-	ret = clk_prepare_enable(hdmi->clk[MTK_HDMI_V2_CLK_HDCP_SEL]);
-	if (ret)
-		return ret;
-
-	ret = clk_prepare_enable(hdmi->clk[MTK_HDMI_V2_CLK_HDCP_24M_SEL]);
-	if (ret)
-		goto disable_hdcp_clk;
-
-	ret = clk_prepare_enable(hdmi->clk[MTK_HDMI_V2_CLK_HDMI_APB_SEL]);
-	if (ret)
-		goto disable_hdcp_24m_clk;
-
-	ret = clk_prepare_enable(hdmi->clk[MTK_HDMI_V2_CLK_VPP_SPLIT_HDMI]);
-	if (ret)
-		goto disable_bus_clk;
+	for (i = 0; i < hdmi->conf->ver_conf->num_clocks; i++) {
+		ret = clk_prepare_enable(hdmi->clk[i]);
+		if (ret)
+			goto err;
+	}
 
 	return 0;
 
-disable_bus_clk:
-	clk_disable_unprepare(hdmi->clk[MTK_HDMI_V2_CLK_HDMI_APB_SEL]);
-disable_hdcp_24m_clk:
-	clk_disable_unprepare(hdmi->clk[MTK_HDMI_V2_CLK_HDCP_24M_SEL]);
-disable_hdcp_clk:
-	clk_disable_unprepare(hdmi->clk[MTK_HDMI_V2_CLK_HDCP_SEL]);
+err:
+	while (--i >= 0)
+		clk_disable_unprepare(hdmi->clk[i]);
 
 	return ret;
 }
 
 static void mtk_hdmi_v2_clk_disable(struct mtk_hdmi *hdmi)
 {
-	clk_disable_unprepare(hdmi->clk[MTK_HDMI_V2_CLK_VPP_SPLIT_HDMI]);
-	clk_disable_unprepare(hdmi->clk[MTK_HDMI_V2_CLK_HDMI_APB_SEL]);
-	clk_disable_unprepare(hdmi->clk[MTK_HDMI_V2_CLK_HDCP_24M_SEL]);
-	clk_disable_unprepare(hdmi->clk[MTK_HDMI_V2_CLK_HDCP_SEL]);
+	int i;
+
+	for (i = hdmi->conf->ver_conf->num_clocks - 1; i >= 0; i--)
+		clk_disable_unprepare(hdmi->clk[i]);
 }
 
 static enum hdmi_hpd_state mtk_hdmi_v2_hpd_pord_status(struct mtk_hdmi *hdmi)
