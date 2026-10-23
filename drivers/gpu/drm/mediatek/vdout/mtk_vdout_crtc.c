@@ -177,6 +177,44 @@ struct mtk_vdout_mode {
 	.r2h_sync_delay = 0x00010026, .r2h_delay = 0x00111000,		\
 }
 
+/*
+ * The 50 Hz HD modes: the 60 Hz timing with a longer line, the FMT in its
+ * PAL mode (and, for 1080p50, its default vsync width)
+ */
+#define VDOUT_1080P50 {						\
+	.mode = { DRM_MODE("1920x1080", DRM_MODE_TYPE_DRIVER, 148500,	\
+			   1920, 2448, 2492, 2640, 0,			\
+			   1080, 1084, 1089, 1125, 0,			\
+			   DRM_MODE_FLAG_PHSYNC | DRM_MODE_FLAG_PVSYNC) },	\
+	.tvdpll = 594000000,						\
+	.fmt_mode = 0xc000d420,						\
+	.vsync_pulse_osd = 0x08c60a2c,					\
+	.osd = {							\
+		.sync = 0x00403465, .htotal = 0xa50,			\
+		.start = 0x00c10000, .vstart = 0x002a002a,		\
+		.sync_thres = 0x384,					\
+	},								\
+	.r2h_time = { 0x002c0005, 0x00c10840, 0x002a0461 },		\
+	.r2h_sync_delay = 0x00010025,					\
+}
+
+#define VDOUT_720P50 {							\
+	.mode = { DRM_MODE("1280x720", DRM_MODE_TYPE_DRIVER, 74250,	\
+			   1280, 1720, 1760, 1980, 0, 720, 725, 730, 750, 0,\
+			   DRM_MODE_FLAG_PHSYNC | DRM_MODE_FLAG_PVSYNC) },	\
+	.tvdpll = 594000000,						\
+	.hd_half = true,						\
+	.fmt_mode = 0xc000f120,						\
+	.vsync_pulse_osd = 0x05d80798,					\
+	.osd = {							\
+		.sync = 0x004032ee, .htotal = 0x7bc,			\
+		.start = 0x01050000, .vstart = 0x001a001a,		\
+		.sync_thres = 0x258,					\
+	},								\
+	.r2h_time = { 0x00280005, 0x01050604, 0x001a02e9 },		\
+	.r2h_sync_delay = 0x00010026, .r2h_delay = 0x00111000,		\
+}
+
 /* 720x480p59.94 (CEA VIC 2 and 3): MediaTek has no 27.027 MHz variant */
 #define VDOUT_480P {							\
 	.mode = { DRM_MODE("720x480", DRM_MODE_TYPE_DRIVER, 27000,	\
@@ -195,13 +233,34 @@ struct mtk_vdout_mode {
 	.r2h_sync_delay = 0x00010021, .r2h_delay = 0x00111000,		\
 }
 
+/* 720x576p50 (CEA VIC 17 and 18): the FMT in its PAL mode */
+#define VDOUT_576P {							\
+	.mode = { DRM_MODE("720x576", DRM_MODE_TYPE_DRIVER, 27000,	\
+			   720, 732, 796, 864, 0, 576, 581, 586, 625, 0,\
+			   DRM_MODE_FLAG_NHSYNC | DRM_MODE_FLAG_NVSYNC) },	\
+	.tvdpll = 594000000,						\
+	.sd = true,							\
+	.fmt_mode = 0xc0009420,						\
+	.vsync_pulse_osd = 0x04de0339,					\
+	.osd = {							\
+		.sync = 0x00403271, .htotal = 0x360,			\
+		.start = 0x00850000, .vstart = 0x002d002d,		\
+		.sync_thres = 0x1f4,					\
+	},								\
+	.r2h_time = { 0x03400005, 0x00850354, 0x002d026c },		\
+	.r2h_sync_delay = 0x00010021, .r2h_delay = 0x00111000,		\
+}
+
 /* The first one is what the bootloader sets up */
 static const struct mtk_vdout_mode mtk_vdout_modes[] = {
 	VDOUT_1080P(148352, 593400000),
 	VDOUT_1080P(148500, 594000000),
 	VDOUT_720P(74250, 594000000),
 	VDOUT_720P(74176, 593400000),
+	VDOUT_1080P50,
+	VDOUT_720P50,
 	VDOUT_480P,
+	VDOUT_576P,
 };
 
 static inline struct mtk_vdout *crtc_to_vdout(struct drm_crtc *crtc)
