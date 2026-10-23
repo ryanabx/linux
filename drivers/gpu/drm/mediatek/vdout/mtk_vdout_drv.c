@@ -6,8 +6,9 @@
  * and video planes mixed in front of a format timing generator (FMT) that
  * makes the CEA timings, and RGB2HDMI feeding the HDMI TX. None of
  * mediatek-drm's DDP blocks are there, so this is a driver of its own. So
- * far it drives one plane, OSD3, in the modes up to 1080p60, and the TX is
- * mtk_hdmi_v2, a bridge found through the OF graph.
+ * far it drives the two OSD planes, FHD (the primary) and UHD (an overlay),
+ * in the CEA modes from 480p to 1080p60, and the TX is mtk_hdmi_v2, a
+ * bridge found through the OF graph.
  */
 
 #include <linux/clk.h>
@@ -110,8 +111,11 @@ static int mtk_vdout_regs_show(struct seq_file *s, void *data)
 	struct mtk_vdout *vd = to_mtk_vdout(entry->dev);
 
 	mtk_vdout_dump_block(s, "VDOUT", vd->regs, 0x1000);
-	mtk_vdout_dump_block(s, "OSD HDR", vd->osd->hdr_regs, 0x300);
-	mtk_vdout_dump_block(s, "OSD3", vd->osd->regs, 0x300);
+	mtk_vdout_dump_block(s, "OSD HDR", vd->hdr_regs, 0x300);
+	if (vd->osd[MTK_VDOUT_OSD_FHD])
+		mtk_vdout_dump_block(s, "OSD3", vd->osd[MTK_VDOUT_OSD_FHD]->regs, 0x300);
+	if (vd->osd[MTK_VDOUT_OSD_UHD])
+		mtk_vdout_dump_block(s, "OSD2", vd->osd[MTK_VDOUT_OSD_UHD]->regs, 0x300);
 	return 0;
 }
 
@@ -133,15 +137,15 @@ static int mtk_vdout_kms_init(struct mtk_vdout *vd)
 	ret = component_bind_all(vd->dev, vd);
 	if (ret)
 		return ret;
-	if (!vd->osd) {
+	if (!vd->osd[MTK_VDOUT_OSD_FHD]) {
 		component_unbind_all(vd->dev, vd);
 		return -ENODEV;
 	}
 
 	/* Buffers are for the OSD, which reads them through the M4U */
-	drm_dev_set_dma_dev(drm, vd->osd->dev);
+	drm_dev_set_dma_dev(drm, vd->osd[MTK_VDOUT_OSD_FHD]->dev);
 
-	ret = mtk_vdout_crtc_init(vd, &vd->osd->plane);
+	ret = mtk_vdout_crtc_init(vd, &vd->osd[MTK_VDOUT_OSD_FHD]->plane);
 	if (ret)
 		goto err_unbind;
 
@@ -235,7 +239,10 @@ static const struct component_master_ops mtk_vdout_master_ops = {
 	.unbind = mtk_vdout_unbind,
 };
 
-/* The planes come in on port 0, through the OF graph */
+/*
+ * The planes come in on ports 0 (FHD) and 1 (UHD), through the OF graph;
+ * the TX is on port 2
+ */
 static int mtk_vdout_add_components(struct device *dev,
 				    struct component_match **match)
 {
@@ -244,7 +251,7 @@ static int mtk_vdout_add_components(struct device *dev,
 	for_each_endpoint_of_node(dev->of_node, ep) {
 		struct of_endpoint id;
 
-		if (of_graph_parse_endpoint(ep, &id) || id.port != 0)
+		if (of_graph_parse_endpoint(ep, &id) || id.port > 1)
 			continue;
 		remote = of_graph_get_remote_port_parent(ep);
 		if (!remote)
@@ -273,6 +280,9 @@ static int mtk_vdout_probe(struct platform_device *pdev)
 	vd->regs = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(vd->regs))
 		return PTR_ERR(vd->regs);
+	vd->hdr_regs = devm_platform_ioremap_resource(pdev, 1);
+	if (IS_ERR(vd->hdr_regs))
+		return PTR_ERR(vd->hdr_regs);
 
 	vd->irq = platform_get_irq(pdev, 0);
 	if (vd->irq < 0)
@@ -291,7 +301,7 @@ static int mtk_vdout_probe(struct platform_device *pdev)
 		return dev_err_probe(dev, PTR_ERR(vd->rst_rgb2hdmi),
 				     "no rgb2hdmi reset\n");
 
-	vd->bridge = devm_drm_of_get_bridge(dev, dev->of_node, 1, 0);
+	vd->bridge = devm_drm_of_get_bridge(dev, dev->of_node, 2, 0);
 	if (IS_ERR(vd->bridge))
 		return dev_err_probe(dev, PTR_ERR(vd->bridge), "no HDMI bridge\n");
 
