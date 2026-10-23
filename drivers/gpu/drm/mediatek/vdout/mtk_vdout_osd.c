@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * MediaTek VDOUT: OSD3, the primary plane
+ * MediaTek VDOUT: the OSD planes
  *
- * The OSD reads a chain of region headers from memory; each describes one
- * buffer. One region is used here, in ARGB8888, and the plane's scaler
- * takes it to a window of the screen. The OSD latches its registers and
- * the header on every vsync from VDOUT.
+ * Each OSD plane reads a chain of region headers from memory; each header
+ * describes one buffer. One region is used here, in ARGB8888, and the
+ * plane's scaler takes it to a window of the screen. A plane latches its
+ * registers and the header on every vsync from VDOUT. The FHD plane (OSD3)
+ * is the primary plane; the UHD plane (OSD2) is mixed above it, with
+ * premultiplied alpha.
  */
 
 #include <linux/clk.h>
@@ -16,6 +18,7 @@
 #include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
+#include <linux/property.h>
 
 #include <drm/drm_atomic.h>
 #include <drm/drm_atomic_helper.h>
@@ -28,29 +31,26 @@
 
 #include "mtk_vdout_drv.h"
 
-/*
- * The OSD block: the OSD path's HDR (BT.2020 and SDR2HDR), then the FHD
- * plane (OSD3) and the UHD plane (OSD2), each with its timing, plane and
- * scaler registers. Only OSD3 is used so far.
- */
-#define OSD_HDR_BASE		0x0000
-#define OSD_FHD_BASE		0x1000
-#define OSD_UHD_BASE		0x2300
-
+/* Timing at 0x000, plane at 0x100, scaler at 0x200 */
 #define OSD_UPDATE		0x000
 #define  OSD_UPDATE_EN		BIT(0)
 #define  OSD_ALWAYS_UPDATE	BIT(1)
-#define  OSD_SYNC_VDOUT		BIT(3)	/* timing from the VDOUT OSD-FHD pulse */
+#define  OSD_SYNC_VDOUT		BIT(3)	/* timing from the plane's VDOUT pulse */
+#define OSD_PRGS		0x008
 #define OSD_SYNC		0x00c
-#define OSD_START		0x014
+#define OSD_UHD_HSTART		0x010	/* [9:0] */
+#define  OSD_UHD_HSTART_MASK	GENMASK(9, 0)
+#define OSD_START		0x014	/* FHD: hstart [25:16] */
 #define OSD_VSTART		0x018
 #define OSD_SIZE		0x01c
 #define OSD_HTOTAL		0x064
 #define OSD_ALWAYS_UPDATE_REG	0x070
 #define OSD_PLA_EN		0x100
 #define OSD_PLA_HEADER		0x104
+#define OSD_AUTO_ULTRA		0x1bc
 #define OSD_SYNC_THRES		0x1e4
-#define OSD_POS			0x028	/* x [27:16], y [11:0] */
+#define OSD_UHD_POS		0x024	/* x [27:16], y [11:0] */
+#define OSD_FHD_POS		0x028
 #define OSD_SC_CFG		0x200
 #define  OSD_SC_VUSC_EN		BIT(2)
 #define  OSD_SC_VDSC_EN		BIT(3)
@@ -82,22 +82,31 @@ struct reg_val {
 	u32 val;
 };
 
-/* The HDR block as the bootloader leaves it: bypassed */
-static const struct reg_val osd_hdr_boot_regs[] = {
-	{ 0x000, 0x01000012 }, { 0x054, 0x0fff0fff }, { 0x058, 0x00000fff },
-	{ 0x0a8, 0x01000012 }, { 0x100, 0x0b000012 }, { 0x154, 0x0ff00ff0 },
-	{ 0x158, 0x00000ff0 }, { 0x1a8, 0x0b000012 },
+/*
+ * The differences between the planes: register placement, and what the
+ * bootloader leaves set up (it uses the FHD plane only)
+ */
+struct mtk_vdout_osd_data {
+	enum mtk_vdout_osd_id id;
+	enum drm_plane_type type;
+	u32 prgs;		/* progressive, vsync edge, auto switch */
+	u32 pos;		/* the window position register */
+	bool auto_ultra;
+	const struct reg_val *boot_regs;
+	unsigned int num_boot_regs;
 };
 
-/* OSD3 base, plane and scaler registers that don't depend on the mode; 1:1 */
+/* Base, plane and scaler registers that don't depend on the mode; 1:1 */
 static const struct reg_val osd_regs[] = {
-	{ 0x008, 0x00000422 }, { 0x028, 0x00000000 },
 	{ 0x038, 0x80008000 }, { 0x03c, 0x80008000 },
 	{ 0x070, 0x00000040 }, { 0x0a4, 0x01f186c0 },
 	{ 0x10c, 0x078f3fcf }, { 0x108, 0x0038ffff },
 	{ 0x200, 0x04000080 }, { 0x210, 0x00000000 }, { 0x214, 0x00000000 },
 	{ 0x218, 0x20002000 }, { 0x21c, 0x00000000 }, { 0x220, 0x00000000 },
-	/* Left by the bootloader: a second scaler and the RGB-to-YCbCr matrix */
+};
+
+/* Left by the bootloader: a second scaler and the RGB-to-YCbCr matrix */
+static const struct reg_val osd_fhd_boot_regs[] = {
 	{ 0x280, 0x04000084 }, { 0x284, 0x07800438 }, { 0x288, 0x07800438 },
 	{ 0x28c, 0x00000780 }, { 0x298, 0x20002000 }, { 0x29c, 0x00004000 },
 	{ 0x2c0, 0x00004000 }, { 0x2c4, 0x00004000 }, { 0x2c8, 0x0800d000 },
@@ -141,21 +150,32 @@ void mtk_vdout_osd_setup(struct mtk_vdout_osd *osd,
 {
 	u32 size = mode->hdisplay << 16 | mode->vdisplay;
 
+	const struct mtk_vdout_osd_data *data = osd->data;
+
 	rmw(osd->regs, OSD_UPDATE, OSD_UPDATE_EN, 0);
 
 	/* The plane comes back with its next update, for this mode */
 	writel(0, osd->regs + OSD_PLA_EN);
 
-	write_table(osd->hdr_regs, osd_hdr_boot_regs, ARRAY_SIZE(osd_hdr_boot_regs));
 	write_table(osd->regs, osd_regs, ARRAY_SIZE(osd_regs));
+	write_table(osd->regs, data->boot_regs, data->num_boot_regs);
+	writel(data->prgs, osd->regs + OSD_PRGS);
+	writel(0, osd->regs + data->pos);
 
 	/* i4Osd_BaseSetFmt() and the 1:1 scaler for the mode */
 	writel(t->sync, osd->regs + OSD_SYNC);
-	writel(t->start, osd->regs + OSD_START);
+	if (data->id == MTK_VDOUT_OSD_UHD) {
+		rmw(osd->regs, OSD_UHD_HSTART, OSD_UHD_HSTART_MASK, t->start >> 16);
+	} else {
+		writel(t->start, osd->regs + OSD_START);
+		/* MediaTek's driver sets the threshold for this plane only */
+		writel(t->sync_thres, osd->regs + OSD_SYNC_THRES);
+	}
 	writel(t->vstart, osd->regs + OSD_VSTART);
 	writel(size, osd->regs + OSD_SIZE);
 	writel(t->htotal, osd->regs + OSD_HTOTAL);
-	writel(t->sync_thres, osd->regs + OSD_SYNC_THRES);
+	if (data->auto_ultra)
+		writel(0x100080ff, osd->regs + OSD_AUTO_ULTRA);
 	writel(size, osd->regs + OSD_SC_SRC_SIZE);
 	writel(size, osd->regs + OSD_SC_DST_SIZE);
 	writel(mode->hdisplay, osd->regs + OSD_SC_VSC_WIDTH);
@@ -173,7 +193,7 @@ void mtk_vdout_osd_off(struct mtk_vdout_osd *osd)
 }
 
 static void mtk_vdout_osd_write_header(u32 *hdr, struct drm_framebuffer *fb,
-				       dma_addr_t addr, u32 w, u32 h)
+				       dma_addr_t addr, u32 w, u32 h, bool alpha)
 {
 	u32 pa = addr;
 
@@ -184,11 +204,8 @@ static void mtk_vdout_osd_write_header(u32 *hdr, struct drm_framebuffer *fb,
 	hdr[4] = 0x1000;				/* 1:1 */
 	hdr[5] = 0x1000;
 	hdr[6] = ((pa >> 30) & 3) << 2;
-	/*
-	 * Alpha off: with only the black background under the plane, a
-	 * premultiplied buffer looks the same as an opaque one.
-	 */
-	hdr[7] = (2 << 30) | BIT(28) | (((pa >> 28) & 3) << 23);
+	/* Per-pixel alpha (1) or none (2) */
+	hdr[7] = ((alpha ? 1 : 2) << 30) | BIT(28) | (((pa >> 28) & 3) << 23);
 	hdr[9] = h << 16 | w;
 	hdr[10] = h;
 	hdr[11] = w;
@@ -289,6 +306,7 @@ static void mtk_vdout_osd_atomic_update(struct drm_plane *plane,
 	const struct drm_rect *dst = &new_state->dst;
 	struct mtk_vdout_osd_scaler sc;
 	u32 sw, sh, dw, dh;
+	bool alpha;
 
 	if (!new_state->visible) {
 		mtk_vdout_osd_off(osd);
@@ -300,15 +318,22 @@ static void mtk_vdout_osd_atomic_update(struct drm_plane *plane,
 	sh = drm_rect_height(&new_state->src) >> 16;
 	dw = drm_rect_width(dst);
 	dh = drm_rect_height(dst);
+	/*
+	 * With only the black background under it, the primary plane shows a
+	 * premultiplied buffer the same way with alpha as without.
+	 */
+	alpha = osd->data->type == DRM_PLANE_TYPE_OVERLAY &&
+		fb->format->has_alpha &&
+		new_state->pixel_blend_mode == DRM_MODE_BLEND_PREMULTI;
 	mtk_vdout_osd_write_header(hdr, fb,
 				   drm_fb_dma_get_gem_addr(fb, new_state, 0),
-				   sw, sh);
+				   sw, sh, alpha);
 	mtk_vdout_osd_scaler(sw, sh, dw, dh, &sc);
 
 	/* All of it latches together at the next vsync */
 	rmw(osd->regs, OSD_UPDATE, OSD_UPDATE_EN, 0);
 	writel(hdr_dma >> 4, osd->regs + OSD_PLA_HEADER);
-	writel(dst->x1 << 16 | dst->y1, osd->regs + OSD_POS);
+	writel(dst->x1 << 16 | dst->y1, osd->regs + osd->data->pos);
 	writel(sc.cfg, osd->regs + OSD_SC_CFG);
 	writel(sw << 16 | sh, osd->regs + OSD_SC_SRC_SIZE);
 	writel(dw << 16 | dh, osd->regs + OSD_SC_DST_SIZE);
@@ -318,6 +343,7 @@ static void mtk_vdout_osd_atomic_update(struct drm_plane *plane,
 	writel(sc.vsc_ofst, osd->regs + OSD_SC_VSC_OFST);
 	writel(sc.vsc_step, osd->regs + OSD_SC_VSC_STEP);
 	writel(1, osd->regs + OSD_PLA_EN);
+	mtk_vdout_premix_alpha(osd->vd, osd->data->id, alpha);
 	rmw(osd->regs, OSD_UPDATE, OSD_UPDATE_EN, OSD_UPDATE_EN);
 	osd->hdr_idx = idx;
 }
@@ -355,7 +381,7 @@ static int mtk_vdout_osd_bind(struct device *dev, struct device *master,
 				       mtk_vdout_osd_formats,
 				       ARRAY_SIZE(mtk_vdout_osd_formats),
 				       mtk_vdout_osd_modifiers,
-				       DRM_PLANE_TYPE_PRIMARY, NULL);
+				       osd->data->type, NULL);
 	if (ret)
 		return ret;
 	drm_plane_helper_add(&osd->plane, &mtk_vdout_osd_helper_funcs);
@@ -366,16 +392,25 @@ static int mtk_vdout_osd_bind(struct device *dev, struct device *master,
 	if (ret)
 		return ret;
 
-	vd->osd = osd;
+	/* The premix stacks the planes in a fixed order */
+	ret = drm_plane_create_zpos_immutable_property(&osd->plane,
+						       osd->data->id);
+	if (ret)
+		return ret;
+
+	osd->vd = vd;
+	vd->osd[osd->data->id] = osd;
 	return 0;
 }
 
 static void mtk_vdout_osd_unbind(struct device *dev, struct device *master,
 				 void *data)
 {
+	struct mtk_vdout_osd *osd = dev_get_drvdata(dev);
 	struct mtk_vdout *vd = data;
 
-	vd->osd = NULL;
+	vd->osd[osd->data->id] = NULL;
+	osd->vd = NULL;
 }
 
 static const struct component_ops mtk_vdout_osd_component_ops = {
@@ -393,24 +428,23 @@ static int mtk_vdout_osd_probe(struct platform_device *pdev)
 	struct device *dev = &pdev->dev;
 	struct mtk_vdout_osd *osd;
 	struct clk_bulk_data *clks;
-	void __iomem *base;
 	int ret;
 
 	osd = devm_kzalloc(dev, sizeof(*osd), GFP_KERNEL);
 	if (!osd)
 		return -ENOMEM;
 	osd->dev = dev;
+	osd->data = device_get_match_data(dev);
 
-	base = devm_platform_ioremap_resource(pdev, 0);
-	if (IS_ERR(base))
-		return PTR_ERR(base);
-	osd->hdr_regs = base + OSD_HDR_BASE;
-	osd->regs = base + OSD_FHD_BASE;
+	osd->regs = devm_platform_ioremap_resource(pdev, 0);
+	if (IS_ERR(osd->regs))
+		return PTR_ERR(osd->regs);
 
 	/*
-	 * The OSD is the display's memory master: buffers come through the
-	 * M4U. memory-region only names the bootloader's splash, kept mapped
-	 * 1:1 until the first modeset replaces it.
+	 * The OSD planes are the display's memory masters: buffers come
+	 * through the M4U. On the FHD plane, memory-region only names the
+	 * bootloader's splash, kept mapped 1:1 until the first modeset
+	 * replaces it.
 	 */
 	ret = dma_set_mask_and_coherent(dev, DMA_BIT_MASK(32));
 	if (ret)
@@ -446,8 +480,26 @@ static void mtk_vdout_osd_remove(struct platform_device *pdev)
 	component_del(&pdev->dev, &mtk_vdout_osd_component_ops);
 }
 
+static const struct mtk_vdout_osd_data mtk_vdout_osd_fhd = {
+	.id = MTK_VDOUT_OSD_FHD,
+	.type = DRM_PLANE_TYPE_PRIMARY,
+	.prgs = 0x422,
+	.pos = OSD_FHD_POS,
+	.boot_regs = osd_fhd_boot_regs,
+	.num_boot_regs = ARRAY_SIZE(osd_fhd_boot_regs),
+};
+
+static const struct mtk_vdout_osd_data mtk_vdout_osd_uhd = {
+	.id = MTK_VDOUT_OSD_UHD,
+	.type = DRM_PLANE_TYPE_OVERLAY,
+	.prgs = 0x412,
+	.pos = OSD_UHD_POS,
+	.auto_ultra = true,
+};
+
 static const struct of_device_id mtk_vdout_osd_of_match[] = {
-	{ .compatible = "mediatek,mt8695-osd" },
+	{ .compatible = "mediatek,mt8695-osd-fhd", .data = &mtk_vdout_osd_fhd },
+	{ .compatible = "mediatek,mt8695-osd-uhd", .data = &mtk_vdout_osd_uhd },
 	{ }
 };
 MODULE_DEVICE_TABLE(of, mtk_vdout_osd_of_match);
