@@ -38,11 +38,12 @@
 #define  FMT_CTRL_TRIGGER	BIT(31)
 #define FMT_BG			0x0b8
 #define FMT_PLANE_OFF		0x0f8
-#define  FMT_PLN2_OFF		BIT(16)
+#define  FMT_PLN2_OFF		BIT(16)	/* the sub video plane */
 
 #define VDOUT_CLK		0x508
 #define  VDOUT_CLK_HD_HALF	BIT(30)
 #define VDTCLK_CFG3		0x578
+#define VSYNC_PULSE_OSD_UHD	0x574
 #define VSYNC_PULSE_OSD_FHD	0x57c
 #define HDMI_CONFIG0_SUB	0x598
 #define  VM_BYPASS		BIT(4)
@@ -71,9 +72,12 @@
 #define R2H_SYNC_DELAY		0x8b4
 #define R2H_HSYNC_DELAY		0x8c0
 
-#define PREMIX_MIX_CFG		0xc1c
-#define PREMIX_MIX_SEL		0xc20
-#define PREMIX_SHADOW		0xc24
+#define PREMIX_CFG07		0xc1c
+#define  PREMIX_SHADOW_UPDATE	BIT(12)
+#define PREMIX_CFG08		0xc20
+#define PREMIX_MIX1		0xc24	/* the FHD plane */
+#define PREMIX_MIX2		0xc28	/* the UHD plane, above it */
+#define  PREMIX_MIX_PREMUL	BIT(0)
 #define VDTCLK_CONFIG4		0xc30
 #define PREMIX_SDR2HDR		0xc34
 #define PREMIX_CFG0E		0xc38
@@ -307,7 +311,7 @@ static void mtk_vdout_fmt_setup(struct mtk_vdout *vd, const struct mtk_vdout_mod
 
 	fmt_write(vd, FMT_MODE, m->fmt_mode);
 	fmt_write(vd, FMT_BG, 0x00808010);		/* YCbCr black */
-	fmt_write(vd, FMT_PLANE_OFF, FMT_PLN2_OFF);	/* OSD premix plane on */
+	fmt_write(vd, FMT_PLANE_OFF, FMT_PLN2_OFF);	/* the OSD premix only */
 	fmt_write(vd, FMT_ACTIVE_X, 0);
 	fmt_write(vd, FMT_ACTIVE_Y0, 0);
 	fmt_write(vd, FMT_ACTIVE_Y1, 0);
@@ -331,19 +335,48 @@ static void mtk_vdout_fmt_setup(struct mtk_vdout *vd, const struct mtk_vdout_mod
 	rmw(v, HDMI_CONFIG_SUB, VM_SEL | HDMI_SUB_BIT8, HDMI_SUB_BIT8);
 	rmw(v, FMT_CTRL, FMT_CTRL_TRIGGER, FMT_CTRL_TRIGGER);
 
+	/* The UHD plane runs two pixels behind the FHD plane */
 	fmt_write(vd, VSYNC_PULSE_OSD_FHD, m->vsync_pulse_osd);
+	fmt_write(vd, VSYNC_PULSE_OSD_UHD, m->vsync_pulse_osd + 2);
 }
 
-/* No windows, shadowed; OSD3 is mix1, through SDR2HDR as booted */
+/* The OSD path's HDR block as the bootloader leaves it */
+static const struct reg_val hdr_boot_regs[] = {
+	{ 0x000, 0x01000012 }, { 0x054, 0x0fff0fff }, { 0x058, 0x00000fff },
+	{ 0x0a8, 0x01000012 }, { 0x100, 0x0b000012 }, { 0x154, 0x0ff00ff0 },
+	{ 0x158, 0x00000ff0 }, { 0x1a8, 0x0b000012 },
+};
+
+/*
+ * No windows, shadowed; the FHD plane is mix1, the UHD plane mix2 above
+ * it. The mixed output goes through the HDR block, whose RGB to YCbCr
+ * conversion the FMT needs.
+ */
 static void mtk_vdout_premix_setup(struct mtk_vdout *vd)
 {
 	void __iomem *v = vd->regs;
+	unsigned int i;
 
-	writel(0x00071800, v + PREMIX_MIX_CFG);
-	writel(0x2e262524, v + PREMIX_MIX_SEL);
-	writel(0x8000000c, v + PREMIX_SHADOW);
+	writel(0x00071800, v + PREMIX_CFG07);
+	writel(0x2e262524, v + PREMIX_CFG08);
+	writel(0x8000000c, v + PREMIX_MIX1);
+	writel(0x0000000c, v + PREMIX_MIX2);
 	rmw(v, PREMIX_CFG0E, GENMASK(23, 16), 0);
 	writel(0, v + PREMIX_SDR2HDR);
+
+	for (i = 0; i < ARRAY_SIZE(hdr_boot_regs); i++)
+		writel(hdr_boot_regs[i].val, vd->hdr_regs + hdr_boot_regs[i].off);
+}
+
+/* A plane's per-pixel alpha, premultiplied, against the planes below it */
+void mtk_vdout_premix_alpha(struct mtk_vdout *vd, enum mtk_vdout_osd_id id,
+			    bool premultiplied)
+{
+	u32 reg = id == MTK_VDOUT_OSD_UHD ? PREMIX_MIX2 : PREMIX_MIX1;
+
+	rmw(vd->regs, reg, PREMIX_MIX_PREMUL,
+	    premultiplied ? PREMIX_MIX_PREMUL : 0);
+	rmw(vd->regs, PREMIX_CFG07, PREMIX_SHADOW_UPDATE, PREMIX_SHADOW_UPDATE);
 }
 
 /*
@@ -465,7 +498,9 @@ static void mtk_vdout_crtc_atomic_enable(struct drm_crtc *crtc,
 		vd->cur = m;
 	}
 	mtk_vdout_premix_setup(vd);
-	mtk_vdout_osd_setup(vd->osd, &m->mode, &m->osd);
+	for (i = 0; i < MTK_VDOUT_OSD_NUM; i++)
+		if (vd->osd[i])
+			mtk_vdout_osd_setup(vd->osd[i], &m->mode, &m->osd);
 	mtk_vdout_r2h_setup(vd, m, format, limited);
 
 	drm_crtc_vblank_on(crtc);
@@ -475,14 +510,17 @@ static void mtk_vdout_crtc_atomic_disable(struct drm_crtc *crtc,
 					  struct drm_atomic_commit *state)
 {
 	struct mtk_vdout *vd = crtc_to_vdout(crtc);
+	unsigned int i;
 
 	drm_crtc_vblank_off(crtc);
 
 	/*
 	 * The timing generator keeps running for the TX, which must not be
-	 * reset; only the plane goes off.
+	 * reset; only the planes go off.
 	 */
-	mtk_vdout_osd_off(vd->osd);
+	for (i = 0; i < MTK_VDOUT_OSD_NUM; i++)
+		if (vd->osd[i])
+			mtk_vdout_osd_off(vd->osd[i]);
 
 	spin_lock_irq(&crtc->dev->event_lock);
 	if (crtc->state->event && !crtc->state->active) {
