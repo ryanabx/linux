@@ -18,7 +18,16 @@ struct drm_bridge;
 struct platform_driver;
 struct regmap;
 struct reset_control;
+struct mtk_vdout;
 struct mtk_vdout_mode;
+struct mtk_vdout_osd_data;
+
+/* The OSD planes, bottom to top: they feed the premix's mix1 and mix2 */
+enum mtk_vdout_osd_id {
+	MTK_VDOUT_OSD_FHD,
+	MTK_VDOUT_OSD_UHD,
+	MTK_VDOUT_OSD_NUM,
+};
 
 /* OSD timing for one mode, relative to the VDOUT OSD-FHD sync pulse */
 struct mtk_vdout_osd_timing {
@@ -29,12 +38,13 @@ struct mtk_vdout_osd_timing {
 	u32 sync_thres;
 };
 
-/* OSD3, the "FHD OSD", and its HDR block: a component, the primary plane */
+/* An OSD plane, a component: FHD (OSD3) the primary, UHD (OSD2) above it */
 struct mtk_vdout_osd {
 	struct device *dev;
+	const struct mtk_vdout_osd_data *data;
+	struct mtk_vdout *vd;		/* while bound */
 	struct drm_plane plane;
 	void __iomem *regs;
-	void __iomem *hdr_regs;
 
 	/* Two region headers, so an update never edits the live one */
 	u32 *hdr;
@@ -48,11 +58,13 @@ struct mtk_vdout {
 	struct drm_device *drm;		/* while bound */
 	struct drm_crtc crtc;
 	struct drm_encoder encoder;
-	struct mtk_vdout_osd *osd;	/* while bound */
+	struct mtk_vdout_osd *osd[MTK_VDOUT_OSD_NUM];	/* while bound */
 	struct drm_bridge *bridge;
 
 	/* FMT, sys1, RGB2HDMI, OSD premix and sys2 */
 	void __iomem *regs;
+	/* The OSD path's HDR block, on the premix's output */
+	void __iomem *hdr_regs;
 	struct regmap *mmsys;
 
 	struct clk_bulk_data *clks;
@@ -77,6 +89,8 @@ void mtk_vdout_osd_setup(struct mtk_vdout_osd *osd,
 			 const struct drm_display_mode *mode,
 			 const struct mtk_vdout_osd_timing *t);
 void mtk_vdout_osd_off(struct mtk_vdout_osd *osd);
+void mtk_vdout_premix_alpha(struct mtk_vdout *vd, enum mtk_vdout_osd_id id,
+			    bool premultiplied);
 
 extern struct platform_driver mtk_vdout_osd_driver;
 
