@@ -301,6 +301,18 @@
 		pinctrl-0 = <&audio_pins_default>;
 	};
 
+	/*
+	 * The mode to reboot into, for U-Boot: it reads and clears this RTC
+	 * spare byte, and starts fastboot for "bootloader".
+	 */
+	reboot-mode {
+		compatible = "nvmem-reboot-mode";
+		nvmem-cells = <&rtc_reboot_mode>;
+		nvmem-cell-names = "reboot-mode";
+		mode-normal = <0x00>;
+		mode-bootloader = <0x62>;
+	};
+
 	reserved-memory {
 		#address-cells = <2>;
 		#size-cells = <2>;
@@ -822,6 +834,10 @@
 				rtc_soc: state-of-charge@0 {
 					reg = <0x0 0x1>;
 					bits = <0 7>;
+				};
+
+				rtc_reboot_mode: reboot-mode@1 {
+					reg = <0x1 0x1>;
 				};
 			};
 		};
