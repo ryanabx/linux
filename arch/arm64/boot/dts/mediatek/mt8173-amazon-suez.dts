@@ -282,6 +282,9 @@
 		compatible = "mmc-pwrseq-simple";
 		/* PMU_EN, RST */
 		reset-gpios = <&pio 8 GPIO_ACTIVE_LOW>, <&pio 38 GPIO_ACTIVE_LOW>;
+		/* The MT6630's 32 kHz sleep clock */
+		clocks = <&mt6397rtc>;
+		clock-names = "ext_clock";
 	};
 
 	sound {
@@ -803,6 +806,7 @@
 
 		mt6397rtc: rtc {
 			compatible = "mediatek,mt6397-rtc";
+			#clock-cells = <0>;
 
 			/*
 			 * The first of the RTC's spare bytes, which MediaTek
