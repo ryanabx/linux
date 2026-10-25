@@ -53,11 +53,11 @@ config SND_SOC_MT2701_CS42448
 
 config SND_SOC_MT2701_HDMI
 	tristate "ASoC Audio driver for MT2701 with on-chip HDMI codec"
-	depends on SND_SOC_MT2701
+	depends on SND_SOC_MT2701 || SND_SOC_MT8695
 	select SND_SOC_HDMI_CODEC
 	help
-	  This adds the ASoC machine driver for MediaTek MT2701 and
-	  MT7623N boards routing the AFE I2S back-end to the on-chip
+	  This adds the ASoC machine driver for MediaTek MT2701, MT7623N
+	  and MT8695 boards routing the AFE I2S back-end to the on-chip
 	  HDMI transmitter via the generic HDMI codec.
 	  If unsure select "N".
 
