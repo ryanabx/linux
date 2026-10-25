@@ -95,6 +95,7 @@ static int mt2701_hdmi_machine_probe(struct platform_device *pdev)
 static const struct of_device_id mt2701_hdmi_machine_dt_match[] = {
 	{ .compatible = "mediatek,mt2701-hdmi-audio" },
 	{ .compatible = "mediatek,mt7623n-hdmi-audio" },
+	{ .compatible = "mediatek,mt8695-hdmi-audio" },
 	{}
 };
 MODULE_DEVICE_TABLE(of, mt2701_hdmi_machine_dt_match);
