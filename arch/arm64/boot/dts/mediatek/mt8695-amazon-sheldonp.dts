@@ -99,6 +99,12 @@
 		regulator-boot-on;
 	};
 
+	sound-hdmi {
+		compatible = "mediatek,mt8695-hdmi-audio";
+		mediatek,platform = <&afe>;
+		mediatek,audio-codec = <&hdmi>;
+	};
+
 	sdio_io: regulator-sdio-io {
 		compatible = "regulator-fixed";
 		regulator-name = "sdio_io";
@@ -150,6 +156,10 @@
 			no-map;
 		};
 	};
+};
+
+&afe {
+	status = "okay";
 };
 
 &cpu0 {
