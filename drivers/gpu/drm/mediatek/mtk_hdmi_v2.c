@@ -1062,10 +1062,14 @@ static void mtk_hdmi_v2_bridge_enable(struct drm_bridge *bridge,
 
 	mtk_hdmi_v2_hw_vid_mute(hdmi, false);
 
+	/*
+	 * The codec reads the ELD in its plugged callback, and
+	 * mtk_hdmi_audio_get_eld() returns it only once the bridge is enabled.
+	 */
+	hdmi->enabled = true;
+
 	/* signal the connect event to audio codec */
 	mtk_hdmi_v2_handle_plugged_change(hdmi, true);
-
-	hdmi->enabled = true;
 }
 
 static void mtk_hdmi_v2_bridge_disable(struct drm_bridge *bridge,
