@@ -237,6 +237,7 @@
 
 			spm: power-controller {
 				compatible = "mediatek,mt8695-power-controller";
+				access-controllers = <&infracfg>;
 				#address-cells = <1>;
 				#size-cells = <0>;
 				#power-domain-cells = <1>;
@@ -295,6 +296,30 @@
 				power-domain@MT8695_POWER_DOMAIN_USB {
 					reg = <MT8695_POWER_DOMAIN_USB>;
 					#power-domain-cells = <0>;
+				};
+
+				power-domain@MT8695_POWER_DOMAIN_MFG_ASYNC {
+					reg = <MT8695_POWER_DOMAIN_MFG_ASYNC>;
+					clocks = <&topckgen CLK_TOP_AXI_MFG_IN_AS_SEL>,
+						 <&topckgen CLK_TOP_SLOW_MFG_SEL>;
+					clock-names = "axi", "slow";
+					#address-cells = <1>;
+					#size-cells = <0>;
+					#power-domain-cells = <1>;
+
+					power-domain@MT8695_POWER_DOMAIN_MFG_2D {
+						reg = <MT8695_POWER_DOMAIN_MFG_2D>;
+						#address-cells = <1>;
+						#size-cells = <0>;
+						#power-domain-cells = <1>;
+
+						power-domain@MT8695_POWER_DOMAIN_MFG {
+							reg = <MT8695_POWER_DOMAIN_MFG>;
+							clocks = <&topckgen CLK_TOP_MFG_SEL>;
+							clock-names = "mfg";
+							#power-domain-cells = <0>;
+						};
+					};
 				};
 			};
 		};
@@ -564,6 +589,13 @@
 			#clock-cells = <0>;
 			#phy-cells = <0>;
 			status = "disabled";
+		};
+
+		mfgcfg: clock-controller@13ffe000 {
+			compatible = "mediatek,mt8695-mfgcfg", "syscon";
+			reg = <0 0x13ffe000 0 0x1000>;
+			power-domains = <&spm MT8695_POWER_DOMAIN_MFG_2D>;
+			#clock-cells = <1>;
 		};
 
 		mmsys: syscon@14000000 {
