@@ -28,6 +28,7 @@ properties:
               - mediatek,mt8186-audsys
               - mediatek,mt8192-audsys
               - mediatek,mt8516-audsys
+              - mediatek,mt8695-audsys
           - const: syscon
       - items:
           # Special case for mt7623 for backward compatibility
@@ -40,6 +41,10 @@ properties:
 
   '#clock-cells':
     const: 1
+
+  clocks:
+    maxItems: 1
+    description: The audio bus clock, which the registers need.
 
   audio-controller:
     type: object
@@ -80,6 +85,18 @@ allOf:
       properties:
         audio-controller:
           $ref: /schemas/sound/mt8192-afe-pcm.yaml#
+
+  - if:
+      properties:
+        compatible:
+          contains:
+            const: mediatek,mt8695-audsys
+    then:
+      properties:
+        audio-controller:
+          $ref: /schemas/sound/mediatek,mt8695-audio.yaml#
+      required:
+        - clocks
 
 additionalProperties: false
 
