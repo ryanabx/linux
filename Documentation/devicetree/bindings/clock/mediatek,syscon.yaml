@@ -63,6 +63,7 @@ properties:
               - mediatek,mt8183-vdecsys
               - mediatek,mt8183-vencsys
               - mediatek,mt8695-mcucfg
+              - mediatek,mt8695-mfgcfg
           - const: syscon
       - items:
           - const: mediatek,mt7623-bdpsys
@@ -94,7 +95,9 @@ if:
   properties:
     compatible:
       contains:
-        const: mediatek,mt8183-mfgcfg
+        enum:
+          - mediatek,mt8183-mfgcfg
+          - mediatek,mt8695-mfgcfg
 then:
   properties:
     power-domains: true
