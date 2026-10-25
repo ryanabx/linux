@@ -290,8 +290,6 @@ struct mtk_iommu_domain {
 
 	struct mtk_iommu_bank_data	*bank;
 	struct iommu_domain		domain;
-
-	struct mutex			mutex; /* Protect "data" in this structure */
 };
 
 static int mtk_iommu_bind(struct device *dev)
@@ -705,13 +703,33 @@ update_iova_region:
 
 static struct iommu_domain *mtk_iommu_domain_alloc_paging(struct device *dev)
 {
+	struct mtk_iommu_data *data = dev_iommu_priv_get(dev), *frstdata;
 	struct mtk_iommu_domain *dom;
+	int ret, region_id;
+
+	region_id = mtk_iommu_get_iova_region_id(dev, data->plat_data);
+	if (region_id < 0)
+		return ERR_PTR(region_id);
 
 	dom = kzalloc_obj(*dom);
 	if (!dom)
-		return NULL;
-	mutex_init(&dom->mutex);
+		return ERR_PTR(-ENOMEM);
 	dom->domain.pgsize_bitmap = SZ_4K | SZ_64K | SZ_1M | SZ_16M;
+
+	/*
+	 * Set up the page table now rather than at the first attach, so
+	 * that the core can install the device's direct mappings before
+	 * attaching it. Data is in the frstdata in sharing pgtable case.
+	 */
+	frstdata = mtk_iommu_get_frst_data(data->hw_list);
+	mutex_lock(&frstdata->mutex);
+	ret = mtk_iommu_domain_finalise(dom, frstdata, region_id);
+	mutex_unlock(&frstdata->mutex);
+	if (ret) {
+		kfree(dom);
+		return ERR_PTR(ret);
+	}
+	dom->bank = &data->bank[mtk_iommu_get_bank_id(dev, data->plat_data)];
 
 	return &dom->domain;
 }
@@ -724,9 +742,8 @@ static void mtk_iommu_domain_free(struct iommu_domain *domain)
 static int mtk_iommu_attach_device(struct iommu_domain *domain,
 				   struct device *dev, struct iommu_domain *old)
 {
-	struct mtk_iommu_data *data = dev_iommu_priv_get(dev), *frstdata;
+	struct mtk_iommu_data *data = dev_iommu_priv_get(dev);
 	struct mtk_iommu_domain *dom = to_mtk_domain(domain);
-	struct list_head *hw_list = data->hw_list;
 	struct device *m4udev = data->dev;
 	struct mtk_iommu_bank_data *bank;
 	unsigned int bankid;
@@ -737,21 +754,6 @@ static int mtk_iommu_attach_device(struct iommu_domain *domain,
 		return region_id;
 
 	bankid = mtk_iommu_get_bank_id(dev, data->plat_data);
-	mutex_lock(&dom->mutex);
-	if (!dom->bank) {
-		/* Data is in the frstdata in sharing pgtable case. */
-		frstdata = mtk_iommu_get_frst_data(hw_list);
-
-		mutex_lock(&frstdata->mutex);
-		ret = mtk_iommu_domain_finalise(dom, frstdata, region_id);
-		mutex_unlock(&frstdata->mutex);
-		if (ret) {
-			mutex_unlock(&dom->mutex);
-			return ret;
-		}
-		dom->bank = &data->bank[bankid];
-	}
-	mutex_unlock(&dom->mutex);
 
 	mutex_lock(&data->mutex);
 	bank = &data->bank[bankid];
@@ -834,13 +836,6 @@ static int mtk_iommu_map(struct iommu_domain *domain, unsigned long iova,
 {
 	struct mtk_iommu_domain *dom = to_mtk_domain(domain);
 
-	/*
-	 * The page table comes with the first attach. Until then, fail, and
-	 * the core installs a device's direct mappings after attaching it.
-	 */
-	if (!dom->iop)
-		return -ENODEV;
-
 	/* The "4GB mode" M4U physically can not use the lower remap of Dram. */
 	if (dom->bank->parent_data->enable_4GB)
 		paddr |= BIT_ULL(32);
@@ -854,9 +849,6 @@ static size_t mtk_iommu_unmap(struct iommu_domain *domain,
 			      struct iommu_iotlb_gather *gather)
 {
 	struct mtk_iommu_domain *dom = to_mtk_domain(domain);
-
-	if (!dom->iop)
-		return 0;
 
 	iommu_iotlb_gather_add_range(gather, iova, pgsize * pgcount);
 	return dom->iop->unmap_pages(dom->iop, iova, pgsize, pgcount, gather);
@@ -893,9 +885,6 @@ static phys_addr_t mtk_iommu_iova_to_phys(struct iommu_domain *domain,
 {
 	struct mtk_iommu_domain *dom = to_mtk_domain(domain);
 	phys_addr_t pa;
-
-	if (!dom->iop)
-		return 0;
 
 	pa = dom->iop->iova_to_phys(dom->iop, iova);
 	if (IS_ENABLED(CONFIG_PHYS_ADDR_T_64BIT) &&
