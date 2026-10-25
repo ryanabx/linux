@@ -1,7 +1,8 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Domain table from the MT8695 vendor kernel (mtk-scpsys.c,
- * scp_domain_data_mt8695). None of the domains has bus protection.
+ * scp_domain_data_mt8695), and the GPU's from its MFG driver (mtk_mfg.c),
+ * which switches them itself.
  */
 
 #ifndef __SOC_MEDIATEK_MT8695_PM_DOMAINS_H
@@ -13,6 +14,9 @@
 /*
  * MT8695 power domain support
  */
+static enum scpsys_bus_prot_block scpsys_bus_prot_blocks_mt8695[] = {
+	BUS_PROT_BLOCK_INFRA
+};
 
 static const struct scpsys_domain_data scpsys_domain_data_mt8695[] = {
 	/*
@@ -90,6 +94,44 @@ static const struct scpsys_domain_data scpsys_domain_data_mt8695[] = {
 		.sram_pdn_ack_bits = GENMASK(14, 12),
 		.caps = MTK_SCPD_ACTIVE_WAKEUP,
 	},
+	/*
+	 * The GPU: ASYNC, then 2D, which carries the GPU's bus protection
+	 * (MT8173 has the same bits on its 3D domain), then 3D. The vendor
+	 * kernel doesn't wait for an SRAM acknowledge on ASYNC.
+	 */
+	[MT8695_POWER_DOMAIN_MFG_ASYNC] = {
+		.name = "mfg_async",
+		.sta_mask = BIT(18),
+		.ctl_offs = 0x0290,
+		.pwr_sta_offs = SPM_PWR_STATUS,
+		.pwr_sta2nd_offs = SPM_PWR_STATUS_2ND,
+		.sram_pdn_bits = GENMASK(11, 8),
+		.sram_pdn_ack_bits = 0,
+	},
+	[MT8695_POWER_DOMAIN_MFG_2D] = {
+		.name = "mfg_2d",
+		.sta_mask = BIT(19),
+		.ctl_offs = 0x0294,
+		.pwr_sta_offs = SPM_PWR_STATUS,
+		.pwr_sta2nd_offs = SPM_PWR_STATUS_2ND,
+		.sram_pdn_bits = GENMASK(11, 8),
+		.sram_pdn_ack_bits = GENMASK(15, 12),
+		.bp_cfg = {
+			BUS_PROT_INFRA_UPDATE_TOPAXI(MT8173_TOP_AXI_PROT_EN_MFG_S |
+						     MT8173_TOP_AXI_PROT_EN_MFG_M0 |
+						     MT8173_TOP_AXI_PROT_EN_MFG_M1 |
+						     MT8173_TOP_AXI_PROT_EN_MFG_SNOOP_OUT),
+		},
+	},
+	[MT8695_POWER_DOMAIN_MFG] = {
+		.name = "mfg",
+		.sta_mask = BIT(20),
+		.ctl_offs = 0x0298,
+		.pwr_sta_offs = SPM_PWR_STATUS,
+		.pwr_sta2nd_offs = SPM_PWR_STATUS_2ND,
+		.sram_pdn_bits = GENMASK(13, 8),
+		.sram_pdn_ack_bits = GENMASK(19, 16),
+	},
 	[MT8695_POWER_DOMAIN_ETH] = {
 		.name = "eth",
 		.sta_mask = BIT(22),
@@ -115,6 +157,8 @@ static const struct scpsys_domain_data scpsys_domain_data_mt8695[] = {
 static const struct scpsys_soc_data mt8695_scpsys_data = {
 	.domains_data = scpsys_domain_data_mt8695,
 	.num_domains = ARRAY_SIZE(scpsys_domain_data_mt8695),
+	.bus_prot_blocks = scpsys_bus_prot_blocks_mt8695,
+	.num_bus_prot_blocks = ARRAY_SIZE(scpsys_bus_prot_blocks_mt8695),
 };
 
 #endif /* __SOC_MEDIATEK_MT8695_PM_DOMAINS_H */
