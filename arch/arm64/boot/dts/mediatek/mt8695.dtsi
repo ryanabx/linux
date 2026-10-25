@@ -429,6 +429,45 @@
 			#thermal-sensor-cells = <0>;
 		};
 
+		audsys: clock-controller@11220000 {
+			compatible = "mediatek,mt8695-audsys", "syscon";
+			reg = <0 0x11220000 0 0x2000>;
+			clocks = <&topckgen CLK_TOP_AUD_INTBUS_SEL>;
+			#clock-cells = <1>;
+
+			afe: audio-controller {
+				compatible = "mediatek,mt8695-audio";
+				interrupts = <GIC_SPI 242 IRQ_TYPE_LEVEL_LOW>,
+					     <GIC_SPI 142 IRQ_TYPE_LEVEL_LOW>;
+				interrupt-names = "afe", "asys";
+				clocks = <&audsys CLK_AUD_AFE>,
+					 <&audsys CLK_AUD_AFE_CONN>,
+					 <&audsys CLK_AUD_A1SYS>,
+					 <&audsys CLK_AUD_A2SYS>,
+					 <&audsys CLK_AUD_APLL>,
+					 <&audsys CLK_AUD_HDMI>,
+					 <&topckgen CLK_TOP_APLL_SEL>,
+					 <&topckgen CLK_TOP_APLL2_SEL>;
+				clock-names = "afe", "afe_conn", "a1sys", "a2sys",
+					      "apll", "hdmi", "apll1", "apll2";
+				assigned-clocks = <&apmixedsys CLK_APMIXED_APLL1>,
+						  <&apmixedsys CLK_APMIXED_APLL2>,
+						  <&topckgen CLK_TOP_APLL_SEL>,
+						  <&topckgen CLK_TOP_APLL2_SEL>,
+						  <&topckgen CLK_TOP_A1SYS_HP_SEL>,
+						  <&topckgen CLK_TOP_A2SYS_HP_SEL>,
+						  <&topckgen CLK_TOP_AUD_INTBUS_SEL>;
+				assigned-clock-parents = <0>, <0>,
+							 <&topckgen CLK_TOP_APLL1>,
+							 <&topckgen CLK_TOP_APLL2>,
+							 <&topckgen CLK_TOP_APLL1_D4>,
+							 <&topckgen CLK_TOP_APLL2_D4>,
+							 <&topckgen CLK_TOP_SYSPLL1_D4>;
+				assigned-clock-rates = <196608000>, <180633600>;
+				status = "disabled";
+			};
+		};
+
 		mmc0: mmc@11230000 {
 			compatible = "mediatek,mt8695-mmc",
 				     "mediatek,mt2712-mmc";
@@ -634,6 +673,7 @@
 			phys = <&hdmi_phy>;
 			phy-names = "hdmi";
 			power-domains = <&spm MT8695_POWER_DOMAIN_MM>;
+			#sound-dai-cells = <1>;
 			status = "disabled";
 
 			ports {
