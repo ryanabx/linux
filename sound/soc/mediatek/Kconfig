@@ -363,6 +363,19 @@ config SND_SOC_MT8365_MT6357
 	  Select Y if you have such device.
 	  If unsure select "N".
 
+config SND_SOC_MT8695
+	tristate "ASoC support for MediaTek MT8695 chip"
+	depends on ARCH_MEDIATEK || COMPILE_TEST
+	depends on COMMON_CLK
+	select REGMAP_MMIO
+	select MFD_SYSCON
+	select SND_SOC_MEDIATEK
+	help
+	  This adds the ASoC platform driver for the MediaTek MT8695 audio
+	  front end: the HDMI output.
+	  Select Y if you have such device.
+	  If unsure select "N".
+
 config SND_SOC_MT8196
 	tristate "ASoC support for Mediatek MT8196 chip"
 	depends on ARCH_MEDIATEK
