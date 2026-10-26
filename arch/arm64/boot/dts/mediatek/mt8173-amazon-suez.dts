@@ -325,6 +325,8 @@
 			console-size = <0x40000>;
 			record-size = <0x8000>;
 			ftrace-size = <0x20000>;
+			/* KMSG_DUMP_SHUTDOWN: the whole log of every reboot, too */
+			max-reason = <4>;
 		};
 	};
 };
