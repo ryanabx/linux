@@ -1207,6 +1207,45 @@ static void svs_set_bank_freq_pct_v2(struct svs_platform *svsp, struct svs_bank 
 	svs_writel_relaxed(svsp, freqpct30_val, FREQPCT30);
 }
 
+static void svs_get_bank_volts_v2_8opp(struct svs_platform *svsp, struct svs_bank *svsb)
+{
+	const struct svs_bank_pdata *bdata = &svsb->pdata;
+	u32 temp, i;
+
+	temp = svs_readl_relaxed(svsp, VOP74);
+	svsb->volt[7] = FIELD_GET(SVSB_VOPS_FLD_VOP3_7, temp);
+	svsb->volt[6] = FIELD_GET(SVSB_VOPS_FLD_VOP2_6, temp);
+	svsb->volt[5] = FIELD_GET(SVSB_VOPS_FLD_VOP1_5, temp);
+	svsb->volt[4] = FIELD_GET(SVSB_VOPS_FLD_VOP0_4, temp);
+
+	temp = svs_readl_relaxed(svsp, VOP30);
+	svsb->volt[3] = FIELD_GET(SVSB_VOPS_FLD_VOP3_7, temp);
+	svsb->volt[2] = FIELD_GET(SVSB_VOPS_FLD_VOP2_6, temp);
+	svsb->volt[1] = FIELD_GET(SVSB_VOPS_FLD_VOP1_5, temp);
+	svsb->volt[0] = FIELD_GET(SVSB_VOPS_FLD_VOP0_4, temp);
+
+	for (i = 0; i < bdata->opp_count; i++)
+		svsb->volt[i] += svsb->volt_od;
+}
+
+static void svs_set_bank_freq_pct_v2_8opp(struct svs_platform *svsp, struct svs_bank *svsb)
+{
+	u32 freqpct74_val, freqpct30_val;
+
+	freqpct74_val = FIELD_PREP(SVSB_FREQPCTS_FLD_PCT0_4, svsb->freq_pct[4]) |
+			FIELD_PREP(SVSB_FREQPCTS_FLD_PCT1_5, svsb->freq_pct[5]) |
+			FIELD_PREP(SVSB_FREQPCTS_FLD_PCT2_6, svsb->freq_pct[6]) |
+			FIELD_PREP(SVSB_FREQPCTS_FLD_PCT3_7, svsb->freq_pct[7]);
+
+	freqpct30_val = FIELD_PREP(SVSB_FREQPCTS_FLD_PCT0_4, svsb->freq_pct[0]) |
+			FIELD_PREP(SVSB_FREQPCTS_FLD_PCT1_5, svsb->freq_pct[1]) |
+			FIELD_PREP(SVSB_FREQPCTS_FLD_PCT2_6, svsb->freq_pct[2]) |
+			FIELD_PREP(SVSB_FREQPCTS_FLD_PCT3_7, svsb->freq_pct[3]);
+
+	svs_writel_relaxed(svsp, freqpct74_val, FREQPCT74);
+	svs_writel_relaxed(svsp, freqpct30_val, FREQPCT30);
+}
+
 static void svs_set_bank_phase(struct svs_platform *svsp,
 			       unsigned int bank_idx,
 			       enum svsb_phase target_phase)
@@ -2119,6 +2158,106 @@ remove_mt8183_svsb_mon_mode:
 	return true;
 }
 
+static bool svs_mt8695_efuse_parsing(struct svs_platform *svsp,
+				     const struct svs_platform_data *pdata)
+{
+	int adc_ge_t, adc_oe_t, ge, oe, gain, degc_cali, adc_cali_en_t;
+	int o_slope, o_slope_sign, ts_id, o_vtsmcu1, x_roomt;
+	struct svs_bank *svsb;
+	u32 idx, i, ft_pgm, mts, bts, temp0, temp1, temp2;
+
+	for (i = 0; i < svsp->efuse_max; i++)
+		if (svsp->efuse[i])
+			dev_info(svsp->dev, "M_HW_RES%d: 0x%08x\n",
+				 i, svsp->efuse[i]);
+
+	/* SVSINITEN: the chip was characterised for SVS */
+	if (!(svsp->efuse[1] & BIT(6))) {
+		dev_notice(svsp->dev, "SVS not enabled in efuse\n");
+		return false;
+	}
+
+	ft_pgm = svs_get_fuse_val(svsp->efuse, &pdata->glb_fuse_map[GLB_FT_PGM], 4);
+
+	for (idx = 0; idx < svsp->bank_max; idx++) {
+		svsb = &svsp->banks[idx];
+		const struct svs_fusemap *dfmap = svsb->pdata.dev_fuse_map;
+
+		if (ft_pgm <= 2)
+			svsb->volt_flags |= SVSB_INIT01_VOLT_IGNORE;
+
+		svsb->mtdes = svs_get_fuse_val(svsp->efuse, &dfmap[BDEV_MTDES], 8);
+		svsb->bdes = svs_get_fuse_val(svsp->efuse, &dfmap[BDEV_BDES], 8);
+		svsb->mdes = svs_get_fuse_val(svsp->efuse, &dfmap[BDEV_MDES], 8);
+		svsb->dcbdet = svs_get_fuse_val(svsp->efuse, &dfmap[BDEV_DCBDET], 8);
+		svsb->dcmdet = svs_get_fuse_val(svsp->efuse, &dfmap[BDEV_DCMDET], 8);
+	}
+
+	/* SVSMONEN: monitor mode was characterised too */
+	if (!(svsp->efuse[1] & BIT(7)))
+		goto remove_mt8695_svsb_mon_mode;
+
+	/*
+	 * Thermal efuse parsing: the CPU bank's sensor is TS_MCU1, and the
+	 * slope is 165 (x10 here) where MT8183's is 153.4.
+	 */
+	adc_ge_t = svsp->tefuse[0] & GENMASK(9, 0);
+	adc_oe_t = (svsp->tefuse[0] >> 10) & GENMASK(9, 0);
+	degc_cali = (svsp->tefuse[0] >> 20) & GENMASK(5, 0);
+	o_vtsmcu1 = (svsp->tefuse[1] >> 9) & GENMASK(8, 0);
+	adc_cali_en_t = (svsp->tefuse[1] >> 27) & BIT(0);
+	o_slope_sign = (svsp->tefuse[1] >> 28) & BIT(0);
+
+	ts_id = (svsp->tefuse[1] >> 29) & BIT(0);
+	if (!ts_id) {
+		o_slope = 1650;
+	} else {
+		o_slope = (svsp->tefuse[0] >> 26) & GENMASK(5, 0);
+		if (!o_slope_sign)
+			o_slope = 1650 + o_slope * 10;
+		else
+			o_slope = 1650 - o_slope * 10;
+	}
+
+	if (adc_cali_en_t == 0 ||
+	    adc_ge_t < 265 || adc_ge_t > 758 ||
+	    adc_oe_t < 265 || adc_oe_t > 758 ||
+	    o_vtsmcu1 < -8 || o_vtsmcu1 > 484 ||
+	    degc_cali < 1 || degc_cali > 63) {
+		dev_err(svsp->dev, "bad thermal efuse, no mon mode\n");
+		goto remove_mt8695_svsb_mon_mode;
+	}
+
+	ge = ((adc_ge_t - 512) * 10000) / 4096;
+	oe = (adc_oe_t - 512);
+	gain = (10000 + ge);
+	x_roomt = ((((o_vtsmcu1 + 3350 - oe) * 10000) / 4096) * 10000) / gain;
+
+	temp0 = (10000 * 100000 / gain) * 15 / 18;
+	mts = (temp0 * 10) / o_slope;
+
+	temp0 = (degc_cali * 10 / 2);
+	temp1 = ((10000 * 100000 / 4096 / gain) * oe + x_roomt * 10) * 15 / 18;
+	temp2 = temp1 * 100 / o_slope;
+	bts = (temp0 + temp2 - 250) * 4 / 10;
+
+	for (idx = 0; idx < svsp->bank_max; idx++) {
+		svsb = &svsp->banks[idx];
+		svsb->mts = mts;
+		svsb->bts = bts;
+	}
+
+	return true;
+
+remove_mt8695_svsb_mon_mode:
+	for (idx = 0; idx < svsp->bank_max; idx++) {
+		svsb = &svsp->banks[idx];
+		svsb->mode_support &= ~SVSB_MODE_MON;
+	}
+
+	return true;
+}
+
 static struct device *svs_get_subsys_device(struct svs_platform *svsp,
 					    const char *node_name)
 {
@@ -2169,6 +2308,50 @@ static void svs_put_device(void *_dev)
 	struct device *dev = _dev;
 
 	put_device(dev);
+}
+
+static int svs_mt8695_platform_probe(struct svs_platform *svsp)
+{
+	struct device *dev;
+	struct clk *clk;
+	u32 idx;
+	int ret;
+
+	dev = svs_add_device_link(svsp, "thermal");
+	if (IS_ERR(dev))
+		return dev_err_probe(svsp->dev, PTR_ERR(dev),
+				     "failed to get thermal device\n");
+	put_device(dev);
+
+	clk = devm_clk_get_enabled(svsp->dev, "count");
+	if (IS_ERR(clk))
+		return dev_err_probe(svsp->dev, PTR_ERR(clk),
+				     "failed to get count clock\n");
+
+	for (idx = 0; idx < svsp->bank_max; idx++) {
+		struct svs_bank *svsb = &svsp->banks[idx];
+		const struct svs_bank_pdata *bdata = &svsb->pdata;
+
+		if (bdata->sw_id != SVSB_SWID_CPU_LITTLE) {
+			dev_err(svsb->dev, "unknown sw_id: %u\n", bdata->sw_id);
+			return -EINVAL;
+		}
+
+		svsb->opp_dev = get_cpu_device(bdata->cpu_id);
+		if (!svsb->opp_dev)
+			return dev_err_probe(svsp->dev, -ENODEV,
+					     "failed to get OPP device for bank %d\n",
+					     idx);
+		get_device(svsb->opp_dev);
+
+		ret = devm_add_action_or_reset(svsp->dev, svs_put_device,
+					       svsb->opp_dev);
+		if (ret)
+			return dev_err_probe(svsp->dev, ret,
+					     "failed to add OPP device release action\n");
+	}
+
+	return 0;
 }
 
 static int svs_mt8192_platform_probe(struct svs_platform *svsp)
@@ -2634,6 +2817,43 @@ static struct svs_bank svs_mt8186_banks[] = {
 	},
 };
 
+static struct svs_bank svs_mt8695_banks[] = {
+	{
+		.pdata = (const struct svs_bank_pdata) {
+			.sw_id			= SVSB_SWID_CPU_LITTLE,
+			.set_freq_pct		= svs_set_bank_freq_pct_v2_8opp,
+			.get_volts		= svs_get_bank_volts_v2_8opp,
+			.tzone_name		= "cpu",
+			.cpu_id			= 0,
+			.buck_name		= "proc",
+			.opp_count		= 8,
+			.vboot			= 0x50,
+			.volt_step		= 6250,
+			.volt_base		= 600000,
+			.age_config		= 0x555555,
+			.dc_config		= 0x555555,
+			.vco			= 0x18,
+			.chk_shift		= 0x77,
+			.int_st			= BIT(0),
+			.ctl0			= 0x00000000,
+			.tzone_htemp		= 85000,
+			.tzone_htemp_voffset	= 0,
+			.tzone_ltemp		= 33000,
+			.tzone_ltemp_voffset	= 10,
+			.dev_fuse_map		= (const struct svs_fusemap[BDEV_MAX]) {
+				{ 0, 0 }, { 0, 8 }, { 1, 16 }, { 0, 16 }, { 0, 24 }
+			}
+		},
+		.volt_flags	= SVSB_INIT01_VOLT_INC_ONLY,
+		.mode_support	= SVSB_MODE_INIT01 | SVSB_MODE_INIT02 | SVSB_MODE_MON,
+		.freq_base	= 1690000000,
+		.core_sel	= 0x80010000,
+		.dvt_fixed	= 0x7,
+		.vmax		= 0x50,
+		.vmin		= 0x20,
+	},
+};
+
 static struct svs_bank svs_mt8183_banks[] = {
 	{
 		.pdata = (const struct svs_bank_pdata) {
@@ -2813,6 +3033,19 @@ static const struct svs_platform_data svs_mt8186_platform_data = {
 	}
 };
 
+static const struct svs_platform_data svs_mt8695_platform_data = {
+	.name = "mt8695-svs",
+	.banks = svs_mt8695_banks,
+	.efuse_parsing = svs_mt8695_efuse_parsing,
+	.probe = svs_mt8695_platform_probe,
+	.regs = svs_regs_v2,
+	.bank_max = ARRAY_SIZE(svs_mt8695_banks),
+	.glb_fuse_map = (const struct svs_fusemap[GLB_MAX]) {
+		/* VMIN not present */
+		{ 3, 4 }, { -1, 0 }
+	}
+};
+
 static const struct svs_platform_data svs_mt8183_platform_data = {
 	.name = "mt8183-svs",
 	.banks = svs_mt8183_banks,
@@ -2827,6 +3060,7 @@ static const struct svs_platform_data svs_mt8183_platform_data = {
 };
 
 static const struct of_device_id svs_of_match[] = {
+	{ .compatible = "mediatek,mt8695-svs", .data = &svs_mt8695_platform_data },
 	{ .compatible = "mediatek,mt8195-svs", .data = &svs_mt8195_platform_data },
 	{ .compatible = "mediatek,mt8192-svs", .data = &svs_mt8192_platform_data },
 	{ .compatible = "mediatek,mt8188-svs", .data = &svs_mt8188_platform_data },
