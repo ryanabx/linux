@@ -65,6 +65,8 @@ properties:
               - mediatek,mt8695-dispsys
               - mediatek,mt8695-mcucfg
               - mediatek,mt8695-mfgcfg
+              - mediatek,mt8695-vdeccore
+              - mediatek,mt8695-vdecsoc
           - const: syscon
       - items:
           - const: mediatek,mt7623-bdpsys
