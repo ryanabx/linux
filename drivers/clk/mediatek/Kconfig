@@ -1175,6 +1175,14 @@ config COMMON_CLK_MT8695_DISPSYS
 	  the video planes, their formatters and SMI larbs, and the display
 	  post-processing blocks.
 
+config COMMON_CLK_MT8695_VDECSYS
+	tristate "Clock driver for MediaTek MT8695 vdecsys"
+	depends on COMMON_CLK_MT8695
+	default COMMON_CLK_MT8695
+	help
+	  This driver supports MediaTek MT8695 video decoder clocks: the
+	  gates of the decoder and its SMI larbs (vdecsoc and vdeccore).
+
 config COMMON_CLK_MT8695_MFGCFG
 	tristate "Clock driver for MediaTek MT8695 mfgcfg"
 	depends on COMMON_CLK_MT8695
