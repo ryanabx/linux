@@ -777,5 +777,12 @@
 			mediatek,larb-id = <4>;
 			mediatek,smi = <&smi_common>;
 		};
+
+		dispsys: clock-controller@15000000 {
+			compatible = "mediatek,mt8695-dispsys", "syscon";
+			reg = <0 0x15000000 0 0x1000>;
+			power-domains = <&spm MT8695_POWER_DOMAIN_DIS_M>;
+			#clock-cells = <1>;
+		};
 	};
 };
