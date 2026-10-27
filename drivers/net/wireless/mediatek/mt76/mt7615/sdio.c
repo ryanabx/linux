@@ -239,6 +239,7 @@ static int mt7663s_resume(struct device *dev)
 	mt76_worker_enable(&mdev->mt76.sdio.txrx_worker);
 	mt76_worker_enable(&mdev->mt76.sdio.status_worker);
 	mt76_worker_enable(&mdev->mt76.sdio.net_worker);
+	mt76_worker_enable(&mdev->mt76.sdio.stat_worker);
 
 	err = mt7615_mcu_set_drv_ctrl(mdev);
 	if (err)
