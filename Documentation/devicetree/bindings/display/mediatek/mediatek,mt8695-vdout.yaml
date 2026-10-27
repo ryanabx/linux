@@ -88,6 +88,14 @@ properties:
         $ref: /schemas/graph.yaml#/properties/port
         description: Output to the HDMI transmitter
 
+      port@3:
+        $ref: /schemas/graph.yaml#/properties/port
+        description: Input from the main video plane
+
+      port@4:
+        $ref: /schemas/graph.yaml#/properties/port
+        description: Input from the sub video plane
+
     required:
       - port@0
       - port@2
