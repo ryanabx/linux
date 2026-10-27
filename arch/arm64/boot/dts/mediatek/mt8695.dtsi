@@ -678,6 +678,22 @@
 						remote-endpoint = <&hdmi_in>;
 					};
 				};
+
+				port@3 {
+					reg = <3>;
+
+					vdout_in_vdo_main: endpoint {
+						remote-endpoint = <&vdo_main_out>;
+					};
+				};
+
+				port@4 {
+					reg = <4>;
+
+					vdout_in_vdo_sub: endpoint {
+						remote-endpoint = <&vdo_sub_out>;
+					};
+				};
 			};
 		};
 
@@ -785,6 +801,32 @@
 			#clock-cells = <1>;
 		};
 
+		vdo_main: video-plane@15001000 {
+			compatible = "mediatek,mt8695-vdo-main";
+			reg = <0 0x15001000 0 0x1000>;
+			power-domains = <&spm MT8695_POWER_DOMAIN_DIS_M>;
+			clocks = <&dispsys CLK_DISP_VDO3>, <&dispsys CLK_DISP_FMT3>,
+				 <&topckgen CLK_TOP_VDO3_SEL>;
+			clock-names = "vdo", "fmt", "sel";
+			iommus = <&iommu M4U_PORT_VDO3_UFOD_Y_LENGTH>,
+				 <&iommu M4U_PORT_VDO3_UFOD_C_LENGTH>,
+				 <&iommu M4U_PORT_VDO3_UFOD_Y1>,
+				 <&iommu M4U_PORT_VDO3_UFOD_Y2>,
+				 <&iommu M4U_PORT_VDO3_UFOD_Y3>,
+				 <&iommu M4U_PORT_VDO3_UFOD_Y4>,
+				 <&iommu M4U_PORT_VDO3_UFOD_C1>,
+				 <&iommu M4U_PORT_VDO3_UFOD_C2>,
+				 <&iommu M4U_PORT_VDO3_UFOD_C3>,
+				 <&iommu M4U_PORT_VDO3_UFOD_C4>;
+			mediatek,dispsys = <&dispsys>;
+
+			port {
+				vdo_main_out: endpoint {
+					remote-endpoint = <&vdout_in_vdo_main>;
+				};
+			};
+		};
+
 		larb5: larb@15004000 {
 			compatible = "mediatek,mt8695-smi-larb";
 			reg = <0 0x15004000 0 0x1000>;
@@ -803,6 +845,28 @@
 			power-domains = <&spm MT8695_POWER_DOMAIN_DIS_M>;
 			mediatek,larb-id = <6>;
 			mediatek,smi = <&smi_common>;
+		};
+
+		vdo_sub: video-plane@15008000 {
+			compatible = "mediatek,mt8695-vdo-sub";
+			reg = <0 0x15008000 0 0x1000>;
+			power-domains = <&spm MT8695_POWER_DOMAIN_DIS_S>;
+			clocks = <&dispsys CLK_DISP_VDO4>, <&dispsys CLK_DISP_FMT4>,
+				 <&topckgen CLK_TOP_VDO4_SEL>;
+			clock-names = "vdo", "fmt", "sel";
+			iommus = <&iommu M4U_PORT_VDO4_UFOD_Y_LENGTH>,
+				 <&iommu M4U_PORT_VDO4_UFOD_C_LENGTH>,
+				 <&iommu M4U_PORT_VDO4_UFOD_Y1>,
+				 <&iommu M4U_PORT_VDO4_UFOD_C1>,
+				 <&iommu M4U_PORT_VDO4_UFOD_Y2>,
+				 <&iommu M4U_PORT_VDO4_UFOD_C2>;
+			mediatek,dispsys = <&dispsys>;
+
+			port {
+				vdo_sub_out: endpoint {
+					remote-endpoint = <&vdout_in_vdo_sub>;
+				};
+			};
 		};
 	};
 };
