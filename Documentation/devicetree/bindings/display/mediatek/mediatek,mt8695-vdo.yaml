@@ -1,0 +1,112 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/display/mediatek/mediatek,mt8695-vdo.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: MediaTek MT8695 Video Plane
+
+maintainers:
+  - Ryan Brue <ryanbrue.dev@gmail.com>
+
+description:
+  The MediaTek MT8695 TV SoC has two video planes, main and sub, below
+  the OSD planes. Each one reads a two-plane YCbCr picture (luma, then
+  interleaved chroma) through the M4U, scales it vertically in its VDO
+  core and horizontally in its own formatter, and feeds one input of the
+  VDOUT mixer. Its page holds the formatter, the DMA front end (UFOD)
+  and the VDO core. The plane's reset, bus priority and output select
+  are in the dispsys.
+
+properties:
+  compatible:
+    enum:
+      - mediatek,mt8695-vdo-main
+      - mediatek,mt8695-vdo-sub
+
+  reg:
+    maxItems: 1
+
+  power-domains:
+    maxItems: 1
+
+  clocks:
+    items:
+      - description: The VDO core's clock
+      - description: The plane formatter's clock
+      - description: The VDO clock mux
+
+  clock-names:
+    items:
+      - const: vdo
+      - const: fmt
+      - const: sel
+
+  iommus:
+    minItems: 6
+    maxItems: 10
+
+  mediatek,dispsys:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description:
+      The dispsys, which holds the plane's reset, bus priority and output
+      select.
+
+  port:
+    $ref: /schemas/graph.yaml#/properties/port
+    description: Output to the VDOUT mixer
+
+required:
+  - compatible
+  - reg
+  - power-domains
+  - clocks
+  - clock-names
+  - iommus
+  - mediatek,dispsys
+  - port
+
+allOf:
+  - if:
+      properties:
+        compatible:
+          contains:
+            const: mediatek,mt8695-vdo-main
+    then:
+      properties:
+        iommus:
+          minItems: 10
+    else:
+      properties:
+        iommus:
+          maxItems: 6
+
+additionalProperties: false
+
+examples:
+  - |
+    #include <dt-bindings/clock/mediatek,mt8695-clk.h>
+    #include <dt-bindings/memory/mediatek,mt8695-memory-port.h>
+    #include <dt-bindings/power/mediatek,mt8695-power.h>
+
+    video-plane@15008000 {
+        compatible = "mediatek,mt8695-vdo-sub";
+        reg = <0x15008000 0x1000>;
+        power-domains = <&spm MT8695_POWER_DOMAIN_DIS_S>;
+        clocks = <&dispsys CLK_DISP_VDO4>, <&dispsys CLK_DISP_FMT4>,
+                 <&topckgen CLK_TOP_VDO4_SEL>;
+        clock-names = "vdo", "fmt", "sel";
+        iommus = <&iommu M4U_PORT_VDO4_UFOD_Y_LENGTH>,
+                 <&iommu M4U_PORT_VDO4_UFOD_C_LENGTH>,
+                 <&iommu M4U_PORT_VDO4_UFOD_Y1>,
+                 <&iommu M4U_PORT_VDO4_UFOD_C1>,
+                 <&iommu M4U_PORT_VDO4_UFOD_Y2>,
+                 <&iommu M4U_PORT_VDO4_UFOD_C2>;
+        mediatek,dispsys = <&dispsys>;
+
+        port {
+            endpoint {
+                remote-endpoint = <&vdout_in_vdo_sub>;
+            };
+        };
+    };
