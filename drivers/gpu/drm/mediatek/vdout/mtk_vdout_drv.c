@@ -7,8 +7,9 @@
  * makes the CEA timings, and RGB2HDMI feeding the HDMI TX. None of
  * mediatek-drm's DDP blocks are there, so this is a driver of its own. So
  * far it drives the two OSD planes, FHD (the primary) and UHD (an overlay),
- * in the CEA modes from 480p to 1080p60, and the TX is mtk_hdmi_v2, a
- * bridge found through the OF graph.
+ * and the two video planes below them, main and sub, in the CEA modes from
+ * 480p to 1080p60, and the TX is mtk_hdmi_v2, a bridge found through the
+ * OF graph.
  */
 
 #include <linux/clk.h>
@@ -109,6 +110,7 @@ static int mtk_vdout_regs_show(struct seq_file *s, void *data)
 {
 	struct drm_debugfs_entry *entry = s->private;
 	struct mtk_vdout *vd = to_mtk_vdout(entry->dev);
+	unsigned int i;
 
 	mtk_vdout_dump_block(s, "VDOUT", vd->regs, 0x1000);
 	mtk_vdout_dump_block(s, "OSD HDR", vd->hdr_regs, 0x300);
@@ -116,6 +118,9 @@ static int mtk_vdout_regs_show(struct seq_file *s, void *data)
 		mtk_vdout_dump_block(s, "OSD3", vd->osd[MTK_VDOUT_OSD_FHD]->regs, 0x300);
 	if (vd->osd[MTK_VDOUT_OSD_UHD])
 		mtk_vdout_dump_block(s, "OSD2", vd->osd[MTK_VDOUT_OSD_UHD]->regs, 0x300);
+	for (i = 0; i < MTK_VDOUT_VDO_NUM; i++)
+		if (vd->vdo[i])
+			mtk_vdout_vdo_dump(s, vd->vdo[i]);
 	return 0;
 }
 
@@ -240,8 +245,9 @@ static const struct component_master_ops mtk_vdout_master_ops = {
 };
 
 /*
- * The planes come in on ports 0 (FHD) and 1 (UHD), through the OF graph;
- * the TX is on port 2
+ * The planes come in through the OF graph: the OSD planes on ports 0 (FHD)
+ * and 1 (UHD), the video planes on 3 (main) and 4 (sub); the TX is on
+ * port 2. A plane whose node is disabled is left out.
  */
 static int mtk_vdout_add_components(struct device *dev,
 				    struct component_match **match)
@@ -251,13 +257,14 @@ static int mtk_vdout_add_components(struct device *dev,
 	for_each_endpoint_of_node(dev->of_node, ep) {
 		struct of_endpoint id;
 
-		if (of_graph_parse_endpoint(ep, &id) || id.port > 1)
+		if (of_graph_parse_endpoint(ep, &id) || id.port == 2)
 			continue;
 		remote = of_graph_get_remote_port_parent(ep);
 		if (!remote)
 			continue;
-		drm_of_component_match_add(dev, match, component_compare_of,
-					   remote);
+		if (of_device_is_available(remote))
+			drm_of_component_match_add(dev, match,
+						   component_compare_of, remote);
 		of_node_put(remote);
 	}
 
@@ -347,6 +354,7 @@ static struct platform_driver mtk_vdout_driver = {
 
 static struct platform_driver * const mtk_vdout_drivers[] = {
 	&mtk_vdout_osd_driver,
+	&mtk_vdout_vdo_driver,
 	&mtk_vdout_driver,
 };
 
