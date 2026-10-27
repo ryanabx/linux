@@ -371,6 +371,10 @@
 			hdmi_calibration: calib@188 {
 				reg = <0x188 0x10>;
 			};
+
+			svs_calibration: calib@580 {
+				reg = <0x580 0x10>;
+			};
 		};
 
 		apmixedsys: clock-controller@10209000 {
@@ -458,6 +462,20 @@
 			nvmem-cells = <&thermal_calibration>;
 			nvmem-cell-names = "calibration-data";
 			#thermal-sensor-cells = <0>;
+		};
+
+		svs: svs@1100bc00 {
+			compatible = "mediatek,mt8695-svs";
+			reg = <0 0x1100bc00 0 0x400>;
+			interrupts = <GIC_SPI 125 IRQ_TYPE_LEVEL_LOW>;
+			clocks = <&pericfg CLK_PERI_THERM>,
+				 <&pericfg CLK_PERI_PTP_THERM>;
+			clock-names = "main", "count";
+			nvmem-cells = <&svs_calibration>,
+				      <&thermal_calibration>;
+			nvmem-cell-names = "svs-calibration-data",
+					   "t-calibration-data";
+			status = "disabled";
 		};
 
 		audsys: clock-controller@11220000 {
