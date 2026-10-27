@@ -17,16 +17,25 @@
 struct drm_bridge;
 struct platform_driver;
 struct regmap;
+struct seq_file;
 struct reset_control;
 struct mtk_vdout;
 struct mtk_vdout_mode;
 struct mtk_vdout_osd_data;
+struct mtk_vdout_vdo;
 
 /* The OSD planes, bottom to top: they feed the premix's mix1 and mix2 */
 enum mtk_vdout_osd_id {
 	MTK_VDOUT_OSD_FHD,
 	MTK_VDOUT_OSD_UHD,
 	MTK_VDOUT_OSD_NUM,
+};
+
+/* The video planes: main below sub, both below the OSD premix */
+enum mtk_vdout_vdo_id {
+	MTK_VDOUT_VDO_MAIN,
+	MTK_VDOUT_VDO_SUB,
+	MTK_VDOUT_VDO_NUM,
 };
 
 /* OSD timing for one mode, relative to the VDOUT OSD-FHD sync pulse */
@@ -36,6 +45,18 @@ struct mtk_vdout_osd_timing {
 	u32 start;
 	u32 vstart;
 	u32 sync_thres;
+};
+
+/* Video plane timing for one mode, from MediaTek's display driver */
+struct mtk_vdout_vdo_timing {
+	u16 hstart;		/* the active zone's first pixel and line */
+	u16 vstart;
+	u32 path_delay;		/* the plane's vsync pulse: v << 16 | h */
+	u32 fmt_mode;		/* the plane formatter's mode, ratio and delay */
+	u32 fmt_ratio;
+	u32 fmt_delay;		/* main plane only */
+	/* Horizontal downscaler: input begin/end and output begin/end, past hstart */
+	u8 hdwn[4];
 };
 
 /* An OSD plane, a component: FHD (OSD3) the primary, UHD (OSD2) above it */
@@ -59,6 +80,7 @@ struct mtk_vdout {
 	struct drm_crtc crtc;
 	struct drm_encoder encoder;
 	struct mtk_vdout_osd *osd[MTK_VDOUT_OSD_NUM];	/* while bound */
+	struct mtk_vdout_vdo *vdo[MTK_VDOUT_VDO_NUM];	/* while bound */
 	struct drm_bridge *bridge;
 
 	/* FMT, sys1, RGB2HDMI, OSD premix and sys2 */
@@ -75,6 +97,7 @@ struct mtk_vdout {
 
 	/* The mode the FMT runs, kept across a disable */
 	const struct mtk_vdout_mode *cur;
+	const struct mtk_vdout_vdo_timing *cur_vdo;
 };
 
 /* The DRM device's parent is the VDOUT device */
@@ -92,6 +115,17 @@ void mtk_vdout_osd_off(struct mtk_vdout_osd *osd);
 void mtk_vdout_premix_alpha(struct mtk_vdout *vd, enum mtk_vdout_osd_id id,
 			    bool premultiplied);
 
+void mtk_vdout_video_delay(struct mtk_vdout *vd, enum mtk_vdout_vdo_id id,
+			   u32 delay);
+void mtk_vdout_video_window(struct mtk_vdout *vd, enum mtk_vdout_vdo_id id,
+			    u32 h, u32 v);
+void mtk_vdout_video_mix(struct mtk_vdout *vd, enum mtk_vdout_vdo_id id,
+			 bool on);
+
+void mtk_vdout_vdo_off(struct mtk_vdout_vdo *vdo);
+void mtk_vdout_vdo_dump(struct seq_file *s, struct mtk_vdout_vdo *vdo);
+
 extern struct platform_driver mtk_vdout_osd_driver;
+extern struct platform_driver mtk_vdout_vdo_driver;
 
 #endif /* __MTK_VDOUT_DRV_H__ */
