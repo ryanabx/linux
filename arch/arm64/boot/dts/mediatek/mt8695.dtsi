@@ -354,7 +354,7 @@
 			interrupts = <GIC_SPI 147 IRQ_TYPE_LEVEL_LOW>;
 			clocks = <&infracfg CLK_INFRA_M4U>;
 			clock-names = "bclk";
-			mediatek,larbs = <&larb0>, <&larb4>;
+			mediatek,larbs = <&larb0>, <&larb4>, <&larb5>, <&larb6>;
 			#iommu-cells = <1>;
 		};
 
@@ -783,6 +783,26 @@
 			reg = <0 0x15000000 0 0x1000>;
 			power-domains = <&spm MT8695_POWER_DOMAIN_DIS_M>;
 			#clock-cells = <1>;
+		};
+
+		larb5: larb@15004000 {
+			compatible = "mediatek,mt8695-smi-larb";
+			reg = <0 0x15004000 0 0x1000>;
+			clocks = <&mmsys CLK_MM_SMI_LARB5>, <&dispsys CLK_DISP_SMI_LARB5>;
+			clock-names = "apb", "smi";
+			power-domains = <&spm MT8695_POWER_DOMAIN_DIS_M>;
+			mediatek,larb-id = <5>;
+			mediatek,smi = <&smi_common>;
+		};
+
+		larb6: larb@15005000 {
+			compatible = "mediatek,mt8695-smi-larb";
+			reg = <0 0x15005000 0 0x1000>;
+			clocks = <&mmsys CLK_MM_SMI_LARB6>, <&dispsys CLK_DISP_SMI_LARB6>;
+			clock-names = "apb", "smi";
+			power-domains = <&spm MT8695_POWER_DOMAIN_DIS_M>;
+			mediatek,larb-id = <6>;
+			mediatek,smi = <&smi_common>;
 		};
 	};
 };
