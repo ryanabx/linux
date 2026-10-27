@@ -274,6 +274,12 @@
 
 					power-domain@MT8695_POWER_DOMAIN_DOLBY {
 						reg = <MT8695_POWER_DOMAIN_DOLBY>;
+						clocks = <&mmsys CLK_MM_DOLBY1>,
+							 <&mmsys CLK_MM_DOLBY2>,
+							 <&mmsys CLK_MM_DOLBY3>,
+							 <&mmsys CLK_MM_DOLBY_MIX>;
+						clock-names = "dolby-0", "dolby-1",
+							      "dolby-2", "dolby-3";
 						#power-domain-cells = <0>;
 					};
 
