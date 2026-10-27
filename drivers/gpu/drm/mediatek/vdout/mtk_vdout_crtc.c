@@ -39,10 +39,14 @@
 #define FMT_BG			0x0b8
 #define FMT_PLANE_OFF		0x0f8
 #define  FMT_PLN2_OFF		BIT(16)	/* the sub video plane */
+/* The sub video plane's window, in the FMT's second instance */
+#define FMT_SUB			0x300
 
 #define VDOUT_CLK		0x508
+#define VSYNC_PULSE_VDO_OUT(id)	(0x520 + 4 * (id))
 #define  VDOUT_CLK_HD_HALF	BIT(30)
 #define VDTCLK_CFG3		0x578
+#define VSYNC_PULSE_VDO(id)	(0x580 + 4 * (id))
 #define VSYNC_PULSE_OSD_UHD	0x574
 #define VSYNC_PULSE_OSD_FHD	0x57c
 #define HDMI_CONFIG0_SUB	0x598
@@ -141,6 +145,7 @@ struct mtk_vdout_mode {
 	u32 r2h_time[3];	/* 0x81c, 0x820, 0x824 and 0x828 */
 	u32 r2h_sync_delay;
 	u32 r2h_delay;
+	struct mtk_vdout_vdo_timing vdo;
 };
 
 #define MODE_1080P(clock)						\
@@ -164,6 +169,12 @@ struct mtk_vdout_mode {
 	},								\
 	.r2h_time = { 0x002c0005, 0x00c10840, 0x002a0461 },		\
 	.r2h_sync_delay = 0x00010025,					\
+	.vdo = {							\
+		.hstart = 0xc1, .vstart = 0x2a,				\
+		.path_delay = 0x08ca0886, .fmt_mode = 0x0000c220,	\
+		.fmt_ratio = 0x60, .fmt_delay = 0x08c80885,		\
+		.hdwn = { 5, 6, 5, 5 },					\
+	},								\
 }
 
 #define VDOUT_720P(clock, rate) {					\
@@ -179,6 +190,12 @@ struct mtk_vdout_mode {
 	},								\
 	.r2h_time = { 0x00280005, 0x01050604, 0x001a02e9 },		\
 	.r2h_sync_delay = 0x00010026, .r2h_delay = 0x00111000,		\
+	.vdo = {							\
+		.hstart = 0x105, .vstart = 0x1a,			\
+		.path_delay = 0x05dc0660, .fmt_mode = 0x0000e220,	\
+		.fmt_ratio = 0x2120, .fmt_delay = 0x8002064a,		\
+		.hdwn = { 5, 6, 5, 7 },					\
+	},								\
 }
 
 /*
@@ -200,6 +217,12 @@ struct mtk_vdout_mode {
 	},								\
 	.r2h_time = { 0x002c0005, 0x00c10840, 0x002a0461 },		\
 	.r2h_sync_delay = 0x00010025,					\
+	.vdo = {							\
+		.hstart = 0xc1, .vstart = 0x2a,				\
+		.path_delay = 0x08ca0a3e, .fmt_mode = 0xc000c220,	\
+		.fmt_ratio = 0x60, .fmt_delay = 0x08c80a28,		\
+		.hdwn = { 5, 6, 5, 5 },					\
+	},								\
 }
 
 #define VDOUT_720P50 {							\
@@ -217,6 +240,12 @@ struct mtk_vdout_mode {
 	},								\
 	.r2h_time = { 0x00280005, 0x01050604, 0x001a02e9 },		\
 	.r2h_sync_delay = 0x00010026, .r2h_delay = 0x00111000,		\
+	.vdo = {							\
+		.hstart = 0x105, .vstart = 0x1a,			\
+		.path_delay = 0x05dc07aa, .fmt_mode = 0xc000e220,	\
+		.fmt_ratio = 0x2120, .fmt_delay = 0x80020794,		\
+		.hdwn = { 5, 6, 5, 7 },					\
+	},								\
 }
 
 /* 720x480p59.94 (CEA VIC 2 and 3): MediaTek has no 27.027 MHz variant */
@@ -235,6 +264,12 @@ struct mtk_vdout_mode {
 	},								\
 	.r2h_time = { 0x033e060c, 0x007b034a, 0x002b020a },		\
 	.r2h_sync_delay = 0x00010021, .r2h_delay = 0x00111000,		\
+	.vdo = {							\
+		.hstart = 0x7b, .vstart = 0x2b,				\
+		.path_delay = 0x041a034b, .fmt_mode = 0x00008220,	\
+		.fmt_ratio = 0x20, .fmt_delay = 0x80020334,		\
+		.hdwn = { 2, 3, 3, 3 },					\
+	},								\
 }
 
 /* 720x576p50 (CEA VIC 17 and 18): the FMT in its PAL mode */
@@ -253,6 +288,12 @@ struct mtk_vdout_mode {
 	},								\
 	.r2h_time = { 0x03400005, 0x00850354, 0x002d026c },		\
 	.r2h_sync_delay = 0x00010021, .r2h_delay = 0x00111000,		\
+	.vdo = {							\
+		.hstart = 0x85, .vstart = 0x2d,				\
+		.path_delay = 0x04e20351, .fmt_mode = 0xc0008220,	\
+		.fmt_ratio = 0x20, .fmt_delay = 0x8002035a,		\
+		.hdwn = { 2, 3, 3, 3 },					\
+	},								\
 }
 
 /* The first one is what the bootloader sets up */
@@ -315,6 +356,10 @@ static void mtk_vdout_fmt_setup(struct mtk_vdout *vd, const struct mtk_vdout_mod
 	fmt_write(vd, FMT_ACTIVE_X, 0);
 	fmt_write(vd, FMT_ACTIVE_Y0, 0);
 	fmt_write(vd, FMT_ACTIVE_Y1, 0);
+	/* The bootloader leaves a sub plane window, hidden only by PLN2_OFF */
+	fmt_write(vd, FMT_SUB + FMT_ACTIVE_X, 0);
+	fmt_write(vd, FMT_SUB + FMT_ACTIVE_Y0, 0);
+	fmt_write(vd, FMT_SUB + FMT_ACTIVE_Y1, 0);
 	fmt_reset(vd);
 
 	/* vdout_sys_hal_set_hdmi(): the HD clock path, or the 27 MHz one */
@@ -338,6 +383,38 @@ static void mtk_vdout_fmt_setup(struct mtk_vdout *vd, const struct mtk_vdout_mod
 	/* The UHD plane runs two pixels behind the FHD plane */
 	fmt_write(vd, VSYNC_PULSE_OSD_FHD, m->vsync_pulse_osd);
 	fmt_write(vd, VSYNC_PULSE_OSD_UHD, m->vsync_pulse_osd + 2);
+}
+
+/* A video plane's vsync pulse, delayed from the FMT's */
+void mtk_vdout_video_delay(struct mtk_vdout *vd, enum mtk_vdout_vdo_id id,
+			   u32 delay)
+{
+	fmt_write(vd, VSYNC_PULSE_VDO(id), delay);
+	fmt_write(vd, VSYNC_PULSE_VDO_OUT(id), delay);
+}
+
+/*
+ * A video plane's window in the mixer, begin << 16 | end in each direction
+ * (the same lines for both fields), or 0 for none
+ */
+void mtk_vdout_video_window(struct mtk_vdout *vd, enum mtk_vdout_vdo_id id,
+			    u32 h, u32 v)
+{
+	u32 base = id == MTK_VDOUT_VDO_SUB ? FMT_SUB : 0;
+
+	fmt_write(vd, base + FMT_ACTIVE_X, h);
+	fmt_write(vd, base + FMT_ACTIVE_Y0, v);
+	fmt_write(vd, base + FMT_ACTIVE_Y1, v);
+}
+
+/* The mixer always takes the main plane; the sub plane can be left out */
+void mtk_vdout_video_mix(struct mtk_vdout *vd, enum mtk_vdout_vdo_id id,
+			 bool on)
+{
+	if (id != MTK_VDOUT_VDO_SUB)
+		return;
+	rmw(vd->regs, FMT_PLANE_OFF, FMT_PLN2_OFF, on ? 0 : FMT_PLN2_OFF);
+	rmw(vd->regs, FMT_CTRL, FMT_CTRL_TRIGGER, FMT_CTRL_TRIGGER);
 }
 
 /* The OSD path's HDR block as the bootloader leaves it */
@@ -496,6 +573,7 @@ static void mtk_vdout_crtc_atomic_enable(struct drm_crtc *crtc,
 			drm_err(vd->drm, "TVDPLL to %lu Hz: %d\n", m->tvdpll, ret);
 		mtk_vdout_fmt_setup(vd, m);
 		vd->cur = m;
+		vd->cur_vdo = &m->vdo;
 	}
 	mtk_vdout_premix_setup(vd);
 	for (i = 0; i < MTK_VDOUT_OSD_NUM; i++)
@@ -521,6 +599,9 @@ static void mtk_vdout_crtc_atomic_disable(struct drm_crtc *crtc,
 	for (i = 0; i < MTK_VDOUT_OSD_NUM; i++)
 		if (vd->osd[i])
 			mtk_vdout_osd_off(vd->osd[i]);
+	for (i = 0; i < MTK_VDOUT_VDO_NUM; i++)
+		if (vd->vdo[i])
+			mtk_vdout_vdo_off(vd->vdo[i]);
 
 	spin_lock_irq(&crtc->dev->event_lock);
 	if (crtc->state->event && !crtc->state->active) {

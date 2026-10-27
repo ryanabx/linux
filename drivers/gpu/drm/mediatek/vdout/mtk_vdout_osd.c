@@ -318,12 +318,8 @@ static void mtk_vdout_osd_atomic_update(struct drm_plane *plane,
 	sh = drm_rect_height(&new_state->src) >> 16;
 	dw = drm_rect_width(dst);
 	dh = drm_rect_height(dst);
-	/*
-	 * With only the black background under it, the primary plane shows a
-	 * premultiplied buffer the same way with alpha as without.
-	 */
-	alpha = osd->data->type == DRM_PLANE_TYPE_OVERLAY &&
-		fb->format->has_alpha &&
+	/* Per-pixel alpha, premultiplied, over the planes below, video too */
+	alpha = fb->format->has_alpha &&
 		new_state->pixel_blend_mode == DRM_MODE_BLEND_PREMULTI;
 	mtk_vdout_osd_write_header(hdr, fb,
 				   drm_fb_dma_get_gem_addr(fb, new_state, 0),
@@ -392,8 +388,9 @@ static int mtk_vdout_osd_bind(struct device *dev, struct device *master,
 	if (ret)
 		return ret;
 
-	/* The premix stacks the planes in a fixed order */
+	/* The premix stacks the planes in a fixed order, above the video */
 	ret = drm_plane_create_zpos_immutable_property(&osd->plane,
+						       MTK_VDOUT_VDO_NUM +
 						       osd->data->id);
 	if (ret)
 		return ret;
