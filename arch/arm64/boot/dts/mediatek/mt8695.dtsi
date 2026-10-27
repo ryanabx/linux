@@ -940,6 +940,25 @@
 			mediatek,smi = <&smi_common>;
 		};
 
+		/* DO NOT UPSTREAM: probe test only */
+		vdec-probe-test {
+			compatible = "mediatek,mt8695-vdec-probe-test";
+			power-domains = <&spm MT8695_POWER_DOMAIN_VDEC>;
+			clocks = <&topckgen CLK_TOP_VDEC_SEL>,
+				 <&topckgen CLK_TOP_VDEC_SLOW_SEL>,
+				 <&topckgen CLK_TOP_VDEC_LAE_SEL>,
+				 <&vdecsoc CLK_VDSOC_SOC>,
+				 <&vdecsoc CLK_VDSOC_LARB7>,
+				 <&vdeccore CLK_VDCORE_VDEC>,
+				 <&vdeccore CLK_VDCORE_LARB1>;
+			assigned-clocks = <&topckgen CLK_TOP_VDEC_SEL>,
+					  <&topckgen CLK_TOP_VDEC_LAE_SEL>,
+					  <&topckgen CLK_TOP_VDEC_SLOW_SEL>;
+			assigned-clock-parents = <&topckgen CLK_TOP_VDECPLL>,
+						 <&topckgen CLK_TOP_VDECPLL>,
+						 <&topckgen CLK_TOP_OSDPLL_D2>;
+		};
+
 		vdeccore: clock-controller@1602f000 {
 			compatible = "mediatek,mt8695-vdeccore", "syscon";
 			reg = <0 0x1602f000 0 0x1000>;
