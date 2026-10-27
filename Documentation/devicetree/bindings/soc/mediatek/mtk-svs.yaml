@@ -26,6 +26,7 @@ properties:
       - mediatek,mt8188-svs
       - mediatek,mt8192-svs
       - mediatek,mt8195-svs
+      - mediatek,mt8695-svs
 
   reg:
     maxItems: 1
@@ -35,11 +36,16 @@ properties:
     maxItems: 1
 
   clocks:
-    maxItems: 1
-    description: Main clock for MTK SVS controller to work.
+    minItems: 1
+    items:
+      - description: Main clock for MTK SVS controller to work.
+      - description: Clock of the detectors' counters.
 
   clock-names:
-    const: main
+    minItems: 1
+    items:
+      - const: main
+      - const: count
 
   nvmem-cells:
     minItems: 1
@@ -69,6 +75,25 @@ required:
   - clock-names
   - nvmem-cells
   - nvmem-cell-names
+
+allOf:
+  - if:
+      properties:
+        compatible:
+          contains:
+            const: mediatek,mt8695-svs
+    then:
+      properties:
+        clocks:
+          minItems: 2
+        clock-names:
+          minItems: 2
+    else:
+      properties:
+        clocks:
+          maxItems: 1
+        clock-names:
+          maxItems: 1
 
 additionalProperties: false
 
