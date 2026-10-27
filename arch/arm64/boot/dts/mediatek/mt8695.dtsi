@@ -252,6 +252,10 @@
 
 					power-domain@MT8695_POWER_DOMAIN_VDEC {
 						reg = <MT8695_POWER_DOMAIN_VDEC>;
+						clocks = <&topckgen CLK_TOP_VDEC_SEL>,
+							 <&topckgen CLK_TOP_VDEC_SLOW_SEL>,
+							 <&vdecsoc CLK_VDSOC_SOC>;
+						clock-names = "vdec", "vdec1", "vdec-0";
 						#power-domain-cells = <0>;
 					};
 
@@ -354,7 +358,8 @@
 			interrupts = <GIC_SPI 147 IRQ_TYPE_LEVEL_LOW>;
 			clocks = <&infracfg CLK_INFRA_M4U>;
 			clock-names = "bclk";
-			mediatek,larbs = <&larb0>, <&larb4>, <&larb5>, <&larb6>;
+			mediatek,larbs = <&larb0>, <&larb1>, <&larb4>, <&larb5>, <&larb6>,
+					 <&larb7>;
 			#iommu-cells = <1>;
 		};
 
@@ -867,6 +872,40 @@
 					remote-endpoint = <&vdout_in_vdo_sub>;
 				};
 			};
+		};
+
+		larb7: larb@1600e000 {
+			compatible = "mediatek,mt8695-smi-larb";
+			reg = <0 0x1600e000 0 0x1000>;
+			clocks = <&mmsys CLK_MM_SMI_LARB7>, <&vdecsoc CLK_VDSOC_LARB7>,
+				 <&vdecsoc CLK_VDSOC_SOC>;
+			clock-names = "apb", "smi", "gals";
+			power-domains = <&spm MT8695_POWER_DOMAIN_VDEC>;
+			mediatek,larb-id = <7>;
+			mediatek,smi = <&smi_common>;
+		};
+
+		vdecsoc: clock-controller@1600f000 {
+			compatible = "mediatek,mt8695-vdecsoc", "syscon";
+			reg = <0 0x1600f000 0 0x1000>;
+			#clock-cells = <1>;
+		};
+
+		larb1: larb@1602e000 {
+			compatible = "mediatek,mt8695-smi-larb";
+			reg = <0 0x1602e000 0 0x1000>;
+			clocks = <&mmsys CLK_MM_SMI_LARB1>, <&vdeccore CLK_VDCORE_LARB1>,
+				 <&vdeccore CLK_VDCORE_VDEC>;
+			clock-names = "apb", "smi", "gals";
+			power-domains = <&spm MT8695_POWER_DOMAIN_VDEC>;
+			mediatek,larb-id = <1>;
+			mediatek,smi = <&smi_common>;
+		};
+
+		vdeccore: clock-controller@1602f000 {
+			compatible = "mediatek,mt8695-vdeccore", "syscon";
+			reg = <0 0x1602f000 0 0x1000>;
+			#clock-cells = <1>;
 		};
 	};
 };
