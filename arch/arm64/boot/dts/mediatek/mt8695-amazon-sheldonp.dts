@@ -453,3 +453,7 @@
 &vdout {
 	status = "okay";
 };
+
+&svs {
+	status = "okay";
+};
