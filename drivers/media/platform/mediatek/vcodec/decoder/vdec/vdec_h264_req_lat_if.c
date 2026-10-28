@@ -1001,6 +1001,31 @@ static void vdec_h264_lat_buf_addr(struct mtk_vcodec_dec_ctx *ctx,
 		*c = *y + ctx->picinfo.fb_sz[0];
 }
 
+/*
+ * The core reads a reference's chroma at its luma address plus one offset
+ * (MC_C_OFFSET), not from the list's chroma addresses: with MC_C_OFFSET
+ * wrong, the references' chroma is, and nothing else. MM21's planes are
+ * allocated apart, so that holds only while every buffer has its chroma
+ * the same distance from its luma, which the IOMMU's allocator usually
+ * but not always gives. Say so when it doesn't.
+ */
+static void vdec_h264_lat_check_c_offset(struct vdec_h264_lat_inst *inst,
+					 const struct vdec_h264_lat_share *sh,
+					 dma_addr_t y, dma_addr_t c)
+{
+	int i;
+
+	for (i = 0; i < sh->num_refs; i++) {
+		const struct vdec_h264_lat_ref *r = &sh->refs[sh->p0[i]];
+
+		if (r->y && (u32)(r->c - r->y) != (u32)(c - y)) {
+			dev_warn_once(&inst->ctx->dev->plat_dev->dev,
+				      "chroma planes at different offsets: references' chroma will be wrong\n");
+			return;
+		}
+	}
+}
+
 /* The core's run: reconstruct the picture from the LAT's output */
 static int vdec_h264_lat_core_run(struct vdec_h264_lat_inst *inst,
 				  struct vdec_h264_lat_share *sh,
@@ -1037,6 +1062,7 @@ static int vdec_h264_lat_core_run(struct vdec_h264_lat_inst *inst,
 	writel(0xa89ec007, hw->avc + AVC_CTRL);
 	writel(0xbfddb8ff, hw->avc + AVC_160);
 	writel(1, hw->mc + MC_OUT_ENABLE);
+	vdec_h264_lat_check_c_offset(inst, sh, y, c);
 	writel(c - y, hw->mc + MC_C_OFFSET);
 	writel(y >> 9, hw->mc + MC_OUT_Y);
 	writel(c >> 8, hw->mc + MC_OUT_C);
