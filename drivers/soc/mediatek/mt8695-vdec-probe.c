@@ -15,12 +15,12 @@
  * (its register log of an MPEG-2 decode on Fire OS) and reads the two VLD
  * words that the library reads first. Nothing is decoded there either.
  *
- * /sys/kernel/debug/mt8695-vdec-replay decodes one picture: the first
- * MPEG-2 picture of the stream written to /sys/kernel/debug/mt8695-vdec-bs,
- * with the vendor library's register list for that picture (frame 0 of its
+ * /sys/kernel/debug/mt8695-vdec-replay decodes the first two pictures (I
+ * and P) of the MPEG-2 stream written to /sys/kernel/debug/mt8695-vdec-bs,
+ * with the vendor library's register lists for them (frames 0 and 1 of its
  * log of the 1080p test clip) and our own buffers, through the M4U. The
- * picture lands in /sys/kernel/debug/mt8695-vdec-fb, in block mode. Every
- * read is compared with the value the vendor library got.
+ * pictures land in /sys/kernel/debug/mt8695-vdec-fb and -fb1, in block
+ * mode. Every read is compared with the value the vendor library got.
  */
 
 #include <linux/clk.h>
@@ -77,6 +77,7 @@
 #define VDEC_FB_Y_SIZE	(1920 * 1088)
 #define VDEC_FB_SIZE	(VDEC_FB_Y_SIZE * 3 / 2)
 #define VDEC_BS_SIZE	SZ_256K
+#define VDEC_RAW_SIZE	SZ_256K
 
 struct vdec_probe {
 	struct device *dev;
@@ -84,12 +85,13 @@ struct vdec_probe {
 	struct clk_bulk_data *clks;
 	int num_clks;
 
-	void *bs;
+	void *raw;		/* the stream as written */
+	size_t raw_len;
+	void *bs;		/* the picture's chunk of it, for the decoder */
 	dma_addr_t bs_iova;
-	size_t bs_len;
-	void *fb;
-	dma_addr_t fb_iova;
-	struct debugfs_blob_wrapper fb_blob;
+	void *fb[2];
+	dma_addr_t fb_iova[2];
+	struct debugfs_blob_wrapper fb_blob[2];
 };
 
 static const struct {
@@ -453,18 +455,23 @@ static const u32 vdec_replay_bits[] = {
 };
 
 /*
- * Frame 0 of the vendor's log after the setup, with our buffers: the
- * bitstream window in VLD words 44-46 and 68, the frame buffer in MC words
- * 0-3 (luma >> 9, chroma >> 8; both reference slots point at the output,
- * as for the vendor's I picture) and 532/533 (end and start >> 4).
+ * The start of each frame in the vendor's log after the setup: its chunk of
+ * the stream, copied to the start of our bitstream buffer (the vendor's
+ * chunks started 64-byte aligned), as the bitstream window in VLD words
+ * 44-46 and 68, then the fetch.
  */
-static void vdec_replay_frame(struct vdec_replay *r)
+static int vdec_replay_start(struct vdec_replay *r, size_t off, size_t len)
 {
 	struct vdec_probe *vp = r->vp;
-	u32 bs = vp->bs_iova, bs_end = vp->bs_iova + vp->bs_len;
-	u32 y = vp->fb_iova, c = vp->fb_iova + VDEC_FB_Y_SIZE;
+	u32 bs = vp->bs_iova, bs_end = vp->bs_iova + len;
 	u32 val;
-	int i;
+
+	if (off + len > vp->raw_len || len > VDEC_BS_SIZE) {
+		seq_printf(r->s, "the stream is too short for bytes %zu-%zu\n",
+			   off, off + len);
+		return -EINVAL;
+	}
+	memcpy(vp->bs, vp->raw + off, len);
 
 	rp_r(r, VLD, 61, 0x00030000);
 	rp_w(r, VLD, 45, bs >> 6);
@@ -479,16 +486,14 @@ static void vdec_replay_frame(struct vdec_replay *r)
 	rp_w(r, VLD, 35, 0x00100000);
 	/* The vendor's wait(`VDEC_INI_FETCH_RDY == 1) */
 	if (rp_poll(r, VLD + 0xe8, BIT(0), 100000, "fetch ready (VLD +0xe8)"))
-		return;	/* the shifter reads below would hang the bus */
+		return -ETIMEDOUT;	/* the shifter reads would hang the bus */
 	rp_w(r, VLD, 35, 0x00800000);
+	return 0;
+}
 
-	rp_r(r, VLD, 60, 0x000001b3);
-	for (i = 0; i < ARRAY_SIZE(vdec_replay_bits); i++)
-		rp_r(r, VLD, 24, vdec_replay_bits[i]);
-	rp_r(r, VLD, 16, 0x00000101);
-	rp_r(r, VLD, 60, 0x00000101);
-
-	rp_w(r, VLD, 34, 0xe020ffff);
+/* The picture parameters both frames share: the 1080p size */
+static void vdec_replay_size(struct vdec_replay *r)
+{
 	rp_w(r, VLD, 36, 0x444001ff);
 	rp_w(r, VLD_TOP, 28, 0x04400780);
 	rp_w(r, MC, 608, 0x78);
@@ -496,24 +501,36 @@ static void vdec_replay_frame(struct vdec_replay *r)
 	rp_w(r, VLD, 65, 0x400);
 	rp_w(r, VLD, 37, 0x1ff);
 	rp_w(r, VLD, 38, 0x3ff);
-	rp_w(r, MC, 0, y >> 9);
-	rp_w(r, MC, 1, c >> 8);
-	rp_w(r, MC, 2, y >> 9);
-	rp_w(r, MC, 3, c >> 8);
-	rp_w(r, MC, 0, y >> 9);
-	rp_w(r, MC, 1, c >> 8);
+}
+
+/* Reference slot @slot (MC words 0/1 or 2/3) is frame buffer @fb */
+static void vdec_replay_slot(struct vdec_replay *r, int slot, int fb)
+{
+	u32 y = r->vp->fb_iova[fb], c = y + VDEC_FB_Y_SIZE;
+
+	rp_w(r, MC, 2 * slot, y >> 9);
+	rp_w(r, MC, 2 * slot + 1, c >> 8);
+}
+
+/* Output to frame buffer @fb (start and end >> 4), from slot @slot, and go */
+static int vdec_replay_finish(struct vdec_replay *r, int fb, int slot)
+{
+	struct vdec_probe *vp = r->vp;
+	u32 y = vp->fb_iova[fb];
+	u32 val;
+
 	rp_w(r, MC, 532, (y + VDEC_FB_SIZE) >> 4);
 	rp_w(r, MC, 533, y >> 4);
 	rp_w(r, MC, 534, 0x1);
 	rp_w(r, MC, 8, 0x0);
-	rp_w(r, MC, 9, 0x0);
+	rp_w(r, MC, 9, slot);
 	rp_w(r, MC, 130, 1920);
 	rp_w(r, MC, 131, 1088);
 	rp_w(r, VLD, 35, 0x004000ff);
 
 	/* The vendor waits for SPI 212; poll its status bit instead */
 	if (rp_poll(r, MISC_IRQ_CFG, BIT(16), 1000000, "decode done (misc +0xa4)"))
-		return;
+		return -ETIMEDOUT;
 	/* Clear it as the vendor's ISR does */
 	val = readl(vp->base + MISC_IRQ_CFG);
 	writel(val | 0x11, vp->base + MISC_IRQ_CFG);
@@ -525,6 +542,58 @@ static void vdec_replay_frame(struct vdec_replay *r)
 	rp_w(r, SYS, 0, 0x1);
 	rp_r(r, MC, 10, 0x77);	/* the last macroblock: column 119 */
 	rp_r(r, MC, 11, 0x43);	/* and row 67 */
+	return 0;
+}
+
+/*
+ * Frame 0, the I picture: the stream from its start, through the
+ * sequence header (the barrel shifter's reads), into frame buffer 0; both
+ * reference slots point at the output.
+ */
+static int vdec_replay_frame0(struct vdec_replay *r)
+{
+	int i, ret;
+
+	ret = vdec_replay_start(r, 0, 83095);
+	if (ret)
+		return ret;
+	rp_r(r, VLD, 60, 0x000001b3);
+	for (i = 0; i < ARRAY_SIZE(vdec_replay_bits); i++)
+		rp_r(r, VLD, 24, vdec_replay_bits[i]);
+	rp_r(r, VLD, 16, 0x00000101);
+	rp_r(r, VLD, 60, 0x00000101);
+
+	rp_w(r, VLD, 34, 0xe020ffff);
+	vdec_replay_size(r);
+	vdec_replay_slot(r, 0, 0);
+	vdec_replay_slot(r, 1, 0);
+	vdec_replay_slot(r, 0, 0);
+	return vdec_replay_finish(r, 0, 0);
+}
+
+/*
+ * Frame 1, the P picture: the stream from the second picture start code,
+ * into frame buffer 1 (slot 1), predicted from frame buffer 0 (slot 0,
+ * MC word 6).
+ */
+static int vdec_replay_frame1(struct vdec_replay *r)
+{
+	int ret;
+
+	ret = vdec_replay_start(r, 82519, 131053);
+	if (ret)
+		return ret;
+	rp_r(r, VLD, 60, 0x00000100);
+	rp_r(r, VLD, 60, 0x00000101);
+
+	rp_w(r, VLD, 34, 0xe04033ff);
+	vdec_replay_size(r);
+	vdec_replay_slot(r, 0, 1);
+	vdec_replay_slot(r, 1, 1);
+	vdec_replay_slot(r, 0, 0);
+	vdec_replay_slot(r, 1, 1);
+	rp_w(r, MC, 6, 0x0);
+	return vdec_replay_finish(r, 1, 1);
 }
 
 static int vdec_replay_show(struct seq_file *s, void *unused)
@@ -533,19 +602,27 @@ static int vdec_replay_show(struct seq_file *s, void *unused)
 	struct vdec_replay r = { .vp = vp, .s = s };
 	int ret;
 
-	if (!vp->bs_len) {
+	if (!vp->raw_len) {
 		seq_puts(s, "write the stream to mt8695-vdec-bs first\n");
 		return 0;
 	}
-	seq_printf(s, "bitstream 0x%llx, %zu bytes; frame buffer 0x%llx\n",
-		   (u64)vp->bs_iova, vp->bs_len, (u64)vp->fb_iova);
-	memset(vp->fb, 0x5a, VDEC_FB_SIZE);
+	seq_printf(s, "stream %zu bytes; bitstream 0x%llx; frame buffers 0x%llx, 0x%llx\n",
+		   vp->raw_len, (u64)vp->bs_iova, (u64)vp->fb_iova[0],
+		   (u64)vp->fb_iova[1]);
+	memset(vp->fb[0], 0x5a, VDEC_FB_SIZE);
+	memset(vp->fb[1], 0x5a, VDEC_FB_SIZE);
 
 	ret = vdec_probe_on(vp);
 	if (ret)
 		return ret;
+	seq_puts(s, "== frame 0\n");
 	vdec_probe_setup(vp, s);
-	vdec_replay_frame(&r);
+	ret = vdec_replay_frame0(&r);
+	if (!ret) {
+		seq_puts(s, "== frame 1\n");
+		vdec_probe_setup(vp, s);
+		vdec_replay_frame1(&r);
+	}
 	vdec_probe_off(vp);
 	seq_printf(s, "%d reads differ from the vendor's\n", r.mismatches);
 	return 0;
@@ -573,10 +650,12 @@ static ssize_t vdec_bs_write(struct file *file, const char __user *buf,
 	ssize_t ret;
 
 	if (*ppos == 0)
-		vp->bs_len = 0;
-	ret = simple_write_to_buffer(vp->bs, VDEC_BS_SIZE, ppos, buf, count);
+		vp->raw_len = 0;
+	if (*ppos >= VDEC_RAW_SIZE)
+		return -ENOSPC;
+	ret = simple_write_to_buffer(vp->raw, VDEC_RAW_SIZE, ppos, buf, count);
 	if (ret > 0)
-		vp->bs_len = max_t(size_t, vp->bs_len, *ppos);
+		vp->raw_len = max_t(size_t, vp->raw_len, *ppos);
 	return ret;
 }
 
@@ -615,21 +694,27 @@ static int mt8695_vdec_probe_probe(struct platform_device *pdev)
 	ret = dma_set_mask_and_coherent(dev, DMA_BIT_MASK(32));
 	if (ret)
 		return ret;
+	vp->raw = devm_kzalloc(dev, VDEC_RAW_SIZE, GFP_KERNEL);
 	vp->bs = dmam_alloc_coherent(dev, VDEC_BS_SIZE, &vp->bs_iova, GFP_KERNEL);
-	vp->fb = dmam_alloc_coherent(dev, VDEC_FB_SIZE, &vp->fb_iova, GFP_KERNEL);
-	if (!vp->bs || !vp->fb)
+	vp->fb[0] = dmam_alloc_coherent(dev, VDEC_FB_SIZE, &vp->fb_iova[0], GFP_KERNEL);
+	vp->fb[1] = dmam_alloc_coherent(dev, VDEC_FB_SIZE, &vp->fb_iova[1], GFP_KERNEL);
+	if (!vp->raw || !vp->bs || !vp->fb[0] || !vp->fb[1])
 		return -ENOMEM;
-	vp->fb_blob.data = vp->fb;
-	vp->fb_blob.size = VDEC_FB_SIZE;
+	vp->fb_blob[0].data = vp->fb[0];
+	vp->fb_blob[0].size = VDEC_FB_SIZE;
+	vp->fb_blob[1].data = vp->fb[1];
+	vp->fb_blob[1].size = VDEC_FB_SIZE;
 
-	dev_info(dev, "%d clocks, bitstream at 0x%llx, frame buffer at 0x%llx; see /sys/kernel/debug/mt8695-vdec-*\n",
-		 vp->num_clks, (u64)vp->bs_iova, (u64)vp->fb_iova);
+	dev_info(dev, "%d clocks, bitstream at 0x%llx, frame buffers at 0x%llx, 0x%llx; see /sys/kernel/debug/mt8695-vdec-*\n",
+		 vp->num_clks, (u64)vp->bs_iova, (u64)vp->fb_iova[0],
+		 (u64)vp->fb_iova[1]);
 	debugfs_create_file("mt8695-vdec-probe", 0400, NULL, vp, &vdec_probe_fops);
 	debugfs_create_file("mt8695-vdec-setup", 0400, NULL, vp, &vdec_setup_fops);
 	debugfs_create_file("mt8695-vdec-offread", 0400, NULL, vp, &vdec_offread_fops);
 	debugfs_create_file("mt8695-vdec-replay", 0400, NULL, vp, &vdec_replay_fops);
 	debugfs_create_file("mt8695-vdec-bs", 0200, NULL, vp, &vdec_bs_fops);
-	debugfs_create_blob("mt8695-vdec-fb", 0400, NULL, &vp->fb_blob);
+	debugfs_create_blob("mt8695-vdec-fb", 0400, NULL, &vp->fb_blob[0]);
+	debugfs_create_blob("mt8695-vdec-fb1", 0400, NULL, &vp->fb_blob[1]);
 	return 0;
 }
 
