@@ -317,6 +317,21 @@ static int vdec_setup_show(struct seq_file *s, void *unused)
 }
 DEFINE_SHOW_ATTRIBUTE(vdec_setup);
 
+/*
+ * Read the two gate blocks' words with nothing powered: whether the clock
+ * controllers can do without runtime PM, as MT8192's do. Check
+ * pm_genpd_summary for "vdec off" first; this file powers nothing.
+ */
+static int vdec_offread_show(struct seq_file *s, void *unused)
+{
+	struct vdec_probe *vp = s->private;
+
+	vdec_probe_read(vp, s, "soc gcon +0xa0", SOC_GCON + 0xa0);
+	vdec_probe_read(vp, s, "core gcon +0x0", CORE_GCON + 0x0);
+	return 0;
+}
+DEFINE_SHOW_ATTRIBUTE(vdec_offread);
+
 struct vdec_replay {
 	struct vdec_probe *vp;
 	struct seq_file *s;
@@ -566,6 +581,7 @@ static int mt8695_vdec_probe_probe(struct platform_device *pdev)
 		 vp->num_clks, (u64)vp->bs_iova, (u64)vp->fb_iova);
 	debugfs_create_file("mt8695-vdec-probe", 0400, NULL, vp, &vdec_probe_fops);
 	debugfs_create_file("mt8695-vdec-setup", 0400, NULL, vp, &vdec_setup_fops);
+	debugfs_create_file("mt8695-vdec-offread", 0400, NULL, vp, &vdec_offread_fops);
 	debugfs_create_file("mt8695-vdec-replay", 0400, NULL, vp, &vdec_replay_fops);
 	debugfs_create_file("mt8695-vdec-bs", 0200, NULL, vp, &vdec_bs_fops);
 	debugfs_create_blob("mt8695-vdec-fb", 0400, NULL, &vp->fb_blob);
