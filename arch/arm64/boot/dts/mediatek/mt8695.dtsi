@@ -254,8 +254,9 @@
 						reg = <MT8695_POWER_DOMAIN_VDEC>;
 						clocks = <&topckgen CLK_TOP_VDEC_SEL>,
 							 <&topckgen CLK_TOP_VDEC_SLOW_SEL>,
+							 <&topckgen CLK_TOP_VDEC_LAE_SEL>,
 							 <&vdecsoc CLK_VDSOC_SOC>;
-						clock-names = "vdec", "vdec1", "vdec-0";
+						clock-names = "vdec", "vdec1", "vdec2", "vdec-0";
 						#power-domain-cells = <0>;
 					};
 
