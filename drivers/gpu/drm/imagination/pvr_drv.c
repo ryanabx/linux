@@ -25,6 +25,7 @@
 #include <drm/drm_file.h>
 #include <drm/drm_gem.h>
 #include <drm/drm_ioctl.h>
+#include <drm/drm_managed.h>
 
 #include <linux/err.h>
 #include <linux/export.h>
@@ -1456,6 +1457,10 @@ pvr_probe(struct platform_device *plat_dev)
 
 	platform_set_drvdata(plat_dev, drm_dev);
 
+	err = drmm_mutex_init(drm_dev, &pvr_dev->unplug_lock);
+	if (err)
+		return err;
+
 	err = pvr_power_domains_init(pvr_dev);
 	if (err)
 		return err;
@@ -1515,11 +1520,9 @@ static void pvr_remove(struct platform_device *plat_dev)
 	/*
 	 * Unplug first so in-flight ioctls, postclose, timeouts and fence
 	 * releases finish and no new ones (or runtime resumes) can start.
-	 * pvr_device_lost() may already have unplugged it, and drm_dev_unplug()
-	 * is not idempotent.
+	 * pvr_device_unplug() does nothing if pvr_device_lost() already did.
 	 */
-	if (!READ_ONCE(pvr_dev->lost))
-		drm_dev_unplug(drm_dev);
+	pvr_device_unplug(pvr_dev);
 
 	/* Stop all queues and their drm_sched workers/timers before teardown. */
 	pvr_queue_device_quiesce(pvr_dev);

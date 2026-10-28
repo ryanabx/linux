@@ -40,8 +40,27 @@ pvr_device_lost(struct pvr_device *pvr_dev)
 {
 	if (!pvr_dev->lost) {
 		WRITE_ONCE(pvr_dev->lost, true);
-		drm_dev_unplug(from_pvr_device(pvr_dev));
+		pvr_device_unplug(pvr_dev);
 	}
+}
+
+/**
+ * pvr_device_unplug() - Unplug the DRM device once
+ * @pvr_dev: Target PowerVR device.
+ *
+ * Both a lost device and pvr_remove() need this, and drm_dev_unplug() is
+ * not idempotent. Whichever caller comes second waits for the first and
+ * then does nothing.
+ */
+void
+pvr_device_unplug(struct pvr_device *pvr_dev)
+{
+	struct drm_device *drm_dev = from_pvr_device(pvr_dev);
+
+	mutex_lock(&pvr_dev->unplug_lock);
+	if (!drm_dev_is_unplugged(drm_dev))
+		drm_dev_unplug(drm_dev);
+	mutex_unlock(&pvr_dev->unplug_lock);
 }
 
 static int

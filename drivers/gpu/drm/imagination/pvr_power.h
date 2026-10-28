@@ -13,6 +13,7 @@ int pvr_watchdog_init(struct pvr_device *pvr_dev);
 void pvr_watchdog_fini(struct pvr_device *pvr_dev);
 
 void pvr_device_lost(struct pvr_device *pvr_dev);
+void pvr_device_unplug(struct pvr_device *pvr_dev);
 
 bool pvr_power_is_idle(struct pvr_device *pvr_dev);
 
