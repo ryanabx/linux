@@ -1473,7 +1473,7 @@ pvr_probe(struct platform_device *plat_dev)
 	if (err)
 		goto err_context_fini;
 
-	devm_pm_runtime_enable(&plat_dev->dev);
+	pm_runtime_enable(&plat_dev->dev);
 	pm_runtime_mark_last_busy(&plat_dev->dev);
 
 	pm_runtime_set_autosuspend_delay(&plat_dev->dev, 50);
@@ -1498,6 +1498,8 @@ err_device_fini:
 
 err_watchdog_fini:
 	pvr_watchdog_fini(pvr_dev);
+	pm_runtime_dont_use_autosuspend(&plat_dev->dev);
+	pm_runtime_disable(&plat_dev->dev);
 
 	pvr_queue_device_fini(pvr_dev);
 
@@ -1540,15 +1542,12 @@ static void pvr_remove(struct platform_device *plat_dev)
 	xa_destroy(&pvr_dev->free_list_ids);
 
 	/*
-	 * Leave runtime PM to the driver core.  This call happens after
-	 * drm_dev_unplug(), so pvr_power_device_suspend() returns -EIO from
-	 * its drm_dev_enter() guard and latches runtime_error.  That latch is
-	 * load-bearing: it makes rpm_idle() bail out before invoking
-	 * pvr_power_device_idle(), which reads pvr_dev->fw_dev.fwif_sysdata
-	 * memory that pvr_device_fini() has already unmapped below.
+	 * Power down even if pinned. This also disables runtime PM, so no
+	 * runtime PM callback can touch the firmware after pvr_device_fini().
 	 */
-	pm_runtime_suspend(drm_dev->dev);
-
+	if (pm_runtime_force_suspend(drm_dev->dev))
+		pm_runtime_disable(drm_dev->dev);
+	pm_runtime_dont_use_autosuspend(drm_dev->dev);
 	pvr_device_fini(pvr_dev);
 	/* Cancel again in case an IRQ-driven reset re-armed watchdog before free_irq(). */
 	pvr_watchdog_fini(pvr_dev);
