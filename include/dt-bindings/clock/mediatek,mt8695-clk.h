@@ -327,5 +327,6 @@
 
 #define CLK_VDSOC_LARB7			0
 #define CLK_VDSOC_SOC			1
+#define CLK_VDSOC_LAT			2
 
 #endif /* _DT_BINDINGS_CLK_MEDIATEK_MT8695_H */
