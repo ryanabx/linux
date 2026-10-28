@@ -14,17 +14,27 @@
  * then runs the setup the vendor library does before its first VLD access
  * (its register log of an MPEG-2 decode on Fire OS) and reads the two VLD
  * words that the library reads first. Nothing is decoded there either.
+ *
+ * /sys/kernel/debug/mt8695-vdec-replay decodes one picture: the first
+ * MPEG-2 picture of the stream written to /sys/kernel/debug/mt8695-vdec-bs,
+ * with the vendor library's register list for that picture (frame 0 of its
+ * log of the 1080p test clip) and our own buffers, through the M4U. The
+ * picture lands in /sys/kernel/debug/mt8695-vdec-fb, in block mode. Every
+ * read is compared with the value the vendor library got.
  */
 
 #include <linux/clk.h>
 #include <linux/debugfs.h>
+#include <linux/dma-mapping.h>
 #include <linux/io.h>
+#include <linux/iopoll.h>
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
 #include <linux/printk.h>
 #include <linux/seq_file.h>
+#include <linux/sizes.h>
 
 #define VDEC_BASE	0x16000000
 #define VDEC_SIZE	0x40000
@@ -56,11 +66,30 @@
 #define MISC_178	(CORE_MISC + 0x178)
 #define GCON_DCM_CON	(CORE_GCON + 0x018)
 
+/* The replay's blocks, named as the vendor library names them */
+#define SYS		0x00000
+#define VLD		CORE_VLD
+#define VLD_TOP		(CORE_VLD + 0x800)
+#define MC		0x21000
+#define MISC		CORE_MISC
+
+/* 1920x1088 in block mode: luma, then chroma at half its size */
+#define VDEC_FB_Y_SIZE	(1920 * 1088)
+#define VDEC_FB_SIZE	(VDEC_FB_Y_SIZE * 3 / 2)
+#define VDEC_BS_SIZE	SZ_256K
+
 struct vdec_probe {
 	struct device *dev;
 	void __iomem *base;
 	struct clk_bulk_data *clks;
 	int num_clks;
+
+	void *bs;
+	dma_addr_t bs_iova;
+	size_t bs_len;
+	void *fb;
+	dma_addr_t fb_iova;
+	struct debugfs_blob_wrapper fb_blob;
 };
 
 static const struct {
@@ -264,6 +293,216 @@ static int vdec_setup_show(struct seq_file *s, void *unused)
 }
 DEFINE_SHOW_ATTRIBUTE(vdec_setup);
 
+struct vdec_replay {
+	struct vdec_probe *vp;
+	struct seq_file *s;
+	int mismatches;
+};
+
+static const char *vdec_block_name(u32 block)
+{
+	switch (block) {
+	case SYS:
+		return "SYS";
+	case VLD:
+		return "VLD";
+	case VLD_TOP:
+		return "VLD_TOP";
+	case MC:
+		return "MC";
+	case MISC:
+		return "MISC";
+	}
+	return "?";
+}
+
+/* Write word @word of @block, logged the way the vendor's log has it */
+static void rp_w(struct vdec_replay *r, u32 block, u32 word, u32 val)
+{
+	char what[48];
+
+	snprintf(what, sizeof(what), "%s(%u) = 0x%08x", vdec_block_name(block),
+		 word, val);
+	vdec_probe_step(r->vp, what);
+	writel(val, r->vp->base + block + word * 4);
+	seq_printf(r->s, "%s\n", what);
+}
+
+/* Read word @word of @block and compare it with what the vendor read */
+static u32 rp_r(struct vdec_replay *r, u32 block, u32 word, u32 expect)
+{
+	char what[48];
+	u32 val;
+
+	snprintf(what, sizeof(what), "%s(%u)", vdec_block_name(block), word);
+	vdec_probe_step(r->vp, what);
+	val = readl(r->vp->base + block + word * 4);
+	if (val != expect)
+		r->mismatches++;
+	dev_emerg(r->vp->dev, "%s: 0x%08x (vendor 0x%08x)\n", what, val, expect);
+	seq_printf(r->s, "%s: 0x%08x (vendor 0x%08x)%s\n", what, val, expect,
+		   val == expect ? "" : " MISMATCH");
+	return val;
+}
+
+static int rp_poll(struct vdec_replay *r, u32 off, u32 mask, u32 timeout_us,
+		   const char *what)
+{
+	u32 val;
+	int ret;
+
+	vdec_probe_step(r->vp, what);
+	ret = readl_poll_timeout(r->vp->base + off, val, val & mask, 10,
+				 timeout_us);
+	dev_emerg(r->vp->dev, "%s: %s, 0x%08x\n", what,
+		  ret ? "timed out" : "done", val);
+	seq_printf(r->s, "%s: %s, 0x%08x\n", what, ret ? "TIMED OUT" : "done",
+		   val);
+	return ret;
+}
+
+/* What the vendor's barrel shifter reads returned: the sequence header on */
+static const u32 vdec_replay_bits[] = {
+	0xb3780438, 0x3835ffff, 0xffe45800, 0x000001b5, 0xb5144a00,
+	0x00010000, 0x00000001, 0x01b80008, 0x08004000, 0x00000100,
+	0x00000fff, 0xfff80000, 0x0001b58f, 0x8ffff341, 0x41800000,
+};
+
+/*
+ * Frame 0 of the vendor's log after the setup, with our buffers: the
+ * bitstream window in VLD words 44-46 and 68, the frame buffer in MC words
+ * 0-3 (luma >> 9, chroma >> 8; both reference slots point at the output,
+ * as for the vendor's I picture) and 532/533 (end and start >> 4).
+ */
+static void vdec_replay_frame(struct vdec_replay *r)
+{
+	struct vdec_probe *vp = r->vp;
+	u32 bs = vp->bs_iova, bs_end = vp->bs_iova + vp->bs_len;
+	u32 y = vp->fb_iova, c = vp->fb_iova + VDEC_FB_Y_SIZE;
+	u32 val;
+	int i;
+
+	rp_r(r, VLD, 61, 0x00030000);
+	rp_w(r, VLD, 45, bs >> 6);
+	rp_w(r, VLD, 46, bs_end >> 6);
+	rp_w(r, VLD, 44, bs);
+	rp_w(r, VLD, 68, bs_end);
+	rp_w(r, VLD, 66, 0x100);
+	rp_w(r, VLD, 66, 0x0);
+	rp_w(r, VLD, 39, 0x00030fff);
+	val = rp_r(r, VLD, 59, 0x0);
+	rp_w(r, VLD, 59, val | 0x10000000);
+	rp_w(r, VLD, 35, 0x00100000);
+	/* The vendor's wait(`VDEC_INI_FETCH_RDY == 1) */
+	if (rp_poll(r, VLD + 0xe8, BIT(0), 100000, "fetch ready (VLD +0xe8)"))
+		return;	/* the shifter reads below would hang the bus */
+	rp_w(r, VLD, 35, 0x00800000);
+
+	rp_r(r, VLD, 60, 0x000001b3);
+	for (i = 0; i < ARRAY_SIZE(vdec_replay_bits); i++)
+		rp_r(r, VLD, 24, vdec_replay_bits[i]);
+	rp_r(r, VLD, 16, 0x00000101);
+	rp_r(r, VLD, 60, 0x00000101);
+
+	rp_w(r, VLD, 34, 0xe020ffff);
+	rp_w(r, VLD, 36, 0x444001ff);
+	rp_w(r, VLD_TOP, 28, 0x04400780);
+	rp_w(r, MC, 608, 0x78);
+	rp_w(r, VLD, 65, 0x0);
+	rp_w(r, VLD, 65, 0x400);
+	rp_w(r, VLD, 37, 0x1ff);
+	rp_w(r, VLD, 38, 0x3ff);
+	rp_w(r, MC, 0, y >> 9);
+	rp_w(r, MC, 1, c >> 8);
+	rp_w(r, MC, 2, y >> 9);
+	rp_w(r, MC, 3, c >> 8);
+	rp_w(r, MC, 0, y >> 9);
+	rp_w(r, MC, 1, c >> 8);
+	rp_w(r, MC, 532, (y + VDEC_FB_SIZE) >> 4);
+	rp_w(r, MC, 533, y >> 4);
+	rp_w(r, MC, 534, 0x1);
+	rp_w(r, MC, 8, 0x0);
+	rp_w(r, MC, 9, 0x0);
+	rp_w(r, MC, 130, 1920);
+	rp_w(r, MC, 131, 1088);
+	rp_w(r, VLD, 35, 0x004000ff);
+
+	/* The vendor waits for SPI 212; poll its status bit instead */
+	if (rp_poll(r, MISC_IRQ_CFG, BIT(16), 1000000, "decode done (misc +0xa4)"))
+		return;
+	/* Clear it as the vendor's ISR does */
+	val = readl(vp->base + MISC_IRQ_CFG);
+	writel(val | 0x11, vp->base + MISC_IRQ_CFG);
+	writel((val | 0x11) & ~0x10, vp->base + MISC_IRQ_CFG);
+	rp_r(r, SYS, 0, 0x0);	/* the vendor stops if bit 4 is set */
+
+	rp_w(r, MISC, 50, 0xfe);
+	rp_w(r, MISC, 51, 0x3f6a151d);
+	rp_w(r, SYS, 0, 0x1);
+	rp_r(r, MC, 10, 0x77);	/* the last macroblock: column 119 */
+	rp_r(r, MC, 11, 0x43);	/* and row 67 */
+}
+
+static int vdec_replay_show(struct seq_file *s, void *unused)
+{
+	struct vdec_probe *vp = s->private;
+	struct vdec_replay r = { .vp = vp, .s = s };
+	int ret;
+
+	if (!vp->bs_len) {
+		seq_puts(s, "write the stream to mt8695-vdec-bs first\n");
+		return 0;
+	}
+	seq_printf(s, "bitstream 0x%llx, %zu bytes; frame buffer 0x%llx\n",
+		   (u64)vp->bs_iova, vp->bs_len, (u64)vp->fb_iova);
+	memset(vp->fb, 0x5a, VDEC_FB_SIZE);
+
+	ret = vdec_probe_on(vp);
+	if (ret)
+		return ret;
+	vdec_probe_setup(vp, s);
+	vdec_replay_frame(&r);
+	vdec_probe_off(vp);
+	seq_printf(s, "%d reads differ from the vendor's\n", r.mismatches);
+	return 0;
+}
+
+/* Room for the whole output, so that seq_file never runs it twice */
+static int vdec_replay_open(struct inode *inode, struct file *file)
+{
+	return single_open_size(file, vdec_replay_show, inode->i_private, SZ_64K);
+}
+
+static const struct file_operations vdec_replay_fops = {
+	.owner = THIS_MODULE,
+	.open = vdec_replay_open,
+	.read = seq_read,
+	.llseek = seq_lseek,
+	.release = single_release,
+};
+
+/* The stream; a write at offset 0 starts it over */
+static ssize_t vdec_bs_write(struct file *file, const char __user *buf,
+			     size_t count, loff_t *ppos)
+{
+	struct vdec_probe *vp = file->private_data;
+	ssize_t ret;
+
+	if (*ppos == 0)
+		vp->bs_len = 0;
+	ret = simple_write_to_buffer(vp->bs, VDEC_BS_SIZE, ppos, buf, count);
+	if (ret > 0)
+		vp->bs_len = max_t(size_t, vp->bs_len, *ppos);
+	return ret;
+}
+
+static const struct file_operations vdec_bs_fops = {
+	.owner = THIS_MODULE,
+	.open = simple_open,
+	.write = vdec_bs_write,
+	.llseek = default_llseek,
+};
+
 static int mt8695_vdec_probe_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
@@ -288,10 +527,24 @@ static int mt8695_vdec_probe_probe(struct platform_device *pdev)
 	if (ret)
 		return ret;
 
-	dev_info(dev, "%d clocks; read /sys/kernel/debug/mt8695-vdec-{probe,setup}\n",
-		 vp->num_clks);
+	/* Through the M4U (larb1's ports), as the vendor's buffers were */
+	ret = dma_set_mask_and_coherent(dev, DMA_BIT_MASK(32));
+	if (ret)
+		return ret;
+	vp->bs = dmam_alloc_coherent(dev, VDEC_BS_SIZE, &vp->bs_iova, GFP_KERNEL);
+	vp->fb = dmam_alloc_coherent(dev, VDEC_FB_SIZE, &vp->fb_iova, GFP_KERNEL);
+	if (!vp->bs || !vp->fb)
+		return -ENOMEM;
+	vp->fb_blob.data = vp->fb;
+	vp->fb_blob.size = VDEC_FB_SIZE;
+
+	dev_info(dev, "%d clocks, bitstream at 0x%llx, frame buffer at 0x%llx; see /sys/kernel/debug/mt8695-vdec-*\n",
+		 vp->num_clks, (u64)vp->bs_iova, (u64)vp->fb_iova);
 	debugfs_create_file("mt8695-vdec-probe", 0400, NULL, vp, &vdec_probe_fops);
 	debugfs_create_file("mt8695-vdec-setup", 0400, NULL, vp, &vdec_setup_fops);
+	debugfs_create_file("mt8695-vdec-replay", 0400, NULL, vp, &vdec_replay_fops);
+	debugfs_create_file("mt8695-vdec-bs", 0200, NULL, vp, &vdec_bs_fops);
+	debugfs_create_blob("mt8695-vdec-fb", 0400, NULL, &vp->fb_blob);
 	return 0;
 }
 

@@ -957,6 +957,17 @@
 			assigned-clock-parents = <&topckgen CLK_TOP_VDECPLL>,
 						 <&topckgen CLK_TOP_VDECPLL>,
 						 <&topckgen CLK_TOP_OSDPLL_D2>;
+			iommus = <&iommu M4U_PORT_HW_VDEC_MC_EXT>,
+				 <&iommu M4U_PORT_HW_VDEC_UFO_EXT>,
+				 <&iommu M4U_PORT_HW_VDEC_PP_EXT>,
+				 <&iommu M4U_PORT_HW_VDEC_PRED_RD_EXT>,
+				 <&iommu M4U_PORT_HW_VDEC_PRED_WR_EXT>,
+				 <&iommu M4U_PORT_HW_VDEC_PPWRAP_EXT>,
+				 <&iommu M4U_PORT_HW_VDEC_TILE>,
+				 <&iommu M4U_PORT_HW_VDEC_VLD_EXT>,
+				 <&iommu M4U_PORT_HW_VDEC_VLD2_EXT>,
+				 <&iommu M4U_PORT_HW_VDEC_AVC_MV_EXT>,
+				 <&iommu M4U_PORT_HW_VDEC_UFO_ENC_EXT>;
 		};
 
 		vdeccore: clock-controller@1602f000 {
