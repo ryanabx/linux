@@ -135,6 +135,9 @@ static int stateless_decoder_cmd(struct file *file, void *priv, struct v4l2_deco
 	struct mtk_vcodec_dec_ctx *ctx = file_to_dec_ctx(file);
 	int ret;
 
+	if (ctx->dev->vdec_pdata->hold_capture_buf)
+		return v4l2_m2m_ioctl_stateless_decoder_cmd(file, priv, cmd);
+
 	ret = v4l2_m2m_ioctl_stateless_try_decoder_cmd(file, priv, cmd);
 	if (ret)
 		return ret;
@@ -1016,6 +1019,8 @@ int mtk_vcodec_dec_queue_init(void *priv, struct vb2_queue *src_vq,
 	src_vq->lock		= &ctx->dev->dev_mutex;
 	src_vq->dev             = &ctx->dev->plat_dev->dev;
 	src_vq->allow_cache_hints = 1;
+	if (ctx->dev->vdec_pdata->hold_capture_buf)
+		src_vq->subsystem_flags |= VB2_V4L2_FL_SUPPORTS_M2M_HOLD_CAPTURE_BUF;
 
 	ret = vb2_queue_init(src_vq);
 	if (ret) {

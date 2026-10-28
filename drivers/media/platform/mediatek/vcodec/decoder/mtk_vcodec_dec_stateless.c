@@ -279,8 +279,14 @@ static void mtk_vdec_stateless_cap_to_disp(struct mtk_vcodec_dec_ctx *ctx, int e
 	else
 		state = VB2_BUF_STATE_DONE;
 
-	dst_buf = v4l2_m2m_dst_buf_remove(ctx->m2m_ctx);
-	v4l2_m2m_buf_done(dst_buf, state);
+	if (ctx->dev->vdec_pdata->hold_capture_buf) {
+		/* The job ends here; the capture buffer may be held */
+		v4l2_m2m_buf_done_and_job_finish(ctx->dev->m2m_dev_dec,
+						 ctx->m2m_ctx, state);
+	} else {
+		dst_buf = v4l2_m2m_dst_buf_remove(ctx->m2m_ctx);
+		v4l2_m2m_buf_done(dst_buf, state);
+	}
 	kref_put(&req->refcount, mtk_vcodec_dec_request_release);
 }
 
@@ -327,6 +333,24 @@ static void vb2ops_vdec_buf_request_complete(struct vb2_buffer *vb)
 	media_request_manual_complete(vb->req_obj.req);
 }
 
+/*
+ * A source buffer that can't be decoded, on a decoder that can hold the
+ * capture buffer: return it with an error, the picture's capture buffer
+ * with it unless held, and end the job the way such a decoder must.
+ */
+static void mtk_vdec_stateless_drop_src(struct mtk_vcodec_dec_ctx *ctx,
+					struct vb2_v4l2_buffer *src)
+{
+	struct media_request *mreq = src->vb2_buf.req_obj.req;
+
+	if (mreq)
+		v4l2_ctrl_request_complete(mreq, &ctx->ctrl_hdl);
+	v4l2_m2m_buf_done_and_job_finish(ctx->dev->m2m_dev_dec, ctx->m2m_ctx,
+					 VB2_BUF_STATE_ERROR);
+	if (mreq)
+		media_request_manual_complete(mreq);
+}
+
 static void mtk_vdec_worker(struct work_struct *work)
 {
 	struct mtk_vcodec_dec_ctx *ctx =
@@ -361,9 +385,12 @@ static void mtk_vdec_worker(struct work_struct *work)
 	bs_src->dma_addr = vb2_dma_contig_plane_dma_addr(vb2_src, 0);
 	bs_src->size = (size_t)vb2_src->planes[0].bytesused;
 	if (!bs_src->va) {
-		v4l2_m2m_job_finish(dev->m2m_dev_dec, ctx->m2m_ctx);
 		mtk_v4l2_vdec_err(ctx, "[%d] id=%d source buffer is NULL", ctx->id,
 				  vb2_src->index);
+		if (dev->vdec_pdata->hold_capture_buf)
+			mtk_vdec_stateless_drop_src(ctx, vb2_v4l2_src);
+		else
+			v4l2_m2m_job_finish(dev->m2m_dev_dec, ctx->m2m_ctx);
 		return;
 	}
 
@@ -372,8 +399,11 @@ static void mtk_vdec_worker(struct work_struct *work)
 	/* Apply request controls. */
 	mreq = vb2_src->req_obj.req;
 	if (WARN_ON(!mreq)) {
-		v4l2_m2m_job_finish(dev->m2m_dev_dec, ctx->m2m_ctx);
 		mtk_v4l2_vdec_err(ctx, "vb2 buffer media request is NULL");
+		if (dev->vdec_pdata->hold_capture_buf)
+			mtk_vdec_stateless_drop_src(ctx, vb2_v4l2_src);
+		else
+			v4l2_m2m_job_finish(dev->m2m_dev_dec, ctx->m2m_ctx);
 		return;
 	}
 
@@ -406,6 +436,21 @@ static void mtk_vdec_worker(struct work_struct *work)
 	}
 
 	v4l2_ctrl_request_complete(mreq, &ctx->ctrl_hdl);
+
+	if (dev->vdec_pdata->hold_capture_buf) {
+		/*
+		 * The picture's job, with its source buffer, ends when the
+		 * picture is decoded: on the core, or here for codecs that run
+		 * on the core alone and on errors.
+		 */
+		if (ret || !IS_VDEC_LAT_ARCH(dev->vdec_pdata->hw_arch) ||
+		    ctx->current_codec == V4L2_PIX_FMT_VP8_FRAME ||
+		    ctx->current_codec == V4L2_PIX_FMT_MPEG2_SLICE)
+			mtk_vdec_stateless_cap_to_disp(ctx, ret, mreq);
+		kref_put(&req->refcount, mtk_vcodec_dec_request_release);
+		return;
+	}
+
 	v4l2_m2m_src_buf_remove(ctx->m2m_ctx);
 	v4l2_m2m_buf_done(vb2_v4l2_src, buf_state);
 
@@ -1009,6 +1054,7 @@ const struct mtk_vcodec_dec_pdata mtk_vdec_8695_pdata = {
 	.cap_to_disp = mtk_vdec_stateless_cap_to_disp,
 	.get_cap_buffer = vdec_get_cap_buffer,
 	.is_subdev_supported = true,
+	.hold_capture_buf = true,
 	.hw_arch = MTK_VDEC_LAT_SINGLE_CORE,
 	.dec_capability = VCODEC_CAPABILITY_4K_DISABLED | MTK_VDEC_FORMAT_MM21 |
 			  MTK_VDEC_FORMAT_MPEG2_SLICE | MTK_VDEC_FORMAT_H264_SLICE,
