@@ -183,10 +183,12 @@ module_param(soc_word_first, bool, 0644);
 
 /*
  * Enable the clocks before the runtime PM get (Y, the vendor's order), or
- * after it (N): with the soc gate among the power domain's clocks, larb1
- * should resume either way.
+ * after it (N, the default: a driver's order). With the slow mux and the
+ * soc gate among the power domain's clocks, larb1 resumes on its own, and
+ * the gate blocks have no runtime PM, so Y now writes the gates while the
+ * domain is off: don't use it.
  */
-static bool clocks_first = true;
+static bool clocks_first;
 module_param(clocks_first, bool, 0644);
 
 /*
