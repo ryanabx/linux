@@ -450,6 +450,8 @@ static int vdec_h264_lat_parse_shdr(struct vdec_h264_lat_inst *inst,
 	h->first_mb = vdec_h264_lat_ue(inst);
 	h->slice_type_raw = vdec_h264_lat_ue(inst);
 	h->slice_type = h->slice_type_raw % 5;
+	if (h->slice_type > H264_SLICE_I)
+		return -EOPNOTSUPP;	/* SP and SI slices (Extended profile) */
 	vdec_h264_lat_ue(inst);		/* pic_parameter_set_id */
 	if (sps->flags & V4L2_H264_SPS_FLAG_SEPARATE_COLOUR_PLANE)
 		vdec_h264_lat_bits(inst, 2);
@@ -1174,10 +1176,20 @@ static int vdec_h264_lat_core_run(struct vdec_h264_lat_inst *inst,
 	u32 h = sh->sps.pic_height_in_map_units_minus1 + 1;
 	dma_addr_t y, c;
 	u32 val, mb_x, mb_y;
-	int ret;
+	int i, ret;
 
 	vdec_h264_lat_find_refs(inst, sh);
 	vdec_h264_lat_alias_frames(inst, sh, dst, &y, &c);
+	/* A reference lost to an earlier error reads the picture itself */
+	for (i = 0; i < V4L2_H264_NUM_DPB_ENTRIES; i++) {
+		struct vdec_h264_lat_ref *r = &sh->refs[i];
+
+		if (!r->vb) {
+			r->y = y;
+			r->c = c;
+			r->mv = inst->mv_buf[dst->index].dma_addr;
+		}
+	}
 
 	vdec_h264_lat_reset(inst, hw);
 	ret = vdec_h264_lat_start_bitstream(inst, hw, ube, ube + q->wdma_addr.size,
