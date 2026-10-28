@@ -859,7 +859,6 @@ static void vdec_h264_lat_set_slice_words(struct vdec_h264_lat_inst *inst,
 	writel((val & 0x1fff) | vdec_h264_lat_shdr1(sh), hw->avc + AVC_SHDR1);
 }
 
-
 /*
  * What both halves write last before their trigger: the picture size
  * words, then H264_HAL_SetErrConceal
