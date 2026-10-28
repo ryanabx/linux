@@ -752,6 +752,21 @@ static u32 vdec_h264_lat_pic_num(const struct vdec_h264_lat_ref *r)
 	       (r->long_term ? AVC_PIC_NUM_LONG_TERM : 0);
 }
 
+/*
+ * With direct_8x8_inference_flag the core keeps only the corner motion
+ * vectors of a macroblock (the reduced MV buffer); without it, all of them.
+ */
+static void vdec_h264_lat_set_mv_mode(struct vdec_h264_lat_hw *hw,
+				      const struct vdec_h264_lat_share *sh)
+{
+	u32 val = readl(hw->mv + MV_136);
+
+	if (sh->sps.flags & V4L2_H264_SPS_FLAG_DIRECT_8X8_INFERENCE)
+		writel(val | 0x20, hw->mv + MV_136);
+	else
+		writel(val & ~0x20, hw->mv + MV_136);
+}
+
 /* The reference lists; the core also gets their buffers */
 static void vdec_h264_lat_set_lists(struct vdec_h264_lat_inst *inst,
 				    struct vdec_h264_lat_hw *hw,
@@ -804,8 +819,7 @@ static void vdec_h264_lat_set_lists(struct vdec_h264_lat_inst *inst,
 	if (!hw->lat) {
 		writel(0, hw->mc + MC_BOTTOM_B0);
 		writel(0, hw->mc + MC_BOTTOM_B1);
-		val = readl(hw->mv + MV_136);
-		writel(val | 0x20, hw->mv + MV_136);	/* the reduced MV buffer */
+		vdec_h264_lat_set_mv_mode(hw, sh);
 	}
 	for (i = 0; i < sh->num_refs; i++) {
 		const struct vdec_h264_lat_ref *r0 = &sh->refs[sh->b0[i]];
@@ -828,7 +842,9 @@ static void vdec_h264_lat_set_lists(struct vdec_h264_lat_inst *inst,
 		writel(vdec_h264_lat_desc(r1, true, true),
 		       hw->mv + MV_B1_DESC(2 * i + 1));
 		writel(r1->mv >> 4, hw->mv + MV_B1_MV(2 * i));
-		writel((r1->mv >> 4) + 2, hw->mv + MV_B1_MV(2 * i + 1));
+		writel((r1->mv >> 4) + (sh->sps.flags &
+					V4L2_H264_SPS_FLAG_DIRECT_8X8_INFERENCE ? 2 : 4),
+		       hw->mv + MV_B1_MV(2 * i + 1));
 	}
 }
 
@@ -1172,8 +1188,7 @@ static int vdec_h264_lat_core_run(struct vdec_h264_lat_inst *inst,
 				      inst->mv_buf[dst->index].dma_addr);
 
 	/* H264_HAL_DecStart, without UFO */
-	val = readl(hw->mv + MV_136);
-	writel(val | 0x20, hw->mv + MV_136);	/* the reduced MV buffer */
+	vdec_h264_lat_set_mv_mode(hw, sh);
 	writel(3, hw->misc + MISC_01);		/* CRC on */
 	writel(4, hw->mc + MC_24);
 	writel(0xffffffff, hw->vld_top + VLD_TOP_058);
@@ -1277,8 +1292,9 @@ out:
 static int vdec_h264_lat_alloc_mv_bufs(struct vdec_h264_lat_inst *inst)
 {
 	struct mtk_vcodec_dec_ctx *ctx = inst->ctx;
-	unsigned int size = mtk_vdec_h264_get_mv_buf_size(ctx->picinfo.buf_w,
-							  ctx->picinfo.buf_h);
+	/* Room for every motion vector, for streams without 8x8 inference */
+	unsigned int size = 2 * mtk_vdec_h264_get_mv_buf_size(ctx->picinfo.buf_w,
+							      ctx->picinfo.buf_h);
 	int i, err;
 
 	for (i = 0; i < H264_MAX_MV_NUM; i++) {
