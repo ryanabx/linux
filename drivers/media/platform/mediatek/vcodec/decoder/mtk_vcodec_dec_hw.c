@@ -181,6 +181,20 @@ static int mtk_vdec_hw_probe(struct platform_device *pdev)
 		return ret;
 	}
 
+	if (platform_get_resource(pdev, IORESOURCE_MEM, 1)) {
+		subdev_dev->reg_base[VDEC_HW_DEC] =
+			devm_platform_ioremap_resource(pdev, 1);
+		if (IS_ERR((__force void *)subdev_dev->reg_base[VDEC_HW_DEC]))
+			return PTR_ERR((__force void *)subdev_dev->reg_base[VDEC_HW_DEC]);
+	}
+
+	if (platform_get_resource(pdev, IORESOURCE_MEM, 2)) {
+		subdev_dev->reg_base[VDEC_HW_DEC2] =
+			devm_platform_ioremap_resource(pdev, 2);
+		if (IS_ERR((__force void *)subdev_dev->reg_base[VDEC_HW_DEC2]))
+			return PTR_ERR((__force void *)subdev_dev->reg_base[VDEC_HW_DEC2]);
+	}
+
 	if (!main_dev->subdev_prob_done)
 		main_dev->subdev_prob_done = mtk_vdec_hw_prob_done;
 
