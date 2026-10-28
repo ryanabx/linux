@@ -447,11 +447,21 @@ static int rp_poll(struct vdec_replay *r, u32 off, u32 mask, u32 timeout_us,
 	return ret;
 }
 
-/* What the vendor's barrel shifter reads returned: the sequence header on */
+/*
+ * The barrel shifter: reading VLD word n shifts the stream n bits, then
+ * returns the next 32. What the vendor's reads returned in frame 0: the
+ * sequence header on, up to the first slice's start code.
+ */
 static const u32 vdec_replay_bits[] = {
 	0xb3780438, 0x3835ffff, 0xffe45800, 0x000001b5, 0xb5144a00,
 	0x00010000, 0x00000001, 0x01b80008, 0x08004000, 0x00000100,
 	0x00000fff, 0xfff80000, 0x0001b58f, 0x8ffff341, 0x41800000,
+};
+
+/* The same in frame 1: the picture header and its coding extension */
+static const u32 vdec_replay_bits1[] = {
+	0x000057ff, 0xfffb8000, 0x000001b5, 0xb5833ff3, 0xf3418000,
+	0x00000101,
 };
 
 /*
@@ -578,12 +588,14 @@ static int vdec_replay_frame0(struct vdec_replay *r)
  */
 static int vdec_replay_frame1(struct vdec_replay *r)
 {
-	int ret;
+	int i, ret;
 
 	ret = vdec_replay_start(r, 82519, 131053);
 	if (ret)
 		return ret;
 	rp_r(r, VLD, 60, 0x00000100);
+	for (i = 0; i < ARRAY_SIZE(vdec_replay_bits1); i++)
+		rp_r(r, VLD, 24, vdec_replay_bits1[i]);
 	rp_r(r, VLD, 60, 0x00000101);
 
 	rp_w(r, VLD, 34, 0xe04033ff);
