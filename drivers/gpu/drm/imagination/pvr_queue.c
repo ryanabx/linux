@@ -1513,7 +1513,7 @@ int pvr_queue_device_init(struct pvr_device *pvr_dev)
 	if (err)
 		return err;
 
-	pvr_dev->sched_wq = alloc_workqueue("powervr-sched", WQ_UNBOUND, 0);
+	pvr_dev->sched_wq = alloc_workqueue("powervr-sched", WQ_UNBOUND | WQ_FREEZABLE, 0);
 	if (!pvr_dev->sched_wq)
 		return -ENOMEM;
 

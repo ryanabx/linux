@@ -14,6 +14,7 @@
 #include <linux/cleanup.h>
 #include <linux/clk.h>
 #include <linux/interrupt.h>
+#include <linux/iopoll.h>
 #include <linux/mutex.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
@@ -28,6 +29,9 @@
 #define POWER_SYNC_TIMEOUT_US (1000000) /* 1s */
 
 #define WATCHDOG_TIME_MS (500)
+
+/* How long system suspend waits for jobs already on the GPU. */
+#define SYSTEM_SUSPEND_DRAIN_MS (1000)
 
 /**
  * pvr_device_lost() - Mark GPU device as lost
@@ -451,6 +455,39 @@ pvr_power_device_idle(struct device *dev)
 	struct pvr_device *pvr_dev = to_pvr_device(drm_dev);
 
 	return pvr_power_is_idle(pvr_dev) ? 0 : -EBUSY;
+}
+
+static bool
+pvr_power_queues_idle(struct pvr_device *pvr_dev)
+{
+	bool idle;
+
+	mutex_lock(&pvr_dev->queues.lock);
+	idle = list_empty(&pvr_dev->queues.active);
+	mutex_unlock(&pvr_dev->queues.lock);
+
+	return idle;
+}
+
+int
+pvr_power_system_suspend(struct device *dev)
+{
+	struct platform_device *plat_dev = to_platform_device(dev);
+	struct drm_device *drm_dev = platform_get_drvdata(plat_dev);
+	struct pvr_device *pvr_dev = to_pvr_device(drm_dev);
+	bool idle;
+
+	/*
+	 * sched_wq is freezable, so nothing new reaches the firmware now. Let
+	 * the jobs already there finish rather than stop the firmware under
+	 * them; a lost device never finishes them.
+	 */
+	if (!READ_ONCE(pvr_dev->lost) &&
+	    read_poll_timeout(pvr_power_queues_idle, idle, idle, USEC_PER_MSEC,
+			      SYSTEM_SUSPEND_DRAIN_MS * USEC_PER_MSEC, false, pvr_dev))
+		return -EBUSY;
+
+	return pm_runtime_force_suspend(dev);
 }
 
 static int
