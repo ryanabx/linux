@@ -202,6 +202,11 @@ static int mt6630s_wait_for_patch(struct sdio_func *func)
 	if (!bt)
 		return -ENODEV;
 
+	/* Probed as soon as it is added, before function 2 is registered */
+	if (!device_is_registered(&bt->dev))
+		return dev_err_probe(&func->dev, -EPROBE_DEFER,
+				     "Waiting for the Bluetooth function\n");
+
 	link = device_link_add(&func->dev, &bt->dev,
 			       DL_FLAG_AUTOREMOVE_CONSUMER);
 	if (!link)
