@@ -111,6 +111,9 @@ struct vdec_pic_info {
  * @uses_stateless_api: whether the decoder uses the stateless API with requests
  * @dec_capability: the capabilities of a decoder without firmware, which the
  *		    kernel drives itself; 0 for decoders behind a VPU or SCP
+ * @hold_capture_buf: whether the decoder can hold a capture buffer for the
+ *		      next request (the second field of a frame); a picture's
+ *		      job then ends when the picture is decoded
  */
 struct mtk_vcodec_dec_pdata {
 	void (*init_vdec_params)(struct mtk_vcodec_dec_ctx *ctx);
@@ -133,6 +136,7 @@ struct mtk_vcodec_dec_pdata {
 	bool is_subdev_supported;
 	bool uses_stateless_api;
 	unsigned int dec_capability;
+	bool hold_capture_buf;
 };
 
 /**
