@@ -189,6 +189,14 @@ module_param(soc_word_first, bool, 0644);
 static bool clocks_first = true;
 module_param(clocks_first, bool, 0644);
 
+/*
+ * With clocks_first=N, which of the three muxes (the node's first three
+ * clocks: bit 0 vdec_sel, 1 vdec_slow_sel, 2 vdec_lae_sel) go on before the
+ * runtime PM get. The gates never do: their blocks are in the domain.
+ */
+static unsigned int pre_muxes;
+module_param(pre_muxes, uint, 0644);
+
 /* Say what comes next on the console, and wait until it is shown */
 static void vdec_probe_step(struct vdec_probe *vp, const char *what)
 {
@@ -210,6 +218,14 @@ static int vdec_probe_on(struct vdec_probe *vp)
 	int ret;
 
 	if (!clocks_first) {
+		int i;
+
+		for (i = 0; i < 3 && i < vp->num_clks; i++) {
+			if (!(pre_muxes & BIT(i)))
+				continue;
+			vdec_probe_step(vp, vp->clks[i].id ?: "a mux");
+			clk_prepare_enable(vp->clks[i].clk);
+		}
 		vdec_probe_step(vp, "power domain and larb1 on, before the clocks");
 		ret = pm_runtime_resume_and_get(vp->dev);
 		if (ret)
@@ -247,8 +263,14 @@ err_put:
 
 static void vdec_probe_off(struct vdec_probe *vp)
 {
+	int i;
+
 	pm_runtime_put_sync(vp->dev);
 	clk_bulk_disable_unprepare(vp->num_clks, vp->clks);
+	if (!clocks_first)
+		for (i = 0; i < 3 && i < vp->num_clks; i++)
+			if (pre_muxes & BIT(i))
+				clk_disable_unprepare(vp->clks[i].clk);
 }
 
 static void vdec_probe_read(struct vdec_probe *vp, struct seq_file *s,
