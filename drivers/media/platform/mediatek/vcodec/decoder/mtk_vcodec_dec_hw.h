@@ -24,11 +24,14 @@
  * enum mtk_vdec_hw_reg_idx - subdev hardware register base index
  * @VDEC_HW_SYS : vdec soc register index
  * @VDEC_HW_MISC: vdec misc register index
+ * @VDEC_HW_DEC : vdec decode blocks (VLD to PP), on decoders the kernel
+ *		  programs itself
  * @VDEC_HW_MAX : vdec supported max register index
  */
 enum mtk_vdec_hw_reg_idx {
 	VDEC_HW_SYS,
 	VDEC_HW_MISC,
+	VDEC_HW_DEC,
 	VDEC_HW_MAX
 };
 
