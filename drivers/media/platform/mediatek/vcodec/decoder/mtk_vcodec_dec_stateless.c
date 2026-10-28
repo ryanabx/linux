@@ -1011,5 +1011,5 @@ const struct mtk_vcodec_dec_pdata mtk_vdec_8695_pdata = {
 	.is_subdev_supported = true,
 	.hw_arch = MTK_VDEC_LAT_SINGLE_CORE,
 	.dec_capability = VCODEC_CAPABILITY_4K_DISABLED | MTK_VDEC_FORMAT_MM21 |
-			  MTK_VDEC_FORMAT_MPEG2_SLICE,
+			  MTK_VDEC_FORMAT_MPEG2_SLICE | MTK_VDEC_FORMAT_H264_SLICE,
 };
