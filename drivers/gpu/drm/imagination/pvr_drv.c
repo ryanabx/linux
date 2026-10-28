@@ -1433,7 +1433,7 @@ pvr_probe(struct platform_device *plat_dev)
 	if (err)
 		goto err_context_fini;
 
-	devm_pm_runtime_enable(&plat_dev->dev);
+	pm_runtime_enable(&plat_dev->dev);
 	pm_runtime_mark_last_busy(&plat_dev->dev);
 
 	pm_runtime_set_autosuspend_delay(&plat_dev->dev, 50);
@@ -1458,6 +1458,8 @@ err_device_fini:
 
 err_watchdog_fini:
 	pvr_watchdog_fini(pvr_dev);
+	pm_runtime_dont_use_autosuspend(&plat_dev->dev);
+	pm_runtime_disable(&plat_dev->dev);
 
 	pvr_queue_device_fini(pvr_dev);
 
@@ -1483,7 +1485,10 @@ static void pvr_remove(struct platform_device *plat_dev)
 	xa_destroy(&pvr_dev->job_ids);
 	xa_destroy(&pvr_dev->free_list_ids);
 
-	pm_runtime_suspend(drm_dev->dev);
+	/* Power down even if pinned; this also disables runtime PM. */
+	if (pm_runtime_force_suspend(drm_dev->dev))
+		pm_runtime_disable(drm_dev->dev);
+	pm_runtime_dont_use_autosuspend(drm_dev->dev);
 	pvr_device_fini(pvr_dev);
 	pvr_watchdog_fini(pvr_dev);
 	pvr_queue_device_fini(pvr_dev);
