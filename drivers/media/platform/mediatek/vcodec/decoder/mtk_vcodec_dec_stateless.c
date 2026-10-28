@@ -185,6 +185,24 @@ static const struct mtk_stateless_control mtk_stateless_controls[] = {
 	},
 	{
 		.cfg = {
+			.id = V4L2_CID_STATELESS_MPEG2_SEQUENCE,
+		},
+		.codec_type = V4L2_PIX_FMT_MPEG2_SLICE,
+	},
+	{
+		.cfg = {
+			.id = V4L2_CID_STATELESS_MPEG2_PICTURE,
+		},
+		.codec_type = V4L2_PIX_FMT_MPEG2_SLICE,
+	},
+	{
+		.cfg = {
+			.id = V4L2_CID_STATELESS_MPEG2_QUANTISATION,
+		},
+		.codec_type = V4L2_PIX_FMT_MPEG2_SLICE,
+	},
+	{
+		.cfg = {
 			.id = V4L2_CID_STATELESS_AV1_SEQUENCE,
 
 		},
@@ -227,7 +245,7 @@ static const struct mtk_stateless_control mtk_stateless_controls[] = {
 
 #define NUM_CTRLS ARRAY_SIZE(mtk_stateless_controls)
 
-static struct mtk_video_fmt mtk_video_formats[9];
+static struct mtk_video_fmt mtk_video_formats[10];
 
 static struct mtk_video_fmt default_out_format;
 static struct mtk_video_fmt default_cap_format;
@@ -391,8 +409,10 @@ static void mtk_vdec_worker(struct work_struct *work)
 	v4l2_m2m_src_buf_remove(ctx->m2m_ctx);
 	v4l2_m2m_buf_done(vb2_v4l2_src, buf_state);
 
+	/* Codecs that run on the core alone finish their picture here */
 	if (ret || !IS_VDEC_LAT_ARCH(dev->vdec_pdata->hw_arch) ||
-	    ctx->current_codec == V4L2_PIX_FMT_VP8_FRAME)
+	    ctx->current_codec == V4L2_PIX_FMT_VP8_FRAME ||
+	    ctx->current_codec == V4L2_PIX_FMT_MPEG2_SLICE)
 		mtk_vdec_stateless_cap_to_disp(ctx, ret, mreq);
 
 done:
@@ -796,6 +816,7 @@ static void mtk_vcodec_add_formats(unsigned int fourcc,
 	case V4L2_PIX_FMT_VP9_FRAME:
 	case V4L2_PIX_FMT_HEVC_SLICE:
 	case V4L2_PIX_FMT_AV1_FRAME:
+	case V4L2_PIX_FMT_MPEG2_SLICE:
 		mtk_video_formats[count_formats].fourcc = fourcc;
 		mtk_video_formats[count_formats].type = MTK_FMT_DEC;
 		mtk_video_formats[count_formats].num_planes = 1;
@@ -866,6 +887,10 @@ static void mtk_vcodec_get_supported_formats(struct mtk_vcodec_dec_ctx *ctx)
 	}
 	if (ctx->dev->dec_capability & MTK_VDEC_FORMAT_AV1_FRAME) {
 		mtk_vcodec_add_formats(V4L2_PIX_FMT_AV1_FRAME, ctx);
+		out_format_count++;
+	}
+	if (ctx->dev->dec_capability & MTK_VDEC_FORMAT_MPEG2_SLICE) {
+		mtk_vcodec_add_formats(V4L2_PIX_FMT_MPEG2_SLICE, ctx);
 		out_format_count++;
 	}
 
