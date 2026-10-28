@@ -173,12 +173,23 @@ static const struct {
 	{ "vld +0xec", VLD_EC },
 };
 
+/*
+ * Write the vendor's word at vdecsoc +0xa8 before larb1 resumes (Y), or
+ * only after it (N), to see whether larb1 needs it: writable at
+ * /sys/module/mt8695_vdec_probe/parameters/soc_word_first.
+ */
+static bool soc_word_first = true;
+module_param(soc_word_first, bool, 0644);
+
 /* Say what comes next on the console, and wait until it is shown */
 static void vdec_probe_step(struct vdec_probe *vp, const char *what)
 {
 	dev_emerg(vp->dev, "next: %s\n", what);
 	pr_flush(1000, true);
 }
+
+static void vdec_probe_read(struct vdec_probe *vp, struct seq_file *s,
+			    const char *name, u32 off);
 
 /*
  * In the vendor driver's order: the muxes and the soc gates (with the extra
@@ -194,14 +205,23 @@ static int vdec_probe_on(struct vdec_probe *vp)
 	ret = clk_bulk_prepare_enable(vp->num_clks, vp->clks);
 	if (ret)
 		return ret;
+	vdec_probe_read(vp, NULL, "soc gcon +0xa8", SOC_GCON + 0xa8);
 	/* The vendor driver writes this word after the soc gate (+0xa0) */
-	vdec_probe_step(vp, "write soc gcon +0xa8");
-	writel(0x1, vp->base + SOC_GCON + 0xa8);
+	if (soc_word_first) {
+		vdec_probe_step(vp, "write soc gcon +0xa8");
+		writel(0x1, vp->base + SOC_GCON + 0xa8);
+	}
 	vdec_probe_step(vp, "power domain and larb1 on");
 	ret = pm_runtime_resume_and_get(vp->dev);
-	if (ret)
+	if (ret) {
 		clk_bulk_disable_unprepare(vp->num_clks, vp->clks);
-	return ret;
+		return ret;
+	}
+	if (!soc_word_first) {
+		vdec_probe_step(vp, "write soc gcon +0xa8 after larb1");
+		writel(0x1, vp->base + SOC_GCON + 0xa8);
+	}
+	return 0;
 }
 
 static void vdec_probe_off(struct vdec_probe *vp)
