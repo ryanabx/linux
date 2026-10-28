@@ -625,7 +625,7 @@ static void vdec_h264_lat_update_slots(struct vdec_h264_lat_inst *inst,
 	int i, j;
 
 	for (i = 0; i < V4L2_H264_NUM_DPB_ENTRIES; i++) {
-		if (!(dec->dpb[i].flags & V4L2_H264_DPB_ENTRY_FLAG_VALID))
+		if (!(dec->dpb[i].flags & V4L2_H264_DPB_ENTRY_FLAG_ACTIVE))
 			continue;
 		j = vdec_h264_lat_find_slot(inst, dec->dpb[i].reference_ts);
 		if (j >= 0)
@@ -637,7 +637,7 @@ static void vdec_h264_lat_update_slots(struct vdec_h264_lat_inst *inst,
 	for (i = 0; i < V4L2_H264_NUM_DPB_ENTRIES; i++) {
 		u64 ts = dec->dpb[i].reference_ts;
 
-		if (!(dec->dpb[i].flags & V4L2_H264_DPB_ENTRY_FLAG_VALID) ||
+		if (!(dec->dpb[i].flags & V4L2_H264_DPB_ENTRY_FLAG_ACTIVE) ||
 		    vdec_h264_lat_find_slot(inst, ts) >= 0)
 			continue;
 		for (j = 0; j < H264_NUM_SLOTS; j++) {
@@ -682,7 +682,7 @@ static void vdec_h264_lat_build_lists(struct vdec_h264_lat_inst *inst,
 		struct vdec_h264_lat_ref *r = &sh->refs[i];
 		struct vb2_buffer *vb;
 
-		if (!(e->flags & V4L2_H264_DPB_ENTRY_FLAG_VALID))
+		if (!(e->flags & V4L2_H264_DPB_ENTRY_FLAG_ACTIVE))
 			continue;
 		r->fb = vdec_h264_lat_slot(inst, e->reference_ts);
 		r->pic_num = b.refs[i].frame_num;
