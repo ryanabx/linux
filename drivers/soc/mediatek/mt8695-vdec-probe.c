@@ -23,10 +23,23 @@
  * Each picture lands in its own frame buffer, /sys/kernel/debug/
  * mt8695-vdec-fb, -fb1 and -fb2, in block mode. The reads the vendor
  * library made are compared with what it got.
+ *
+ * /sys/kernel/debug/mt8695-vdec-h264 decodes the first pictures of an
+ * H.264 clip (I, P, B in decode order; how many: the h264_npics parameter)
+ * by replaying the vendor library's register logs of them, the LAT then
+ * the core for each (mt8695-vdec-h264-pics.h, made by the work repo's
+ * tools/vdec/h264-replay-gen.py with the inputs, which go to
+ * mt8695-vdec-h264-bs first). Each of the vendor's buffers gets one of
+ * ours. The LAT reaches memory through larb7, so a second node
+ * (mediatek,mt8695-vdec-probe-test-lat) carries its ports; the IOMMU puts
+ * both in one domain. The pictures land in mt8695-vdec-h264-fb0 and on;
+ * the CRCs the decoder computes (with UFO on) are compared with the
+ * vendor's.
  */
 
 #include <linux/clk.h>
 #include <linux/debugfs.h>
+#include <linux/delay.h>
 #include <linux/dma-mapping.h>
 #include <linux/io.h>
 #include <linux/iopoll.h>
@@ -37,6 +50,7 @@
 #include <linux/printk.h>
 #include <linux/seq_file.h>
 #include <linux/sizes.h>
+#include <linux/string_helpers.h>
 
 #define VDEC_BASE	0x16000000
 #define VDEC_SIZE	0x40000
@@ -82,6 +96,39 @@
 #define VDEC_RAW_SIZE	SZ_512K
 #define VDEC_NUM_FB	3
 
+/* One step of a replay table from the vendor's H.264 log */
+enum { RP_W, RP_R, RP_WAIT, RP_IRQ };
+
+struct rp_op {
+	u8 op;
+	const char *name;	/* side and block, as the log names them */
+	u32 base;		/* the block, from 0x16000000 */
+	u16 word;
+	s8 region;		/* -1, or val is an offset into this region */
+	u8 shift;		/* and the word takes the address >> shift */
+	u32 val;
+};
+
+/* One of the vendor's buffers, and for an input where it is in the upload */
+struct rp_region {
+	const char *name;
+	u32 size;
+	u32 in_off, in_len;
+};
+
+/* A picture: the LAT's steps, then the core's */
+struct rp_pic {
+	const struct rp_op *lat;
+	int n_lat;
+	const struct rp_op *core;
+	int n_core;
+};
+
+#include "mt8695-vdec-h264-pics.h"
+
+#define H264_NUM_REGIONS	ARRAY_SIZE(h264_regions)
+#define H264_RAW_SIZE		SZ_1M
+
 struct vdec_probe {
 	struct device *dev;
 	void __iomem *base;
@@ -95,7 +142,16 @@ struct vdec_probe {
 	void *fb[VDEC_NUM_FB];
 	dma_addr_t fb_iova[VDEC_NUM_FB];
 	struct debugfs_blob_wrapper fb_blob[VDEC_NUM_FB];
+
+	void *h264[H264_NUM_REGIONS];
+	dma_addr_t h264_iova[H264_NUM_REGIONS];
+	struct debugfs_blob_wrapper h264_blob[H264_NUM_REGIONS];
+	void *h264_raw;		/* the inputs as written */
+	size_t h264_raw_len;
 };
+
+/* The LAT node: only there for larb7's ports and runtime PM */
+static struct device *vdec_probe_lat_dev;
 
 static const struct {
 	const char *name;
@@ -207,6 +263,32 @@ module_param(pre_muxes, uint, 0644);
 /* The replay's clip: 0, I and P (mpeg2-1080p30-ip); 1, I, P, B (-ipb) */
 static unsigned int clip;
 module_param(clip, uint, 0644);
+
+/* Print every H.264 replay step on the console first (slow, but a hang shows) */
+static bool h264_trace = true;
+module_param(h264_trace, bool, 0644);
+
+/*
+ * Write the vendor's UFO (compressed output) words, SOCUFO 3 and 31-35
+ * (Y), or leave them out for a plain block-mode picture (N)
+ */
+static bool h264_ufo = true;
+module_param(h264_ufo, bool, 0644);
+
+/*
+ * MC word 664, written with the UFO words: -1 as logged, -2 not at all (the
+ * vendor library's path without UFO), else this value
+ */
+static int h264_mc664 = -1;
+module_param(h264_mc664, int, 0644);
+
+/* How many of the table's pictures the H.264 replay decodes */
+static unsigned int h264_npics = 1;
+module_param(h264_npics, uint, 0644);
+
+/* Leave the decoder powered after the H.264 replay (until the next reboot) */
+static bool h264_keep_on;
+module_param(h264_keep_on, bool, 0644);
 
 /* Say what comes next on the console, and wait until it is shown */
 static void vdec_probe_step(struct vdec_probe *vp, const char *what)
@@ -648,6 +730,172 @@ static int vdec_replay_pic(struct vdec_replay *r, const struct vdec_pic *pic)
 	return vdec_replay_finish(r, pic->out, pic->mc9);
 }
 
+static u32 rp_val(struct vdec_probe *vp, const struct rp_op *o)
+{
+	if (o->region < 0)
+		return o->val;
+	return (u32)(vp->h264_iova[o->region] + o->val) >> o->shift;
+}
+
+/*
+ * After a wait that timed out: soft-reset VLD on both sides, as the
+ * vendor's reset starts, so that powering off doesn't meet a busy decoder
+ */
+static void rp_reset(struct vdec_replay *r)
+{
+	void __iomem *base = r->vp->base;
+
+	vdec_probe_step(r->vp, "reset VLD after a timeout");
+	writel(0x101, base + 0x20000 + 66 * 4);
+	writel(0x101, base + 0x11000 + 66 * 4);
+	udelay(10);
+	writel(0x0, base + 0x20000 + 66 * 4);
+	writel(0x0, base + 0x11000 + 66 * 4);
+	seq_puts(r->s, "VLD reset on both sides\n");
+}
+
+static int rp_run(struct vdec_replay *r, const struct rp_op *ops, int n)
+{
+	struct vdec_probe *vp = r->vp;
+	int i, ret;
+
+	for (i = 0; i < n; i++) {
+		const struct rp_op *o = &ops[i];
+		void __iomem *reg = vp->base + o->base + o->word * 4;
+		u32 want = rp_val(vp, o), val;
+		char what[48];
+
+		snprintf(what, sizeof(what), "%d %s(%u)", i, o->name, o->word);
+		if (h264_trace)
+			vdec_probe_step(vp, what);
+		/* SOCUFO, at 0x16000800, is the only block there */
+		if (o->op == RP_W && !h264_ufo && o->base == 0x00800) {
+			seq_printf(r->s, "%s = 0x%08x skipped\n", what, want);
+			continue;
+		}
+		if (o->op == RP_W && !strcmp(o->name, "core MC") &&
+		    o->word == 664) {
+			seq_printf(r->s, "%s was 0x%08x\n", what, readl(reg));
+			if (h264_mc664 == -2) {
+				seq_printf(r->s, "%s = 0x%08x skipped\n", what,
+					   want);
+				continue;
+			}
+			if (h264_mc664 >= 0)
+				want = h264_mc664;
+		}
+		switch (o->op) {
+		case RP_W:
+			writel(want, reg);
+			seq_printf(r->s, "%s = 0x%08x\n", what, want);
+			break;
+		case RP_R:
+			val = readl(reg);
+			if (val != want)
+				r->mismatches++;
+			seq_printf(r->s, "%s: 0x%08x (vendor 0x%08x)%s\n", what,
+				   val, want, val == want ? "" : " MISMATCH");
+			break;
+		case RP_WAIT:
+			ret = readl_poll_timeout(reg, val, val & want, 10, 100000);
+			seq_printf(r->s, "%s & 0x%x: %s, 0x%08x\n", what, want,
+				   ret ? "TIMED OUT" : "done", val);
+			if (ret) {
+				rp_reset(r);
+				return ret;	/* the shifter would hang the bus */
+			}
+			break;
+		case RP_IRQ:
+			/* The vendor waits for the interrupt; poll its bit */
+			ret = readl_poll_timeout(reg, val, val & want, 10, 1000000);
+			seq_printf(r->s, "%s & 0x%x (interrupt): %s, 0x%08x\n",
+				   what, want, ret ? "TIMED OUT" : "done", val);
+			dev_emerg(vp->dev, "%s interrupt: %s, 0x%08x\n", o->name,
+				  ret ? "timed out" : "done", val);
+			if (ret) {
+				rp_reset(r);
+				return ret;
+			}
+			/* Clear it as the vendor's ISR does */
+			writel(val | 0x11, reg);
+			writel((val | 0x11) & ~0x10, reg);
+			break;
+		}
+	}
+	return 0;
+}
+
+static int vdec_h264_show(struct seq_file *s, void *unused)
+{
+	struct vdec_probe *vp = s->private;
+	struct vdec_replay r = { .vp = vp, .s = s };
+	int i, n, ret;
+
+	if (!vdec_probe_lat_dev) {
+		seq_puts(s, "no LAT node\n");
+		return 0;
+	}
+	for (i = 0; i < H264_NUM_REGIONS; i++) {
+		const struct rp_region *rg = &h264_regions[i];
+
+		if (rg->in_off + rg->in_len > vp->h264_raw_len) {
+			seq_puts(s, "write the inputs to mt8695-vdec-h264-bs first\n");
+			return 0;
+		}
+		seq_printf(s, "%s at 0x%llx\n", rg->name, (u64)vp->h264_iova[i]);
+		/* The frame buffers filled, to see what the decoder wrote */
+		memset(vp->h264[i], rg->name[0] == 'F' ? 0x5a : 0, rg->size);
+		memcpy(vp->h264[i], vp->h264_raw + rg->in_off, rg->in_len);
+	}
+
+	ret = vdec_probe_on(vp);
+	if (ret)
+		return ret;
+	/* larb7 after the clocks, as the vendor's lat power-on does */
+	vdec_probe_step(vp, "LAT node on (larb7)");
+	ret = pm_runtime_resume_and_get(vdec_probe_lat_dev);
+	if (ret) {
+		vdec_probe_off(vp);
+		return ret;
+	}
+	n = min_t(int, h264_npics, ARRAY_SIZE(h264_pics));
+	for (i = 0, ret = 0; i < n && !ret; i++) {
+		const struct rp_pic *pic = &h264_pics[i];
+
+		seq_printf(s, "== picture %d, LAT\n", i);
+		ret = rp_run(&r, pic->lat, pic->n_lat);
+		if (ret)
+			break;
+		seq_printf(s, "== picture %d, core\n", i);
+		ret = rp_run(&r, pic->core, pic->n_core);
+	}
+	seq_printf(s, "%s; %d reads differ from the vendor's\n",
+		   ret ? "stopped" : "done", r.mismatches);
+	if (h264_keep_on) {
+		seq_puts(s, "decoder left on\n");
+		return 0;
+	}
+	vdec_probe_step(vp, "LAT node off (larb7)");
+	pm_runtime_put_sync(vdec_probe_lat_dev);
+	vdec_probe_step(vp, "decoder off");
+	vdec_probe_off(vp);
+	vdec_probe_step(vp, "decoder is off");
+	return 0;
+}
+
+static int vdec_h264_open(struct inode *inode, struct file *file)
+{
+	return single_open_size(file, vdec_h264_show, inode->i_private, SZ_1M);
+}
+
+static const struct file_operations vdec_h264_fops = {
+	.owner = THIS_MODULE,
+	.open = vdec_h264_open,
+	.read = seq_read,
+	.llseek = seq_lseek,
+	.release = single_release,
+};
+
 static int vdec_replay_show(struct seq_file *s, void *unused)
 {
 	struct vdec_probe *vp = s->private;
@@ -711,6 +959,31 @@ static ssize_t vdec_bs_write(struct file *file, const char __user *buf,
 	return ret;
 }
 
+/* The H.264 inputs, as tools/vdec/h264-replay-gen.py wrote them */
+static ssize_t vdec_h264_bs_write(struct file *file, const char __user *buf,
+				  size_t count, loff_t *ppos)
+{
+	struct vdec_probe *vp = file->private_data;
+	ssize_t ret;
+
+	if (*ppos == 0)
+		vp->h264_raw_len = 0;
+	if (*ppos >= H264_RAW_SIZE)
+		return -ENOSPC;
+	ret = simple_write_to_buffer(vp->h264_raw, H264_RAW_SIZE, ppos, buf,
+				     count);
+	if (ret > 0)
+		vp->h264_raw_len = max_t(size_t, vp->h264_raw_len, *ppos);
+	return ret;
+}
+
+static const struct file_operations vdec_h264_bs_fops = {
+	.owner = THIS_MODULE,
+	.open = simple_open,
+	.write = vdec_h264_bs_write,
+	.llseek = default_llseek,
+};
+
 static const struct file_operations vdec_bs_fops = {
 	.owner = THIS_MODULE,
 	.open = simple_open,
@@ -723,6 +996,15 @@ static int mt8695_vdec_probe_probe(struct platform_device *pdev)
 	struct device *dev = &pdev->dev;
 	struct vdec_probe *vp;
 	int i, ret;
+
+	if (of_device_is_compatible(dev->of_node,
+				    "mediatek,mt8695-vdec-probe-test-lat")) {
+		ret = devm_pm_runtime_enable(dev);
+		if (ret)
+			return ret;
+		vdec_probe_lat_dev = dev;
+		return 0;
+	}
 
 	vp = devm_kzalloc(dev, sizeof(*vp), GFP_KERNEL);
 	if (!vp)
@@ -758,6 +1040,17 @@ static int mt8695_vdec_probe_probe(struct platform_device *pdev)
 		vp->fb_blob[i].data = vp->fb[i];
 		vp->fb_blob[i].size = VDEC_FB_SIZE;
 	}
+	vp->h264_raw = devm_kzalloc(dev, H264_RAW_SIZE, GFP_KERNEL);
+	if (!vp->h264_raw)
+		return -ENOMEM;
+	for (i = 0; i < H264_NUM_REGIONS; i++) {
+		vp->h264[i] = dmam_alloc_coherent(dev, h264_regions[i].size,
+						  &vp->h264_iova[i], GFP_KERNEL);
+		if (!vp->h264[i])
+			return -ENOMEM;
+		vp->h264_blob[i].data = vp->h264[i];
+		vp->h264_blob[i].size = h264_regions[i].size;
+	}
 
 	dev_info(dev, "%d clocks, bitstream at 0x%llx; see /sys/kernel/debug/mt8695-vdec-*\n",
 		 vp->num_clks, (u64)vp->bs_iova);
@@ -769,11 +1062,22 @@ static int mt8695_vdec_probe_probe(struct platform_device *pdev)
 	debugfs_create_blob("mt8695-vdec-fb", 0400, NULL, &vp->fb_blob[0]);
 	debugfs_create_blob("mt8695-vdec-fb1", 0400, NULL, &vp->fb_blob[1]);
 	debugfs_create_blob("mt8695-vdec-fb2", 0400, NULL, &vp->fb_blob[2]);
+	debugfs_create_file("mt8695-vdec-h264", 0400, NULL, vp, &vdec_h264_fops);
+	debugfs_create_file("mt8695-vdec-h264-bs", 0200, NULL, vp, &vdec_h264_bs_fops);
+	/* Each of the replay's buffers, as mt8695-vdec-h264-fb0 and so on */
+	for (i = 0; i < H264_NUM_REGIONS; i++) {
+		char lower[8], name[32];
+
+		string_lower(lower, h264_regions[i].name);
+		snprintf(name, sizeof(name), "mt8695-vdec-h264-%s", lower);
+		debugfs_create_blob(name, 0400, NULL, &vp->h264_blob[i]);
+	}
 	return 0;
 }
 
 static const struct of_device_id mt8695_vdec_probe_of_match[] = {
 	{ .compatible = "mediatek,mt8695-vdec-probe-test" },
+	{ .compatible = "mediatek,mt8695-vdec-probe-test-lat" },
 	{ /* sentinel */ }
 };
 

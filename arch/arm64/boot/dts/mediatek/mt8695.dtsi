@@ -970,10 +970,27 @@
 				 <&iommu M4U_PORT_HW_VDEC_UFO_ENC_EXT>;
 		};
 
+		/* DO NOT UPSTREAM: probe test only, the LAT's larb7 ports */
+		vdec-probe-test-lat {
+			compatible = "mediatek,mt8695-vdec-probe-test-lat";
+			power-domains = <&spm MT8695_POWER_DOMAIN_VDEC>;
+			iommus = <&iommu M4U_PORT_VDEC_LAT_VLD_EXT>,
+				 <&iommu M4U_PORT_VDEC_LAT_VLD2_EXT>,
+				 <&iommu M4U_PORT_VDEC_LAT_AVC_MV_EXT>,
+				 <&iommu M4U_PORT_VDEC_LAT_PRED_RD_EXT>,
+				 <&iommu M4U_PORT_VDEC_LAT_TILE_EXT>,
+				 <&iommu M4U_PORT_VDEC_LAT_WDMA_EXT>;
+		};
+
 		vdeccore: clock-controller@1602f000 {
 			compatible = "mediatek,mt8695-vdeccore", "syscon";
 			reg = <0 0x1602f000 0 0x1000>;
 			#clock-cells = <1>;
 		};
 	};
+};
+
+/* DO NOT UPSTREAM: the probe test drives the decoder, and its interrupt */
+&vcodec_dec {
+	status = "disabled";
 };
