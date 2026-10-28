@@ -528,13 +528,14 @@ int
 pvr_power_reset(struct pvr_device *pvr_dev, bool hard_reset)
 {
 	bool queues_disabled = false;
+	bool have_ref;
 	int err;
 
 	/*
 	 * Take a power reference during the reset. This should prevent any interference with the
 	 * power state during reset.
 	 */
-	WARN_ON(pvr_power_get_clear(pvr_dev));
+	have_ref = !WARN_ON(pvr_power_get_clear(pvr_dev));
 
 	down_write(&pvr_dev->reset_sem);
 
@@ -603,7 +604,8 @@ pvr_power_reset(struct pvr_device *pvr_dev, bool hard_reset)
 
 	up_write(&pvr_dev->reset_sem);
 
-	pvr_power_put(pvr_dev);
+	if (have_ref)
+		pvr_power_put(pvr_dev);
 
 	return 0;
 
@@ -619,7 +621,8 @@ err_device_lost:
 err_up_write:
 	up_write(&pvr_dev->reset_sem);
 
-	pvr_power_put(pvr_dev);
+	if (have_ref)
+		pvr_power_put(pvr_dev);
 
 	return err;
 }
