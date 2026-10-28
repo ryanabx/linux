@@ -33,6 +33,12 @@ static const struct mtk_gate_regs vdsoc0_cg_regs = {
 	.sta_ofs = 0xa0,
 };
 
+static const struct mtk_gate_regs vdsoc2_cg_regs = {
+	.set_ofs = 0xa8,
+	.clr_ofs = 0xac,
+	.sta_ofs = 0xa8,
+};
+
 static const struct mtk_gate_regs vdsoc1_cg_regs = {
 	.set_ofs = 0xb0,
 	.clr_ofs = 0xb4,
@@ -50,6 +56,7 @@ static const struct mtk_gate vdcore_clks[] = {
 static const struct mtk_gate vdsoc_clks[] = {
 	GATE_VDEC(CLK_VDSOC_LARB7, "vdsoc_larb7", "vdec_sel", &vdsoc1_cg_regs, 0),
 	GATE_VDEC(CLK_VDSOC_SOC, "vdsoc_soc", "vdec_sel", &vdsoc0_cg_regs, 0),
+	GATE_VDEC(CLK_VDSOC_LAT, "vdsoc_lat", "vdec_lae_sel", &vdsoc2_cg_regs, 0),
 };
 
 static const struct mtk_clk_desc vdcore_desc = {
