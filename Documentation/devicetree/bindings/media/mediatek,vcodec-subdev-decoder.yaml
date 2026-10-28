@@ -69,7 +69,8 @@ description: |
     MT8188: LAT + Core
     MT8186: Core
     MT8695: LAT + Core, with no SCP: the kernel programs the decoder's
-            registers, so the core also maps them (the VLD to PP blocks).
+            registers, so the LAT and the core also map them (the VLD to
+            PP blocks).
 
 properties:
   compatible:
@@ -104,6 +105,13 @@ properties:
     description:
       The core's clock gate block (a syscon), whose dynamic clock control
       the kernel sets up on SoCs without an SCP.
+
+  mediatek,vdecsoc:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description:
+      The SoC side's clock gate block (a syscon), which also holds settings
+      for the LAT's and the core's memory access that the kernel writes on
+      SoCs without an SCP.
 
   "#address-cells":
     const: 2
@@ -206,6 +214,7 @@ allOf:
         - mediatek,scp
       properties:
         mediatek,vdecsys: false
+        mediatek,vdecsoc: false
 
   - if:
       properties:
