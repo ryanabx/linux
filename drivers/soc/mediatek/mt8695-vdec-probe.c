@@ -180,30 +180,34 @@ static void vdec_probe_step(struct vdec_probe *vp, const char *what)
 	pr_flush(1000, true);
 }
 
+/*
+ * In the vendor driver's order: the muxes and the soc gates (with the extra
+ * word at vdecsoc +0xa8), and only then the larbs. Through the M4U, the
+ * runtime PM get also resumes larb1, whose port setup hangs the bus while
+ * the soc gate is still off.
+ */
 static int vdec_probe_on(struct vdec_probe *vp)
 {
 	int ret;
 
-	vdec_probe_step(vp, "power domain on");
-	ret = pm_runtime_resume_and_get(vp->dev);
-	if (ret)
-		return ret;
 	vdec_probe_step(vp, "clocks on");
 	ret = clk_bulk_prepare_enable(vp->num_clks, vp->clks);
-	if (ret) {
-		pm_runtime_put_sync(vp->dev);
+	if (ret)
 		return ret;
-	}
 	/* The vendor driver writes this word after the soc gate (+0xa0) */
 	vdec_probe_step(vp, "write soc gcon +0xa8");
 	writel(0x1, vp->base + SOC_GCON + 0xa8);
-	return 0;
+	vdec_probe_step(vp, "power domain and larb1 on");
+	ret = pm_runtime_resume_and_get(vp->dev);
+	if (ret)
+		clk_bulk_disable_unprepare(vp->num_clks, vp->clks);
+	return ret;
 }
 
 static void vdec_probe_off(struct vdec_probe *vp)
 {
-	clk_bulk_disable_unprepare(vp->num_clks, vp->clks);
 	pm_runtime_put_sync(vp->dev);
+	clk_bulk_disable_unprepare(vp->num_clks, vp->clks);
 }
 
 static void vdec_probe_read(struct vdec_probe *vp, struct seq_file *s,
