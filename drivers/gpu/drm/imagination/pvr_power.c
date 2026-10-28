@@ -403,8 +403,15 @@ pvr_power_device_suspend(struct device *dev)
 
 	if (READ_ONCE(pvr_dev->fw_dev.initialised)) {
 		err = pvr_power_fw_disable(pvr_dev, false, true);
-		if (err)
-			return READ_ONCE(pvr_dev->lost) ? 0 : err;
+		if (err) {
+			if (READ_ONCE(pvr_dev->lost))
+				return 0;
+
+			/* The firmware keeps running; keep watching it. */
+			queue_delayed_work(pvr_dev->sched_wq, &pvr_dev->watchdog.work,
+					   msecs_to_jiffies(WATCHDOG_TIME_MS));
+			return err;
+		}
 	}
 
 	return pvr_dev->device_data->pwr_ops->power_off(pvr_dev);
