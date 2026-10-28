@@ -315,6 +315,9 @@ struct pvr_device {
 	 */
 	bool lost;
 
+	/** @unplug_lock: Serialises drm_dev_unplug(), which is not idempotent. */
+	struct mutex unplug_lock;
+
 	/**
 	 * @reset_sem: Reset semaphore.
 	 *
