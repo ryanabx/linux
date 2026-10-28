@@ -137,6 +137,12 @@ static int mtk_vcodec_get_reg_bases(struct mtk_vcodec_dec_dev *dev)
 
 			dev_dbg(&pdev->dev, "reg[%d] base=%p", i, dev->reg_base[i]);
 		}
+
+		/* The core's clock gate block, for decoders the kernel programs */
+		dev->vdecsys_regmap = syscon_regmap_lookup_by_phandle_optional(pdev->dev.of_node,
+									       "mediatek,vdecsys");
+		if (IS_ERR(dev->vdecsys_regmap))
+			return PTR_ERR(dev->vdecsys_regmap);
 	} else {
 		for (i = 0; i < reg_num; i++) {
 			dev->reg_base[i+1] = devm_platform_ioremap_resource_byname(pdev, mtk_dec_reg_names[i]);
@@ -246,7 +252,9 @@ static int fops_vcodec_open(struct file *file)
 	ctx->empty_flush_buf.vb.vb2_buf.vb2_queue = src_vq;
 	mtk_vcodec_dec_set_default_params(ctx);
 
-	if (v4l2_fh_is_singular(&ctx->fh)) {
+	if (v4l2_fh_is_singular(&ctx->fh) && !dev->fw_handler) {
+		dev->dec_capability = dev->vdec_pdata->dec_capability;
+	} else if (v4l2_fh_is_singular(&ctx->fh)) {
 		/*
 		 * Does nothing if firmware was already loaded.
 		 */
@@ -373,21 +381,25 @@ static int mtk_vcodec_probe(struct platform_device *pdev)
 	}
 
 	dev->vdec_pdata = of_device_get_match_data(&pdev->dev);
-	if (!of_property_read_u32(pdev->dev.of_node, "mediatek,vpu",
-				  &rproc_phandle)) {
-		fw_type = VPU;
-	} else if (!of_property_read_u32(pdev->dev.of_node, "mediatek,scp",
-					 &rproc_phandle)) {
-		fw_type = SCP;
-	} else {
-		dev_dbg(&pdev->dev, "Could not get vdec IPI device");
-		return -ENODEV;
-	}
 	dma_set_max_seg_size(&pdev->dev, UINT_MAX);
 
-	dev->fw_handler = mtk_vcodec_fw_select(dev, fw_type, DECODER);
-	if (IS_ERR(dev->fw_handler))
-		return PTR_ERR(dev->fw_handler);
+	/* Decoders without firmware have their capabilities in platform data */
+	if (!dev->vdec_pdata->dec_capability) {
+		if (!of_property_read_u32(pdev->dev.of_node, "mediatek,vpu",
+					  &rproc_phandle)) {
+			fw_type = VPU;
+		} else if (!of_property_read_u32(pdev->dev.of_node, "mediatek,scp",
+						 &rproc_phandle)) {
+			fw_type = SCP;
+		} else {
+			dev_dbg(&pdev->dev, "Could not get vdec IPI device");
+			return -ENODEV;
+		}
+
+		dev->fw_handler = mtk_vcodec_fw_select(dev, fw_type, DECODER);
+		if (IS_ERR(dev->fw_handler))
+			return PTR_ERR(dev->fw_handler);
+	}
 
 	ret = mtk_vcodec_init_dec_resources(dev);
 	if (ret) {
@@ -531,7 +543,8 @@ err_res:
 	if (!dev->vdec_pdata->is_subdev_supported)
 		pm_runtime_disable(dev->pm.dev);
 err_dec_pm:
-	mtk_vcodec_fw_release(dev->fw_handler);
+	if (dev->fw_handler)
+		mtk_vcodec_fw_release(dev->fw_handler);
 	return ret;
 }
 
@@ -589,7 +602,8 @@ static void mtk_vcodec_dec_remove(struct platform_device *pdev)
 	v4l2_device_unregister(&dev->v4l2_dev);
 	if (!dev->vdec_pdata->is_subdev_supported)
 		pm_runtime_disable(dev->pm.dev);
-	mtk_vcodec_fw_release(dev->fw_handler);
+	if (dev->fw_handler)
+		mtk_vcodec_fw_release(dev->fw_handler);
 }
 
 static struct platform_driver mtk_vcodec_dec_driver = {
