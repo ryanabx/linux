@@ -294,6 +294,16 @@ module_param(h264_npics, uint, 0644);
 static unsigned int h264_skip_soc;
 module_param(h264_skip_soc, uint, 0644);
 
+/*
+ * For mt8695-vdec-larb7: what goes on before the LAT node's runtime PM get
+ * resumes larb7, after the core node's (the domain and larb1). Bits 0-6
+ * the node's clocks in order (vdec_sel, vdec_slow_sel, vdec_lae_sel, the
+ * soc gate, larb7's gate, the core's vdec gate, larb1's gate), bit 7 the
+ * write of vdecsoc +0xa8.
+ */
+static unsigned int larb7_pre;
+module_param(larb7_pre, uint, 0644);
+
 /* Leave the decoder powered after the H.264 replay (until the next reboot) */
 static bool h264_keep_on;
 module_param(h264_keep_on, bool, 0644);
@@ -906,6 +916,42 @@ static int vdec_h264_show(struct seq_file *s, void *unused)
 	return 0;
 }
 
+/* Which of the clocks, or the +0xa8 word, larb7 needs before it resumes */
+static int vdec_larb7_show(struct seq_file *s, void *unused)
+{
+	struct vdec_probe *vp = s->private;
+	int i, ret;
+
+	if (!vdec_probe_lat_dev)
+		return -ENODEV;
+	vdec_probe_step(vp, "core node on (domain, larb1)");
+	ret = pm_runtime_resume_and_get(vp->dev);
+	if (ret)
+		return ret;
+	for (i = 0; i < vp->num_clks && i < 7; i++) {
+		if (!(larb7_pre & BIT(i)))
+			continue;
+		vdec_probe_step(vp, vp->clks[i].id ?: "a clock");
+		clk_prepare_enable(vp->clks[i].clk);
+	}
+	if (larb7_pre & BIT(7)) {
+		vdec_probe_step(vp, "write soc gcon +0xa8");
+		writel(0x1, vp->base + SOC_GCON + 0xa8);
+	}
+	vdec_probe_step(vp, "LAT node on (larb7)");
+	ret = pm_runtime_resume_and_get(vdec_probe_lat_dev);
+	seq_printf(s, "larb7_pre 0x%x: larb7 resume %d\n", larb7_pre, ret);
+	dev_emerg(vp->dev, "larb7 resumed: %d\n", ret);
+	if (!ret)
+		pm_runtime_put_sync(vdec_probe_lat_dev);
+	for (i = 0; i < vp->num_clks && i < 7; i++)
+		if (larb7_pre & BIT(i))
+			clk_disable_unprepare(vp->clks[i].clk);
+	pm_runtime_put_sync(vp->dev);
+	return 0;
+}
+DEFINE_SHOW_ATTRIBUTE(vdec_larb7);
+
 static int vdec_h264_open(struct inode *inode, struct file *file)
 {
 	return single_open_size(file, vdec_h264_show, inode->i_private, SZ_1M);
@@ -1087,6 +1133,7 @@ static int mt8695_vdec_probe_probe(struct platform_device *pdev)
 	debugfs_create_blob("mt8695-vdec-fb2", 0400, NULL, &vp->fb_blob[2]);
 	debugfs_create_file("mt8695-vdec-h264", 0400, NULL, vp, &vdec_h264_fops);
 	debugfs_create_file("mt8695-vdec-h264-bs", 0200, NULL, vp, &vdec_h264_bs_fops);
+	debugfs_create_file("mt8695-vdec-larb7", 0400, NULL, vp, &vdec_larb7_fops);
 	/* Each of the replay's buffers, as mt8695-vdec-h264-fb0 and so on */
 	for (i = 0; i < H264_NUM_REGIONS; i++) {
 		char lower[8], name[32];
