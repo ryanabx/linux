@@ -286,6 +286,14 @@ module_param(h264_mc664, int, 0644);
 static unsigned int h264_npics = 1;
 module_param(h264_npics, uint, 0644);
 
+/*
+ * Leave out writes to vdecsoc (0x1600f000), to see which a driver needs:
+ * bit 0 word 42 (+0xa8), bit 1 word 62 (+0xf8, the LAT's), bit 2 word 60
+ * (+0xf0, the core's), bit 3 word 1 (+0x04). Word 40 is the soc gate.
+ */
+static unsigned int h264_skip_soc;
+module_param(h264_skip_soc, uint, 0644);
+
 /* Leave the decoder powered after the H.264 replay (until the next reboot) */
 static bool h264_keep_on;
 module_param(h264_keep_on, bool, 0644);
@@ -768,6 +776,14 @@ static int rp_run(struct vdec_replay *r, const struct rp_op *ops, int n)
 		snprintf(what, sizeof(what), "%d %s(%u)", i, o->name, o->word);
 		if (h264_trace)
 			vdec_probe_step(vp, what);
+		if (o->op == RP_W && o->base == 0x0f000 &&
+		    ((o->word == 42 && (h264_skip_soc & BIT(0))) ||
+		     (o->word == 62 && (h264_skip_soc & BIT(1))) ||
+		     (o->word == 60 && (h264_skip_soc & BIT(2))) ||
+		     (o->word == 1 && (h264_skip_soc & BIT(3))))) {
+			seq_printf(r->s, "%s = 0x%08x skipped\n", what, want);
+			continue;
+		}
 		/* SOCUFO, at 0x16000800, is the only block there */
 		if (o->op == RP_W && !h264_ufo && o->base == 0x00800) {
 			seq_printf(r->s, "%s = 0x%08x skipped\n", what, want);
@@ -857,6 +873,13 @@ static int vdec_h264_show(struct seq_file *s, void *unused)
 	if (ret) {
 		vdec_probe_off(vp);
 		return ret;
+	}
+	/* What the vdecsoc words hold before the vendor's writes */
+	for (i = 0; i < 4; i++) {
+		static const u32 soc_words[] = { 0x04, 0xa8, 0xf0, 0xf8 };
+
+		seq_printf(s, "vdecsoc +0x%02x before: 0x%08x\n", soc_words[i],
+			   readl(vp->base + 0x0f000 + soc_words[i]));
 	}
 	n = min_t(int, h264_npics, ARRAY_SIZE(h264_pics));
 	for (i = 0, ret = 0; i < n && !ret; i++) {
