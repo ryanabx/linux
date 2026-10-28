@@ -254,6 +254,8 @@ struct mtk_vcodec_dec_ctx {
  * @reg_base: Mapped address of MTK Vcodec registers.
  * @vdec_pdata: decoder IC-specific data
  * @vdecsys_regmap: VDEC_SYS register space passed through syscon
+ * @vdecsoc_regmap: the SoC side's clock gate block, through syscon, on
+ *		    decoders without firmware
  *
  * @fw_handler: used to communicate with the firmware.
  * @id_counter: used to identify current opened instance
@@ -295,6 +297,7 @@ struct mtk_vcodec_dec_dev {
 	void __iomem *reg_base[NUM_MAX_VCODEC_REG_BASE];
 	const struct mtk_vcodec_dec_pdata *vdec_pdata;
 	struct regmap *vdecsys_regmap;
+	struct regmap *vdecsoc_regmap;
 
 	struct mtk_vcodec_fw *fw_handler;
 	u64 id_counter;

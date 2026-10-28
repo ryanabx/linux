@@ -143,6 +143,12 @@ static int mtk_vcodec_get_reg_bases(struct mtk_vcodec_dec_dev *dev)
 									       "mediatek,vdecsys");
 		if (IS_ERR(dev->vdecsys_regmap))
 			return PTR_ERR(dev->vdecsys_regmap);
+
+		/* And the SoC side's, which holds the LAT's and core's bus settings */
+		dev->vdecsoc_regmap = syscon_regmap_lookup_by_phandle_optional(pdev->dev.of_node,
+									       "mediatek,vdecsoc");
+		if (IS_ERR(dev->vdecsoc_regmap))
+			return PTR_ERR(dev->vdecsoc_regmap);
 	} else {
 		for (i = 0; i < reg_num; i++) {
 			dev->reg_base[i+1] = devm_platform_ioremap_resource_byname(pdev, mtk_dec_reg_names[i]);
