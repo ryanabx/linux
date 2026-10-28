@@ -1489,8 +1489,11 @@ static void pvr_remove(struct platform_device *plat_dev)
 	if (pm_runtime_force_suspend(drm_dev->dev))
 		pm_runtime_disable(drm_dev->dev);
 	pm_runtime_dont_use_autosuspend(drm_dev->dev);
-	pvr_device_fini(pvr_dev);
+
+	/* Stop the watchdog before anything it reads is freed. */
 	pvr_watchdog_fini(pvr_dev);
+
+	pvr_device_fini(pvr_dev);
 	pvr_queue_device_fini(pvr_dev);
 	pvr_context_device_fini(pvr_dev);
 	pvr_power_domains_fini(pvr_dev);
