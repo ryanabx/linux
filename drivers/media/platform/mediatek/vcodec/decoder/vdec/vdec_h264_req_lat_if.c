@@ -21,8 +21,10 @@
  * UFO compression (the core writes plain MM21).
  */
 
+#include <linux/dma-mapping.h>
 #include <linux/iopoll.h>
 #include <linux/regmap.h>
+#include <linux/scatterlist.h>
 #include <linux/slab.h>
 #include <media/v4l2-h264.h>
 #include <media/v4l2-mem2mem.h>
@@ -222,6 +224,8 @@ struct vdec_h264_lat_shdr {
  * picture while it's a reference, as the library's frame buffer slots do.
  */
 struct vdec_h264_lat_ref {
+	u64 ts;			/* its capture buffer's timestamp */
+	struct vb2_buffer *vb;	/* that buffer, found when the core runs */
 	dma_addr_t y, c, mv;
 	u32 fb;
 	u32 pic_num;		/* FrameNumWrap, or LongTermFrameIdx */
@@ -260,6 +264,15 @@ struct vdec_h264_lat_inst {
 	/* One MV buffer per capture buffer, indexed like them */
 	struct mtk_vcodec_mem mv_buf[H264_MAX_MV_NUM];
 	bool realloc_mv_buf;
+
+	/* For one core run: the frames mapped with chroma after luma */
+	struct vdec_h264_lat_alias {
+		struct sg_table sgt;
+		struct vb2_buffer *vb;
+		dma_addr_t y;
+	} alias[V4L2_H264_NUM_DPB_ENTRIES + 1];
+	int num_alias;
+	u32 c_off;
 
 	/* The references' slots, and the capture timestamp each holds */
 	bool slot_used[H264_NUM_SLOTS];
@@ -653,13 +666,12 @@ static void vdec_h264_lat_update_slots(struct vdec_h264_lat_inst *inst,
 /*
  * The initial reference lists (8.2.4.2) with every reference picture, as
  * the library programs them: the hardware applies the slice's
- * ref_pic_list_modification() itself. Also each reference's buffers.
+ * ref_pic_list_modification() itself. Also each reference's slot and
+ * numbers.
  */
 static void vdec_h264_lat_build_lists(struct vdec_h264_lat_inst *inst,
 				      struct vdec_h264_lat_share *sh)
 {
-	struct mtk_vcodec_dec_ctx *ctx = inst->ctx;
-	struct vb2_queue *vq = v4l2_m2m_get_dst_vq(ctx->m2m_ctx);
 	struct v4l2_h264_reflist_builder b;
 	struct v4l2_h264_reference p0[V4L2_H264_REF_LIST_LEN];
 	struct v4l2_h264_reference b0[V4L2_H264_REF_LIST_LEN];
@@ -680,20 +692,42 @@ static void vdec_h264_lat_build_lists(struct vdec_h264_lat_inst *inst,
 	for (i = 0; i < V4L2_H264_NUM_DPB_ENTRIES; i++) {
 		const struct v4l2_h264_dpb_entry *e = &sh->dec.dpb[i];
 		struct vdec_h264_lat_ref *r = &sh->refs[i];
-		struct vb2_buffer *vb;
 
 		if (!(e->flags & V4L2_H264_DPB_ENTRY_FLAG_ACTIVE))
 			continue;
+		r->ts = e->reference_ts;
 		r->fb = vdec_h264_lat_slot(inst, e->reference_ts);
 		r->pic_num = b.refs[i].frame_num;
 		r->long_term = b.refs[i].longterm;
 		r->top_poc = b.refs[i].top_field_order_cnt;
 		r->bottom_poc = b.refs[i].bottom_field_order_cnt;
-		vb = vb2_find_buffer(vq, e->reference_ts);
+	}
+}
+
+/*
+ * The references' buffers, by their timestamps. Only when the core runs:
+ * the previous picture's capture buffer gets its timestamp when its own
+ * core run starts, which can be after the next picture's LAT run.
+ */
+static void vdec_h264_lat_find_refs(struct vdec_h264_lat_inst *inst,
+				    struct vdec_h264_lat_share *sh)
+{
+	struct mtk_vcodec_dec_ctx *ctx = inst->ctx;
+	struct vb2_queue *vq = v4l2_m2m_get_dst_vq(ctx->m2m_ctx);
+	int i;
+
+	for (i = 0; i < V4L2_H264_NUM_DPB_ENTRIES; i++) {
+		struct vdec_h264_lat_ref *r = &sh->refs[i];
+		struct vb2_buffer *vb;
+
+		if (!(sh->dec.dpb[i].flags & V4L2_H264_DPB_ENTRY_FLAG_ACTIVE))
+			continue;
+		vb = vb2_find_buffer(vq, r->ts);
 		if (!vb || vb->index >= H264_MAX_MV_NUM) {
 			mtk_vdec_err(ctx, "reference %d: no capture buffer", i);
 			continue;
 		}
+		r->vb = vb;
 		vdec_h264_lat_buf_addr(ctx, vb, &r->y, &r->c);
 		r->mv = inst->mv_buf[vb->index].dma_addr;
 	}
@@ -1004,25 +1038,110 @@ static void vdec_h264_lat_buf_addr(struct mtk_vcodec_dec_ctx *ctx,
 /*
  * The core reads a reference's chroma at its luma address plus one offset
  * (MC_C_OFFSET), not from the list's chroma addresses: with MC_C_OFFSET
- * wrong, the references' chroma is, and nothing else. MM21's planes are
- * allocated apart, so that holds only while every buffer has its chroma
- * the same distance from its luma, which the IOMMU's allocator usually
- * but not always gives. Say so when it doesn't.
+ * wrong, the references' chroma is, and nothing else. MM21's two planes
+ * are allocated apart, so for a core run every frame it touches is mapped
+ * a second time, both planes in one IOVA range: chroma then follows luma
+ * at the same page-aligned offset in all of them. That takes buffers the
+ * driver allocated (MMAP); imported ones keep their own addresses, right
+ * only while the IOMMU's allocator happened to place them alike.
  */
-static void vdec_h264_lat_check_c_offset(struct vdec_h264_lat_inst *inst,
-					 const struct vdec_h264_lat_share *sh,
-					 dma_addr_t y, dma_addr_t c)
+static int vdec_h264_lat_alias_one(struct vdec_h264_lat_inst *inst,
+				   struct vb2_buffer *vb, dma_addr_t *y, dma_addr_t *c)
+{
+	struct device *dev = &inst->ctx->dev->plat_dev->dev;
+	struct vdec_h264_lat_alias *a;
+	struct sg_table t[2] = { };
+	struct scatterlist *src, *dst;
+	int i, p, n = 0, ret;
+
+	for (i = 0; i < inst->num_alias; i++) {
+		if (inst->alias[i].vb == vb) {
+			*y = inst->alias[i].y;
+			*c = *y + inst->c_off;
+			return 0;
+		}
+	}
+	if (vb->memory != VB2_MEMORY_MMAP || vb->num_planes != 2 ||
+	    inst->num_alias == ARRAY_SIZE(inst->alias))
+		return -EOPNOTSUPP;
+
+	a = &inst->alias[inst->num_alias];
+	for (p = 0; p < 2; p++) {
+		ret = dma_get_sgtable(dev, &t[p], vb2_plane_vaddr(vb, p),
+				      vb2_dma_contig_plane_dma_addr(vb, p),
+				      PAGE_ALIGN(vb2_plane_size(vb, p)));
+		if (ret)
+			goto out;
+		n += t[p].orig_nents;
+	}
+	ret = sg_alloc_table(&a->sgt, n, GFP_KERNEL);
+	if (ret)
+		goto out;
+	dst = a->sgt.sgl;
+	for (p = 0; p < 2; p++) {
+		for_each_sgtable_sg(&t[p], src, i) {
+			sg_set_page(dst, sg_page(src), src->length, src->offset);
+			dst = sg_next(dst);
+		}
+	}
+	ret = dma_map_sgtable(dev, &a->sgt, DMA_BIDIRECTIONAL,
+			      DMA_ATTR_SKIP_CPU_SYNC);
+	if (ret) {
+		sg_free_table(&a->sgt);
+		goto out;
+	}
+	a->vb = vb;
+	a->y = sg_dma_address(a->sgt.sgl);
+	inst->num_alias++;
+	*y = a->y;
+	*c = *y + inst->c_off;
+out:
+	sg_free_table(&t[0]);
+	sg_free_table(&t[1]);
+	return ret;
+}
+
+static void vdec_h264_lat_unalias(struct vdec_h264_lat_inst *inst)
+{
+	struct device *dev = &inst->ctx->dev->plat_dev->dev;
+	int i;
+
+	for (i = 0; i < inst->num_alias; i++) {
+		dma_unmap_sgtable(dev, &inst->alias[i].sgt, DMA_BIDIRECTIONAL,
+				  DMA_ATTR_SKIP_CPU_SYNC);
+		sg_free_table(&inst->alias[i].sgt);
+	}
+	inst->num_alias = 0;
+}
+
+/* The output and the references with chroma at one offset after luma */
+static void vdec_h264_lat_alias_frames(struct vdec_h264_lat_inst *inst,
+				       struct vdec_h264_lat_share *sh,
+				       struct vb2_buffer *dst, dma_addr_t *y,
+				       dma_addr_t *c)
 {
 	int i;
 
-	for (i = 0; i < sh->num_refs; i++) {
-		const struct vdec_h264_lat_ref *r = &sh->refs[sh->p0[i]];
+	inst->c_off = PAGE_ALIGN(vb2_plane_size(dst, 0));
+	if (vdec_h264_lat_alias_one(inst, dst, y, c))
+		goto unaligned;
+	for (i = 0; i < V4L2_H264_NUM_DPB_ENTRIES; i++) {
+		struct vdec_h264_lat_ref *r = &sh->refs[i];
 
-		if (r->y && (u32)(r->c - r->y) != (u32)(c - y)) {
+		if (r->vb && vdec_h264_lat_alias_one(inst, r->vb, &r->y, &r->c))
+			goto unaligned;
+	}
+	return;
+
+unaligned:
+	vdec_h264_lat_unalias(inst);
+	vdec_h264_lat_buf_addr(inst->ctx, dst, y, c);
+	for (i = 0; i < V4L2_H264_NUM_DPB_ENTRIES; i++) {
+		struct vdec_h264_lat_ref *r = &sh->refs[i];
+
+		if (r->vb && (u32)(r->c - r->y) != (u32)(*c - *y))
 			dev_warn_once(&inst->ctx->dev->plat_dev->dev,
 				      "chroma planes at different offsets: references' chroma will be wrong\n");
-			return;
-		}
 	}
 }
 
@@ -1041,7 +1160,8 @@ static int vdec_h264_lat_core_run(struct vdec_h264_lat_inst *inst,
 	u32 val, mb_x, mb_y;
 	int ret;
 
-	vdec_h264_lat_buf_addr(ctx, dst, &y, &c);
+	vdec_h264_lat_find_refs(inst, sh);
+	vdec_h264_lat_alias_frames(inst, sh, dst, &y, &c);
 
 	vdec_h264_lat_reset(inst, hw);
 	ret = vdec_h264_lat_start_bitstream(inst, hw, ube, ube + q->wdma_addr.size,
@@ -1062,7 +1182,6 @@ static int vdec_h264_lat_core_run(struct vdec_h264_lat_inst *inst,
 	writel(0xa89ec007, hw->avc + AVC_CTRL);
 	writel(0xbfddb8ff, hw->avc + AVC_160);
 	writel(1, hw->mc + MC_OUT_ENABLE);
-	vdec_h264_lat_check_c_offset(inst, sh, y, c);
 	writel(c - y, hw->mc + MC_C_OFFSET);
 	writel(y >> 9, hw->mc + MC_OUT_Y);
 	writel(c >> 8, hw->mc + MC_OUT_C);
@@ -1146,6 +1265,7 @@ static int vdec_h264_lat_core_decode(struct vdec_lat_buf *lat_buf)
 	}
 	v4l2_m2m_buf_copy_metadata(&lat_buf->ts_info, dst);
 	err = vdec_h264_lat_core_run(inst, sh, lat_buf, &dst->vb2_buf);
+	vdec_h264_lat_unalias(inst);
 
 out:
 	vdec_msg_queue_update_ube_rptr(&ctx->msg_queue, sh->trans_end);
