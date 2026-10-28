@@ -900,8 +900,8 @@
 					 <&iommu M4U_PORT_VDEC_LAT_WDMA_EXT>;
 				clocks = <&topckgen CLK_TOP_VDEC_LAE_SEL>,
 					 <&vdecsoc CLK_VDSOC_SOC>,
-					 <&vdecsoc CLK_VDSOC_LARB7>,
-					 <&vdeccore CLK_VDCORE_VDEC>;
+					 <&vdecsoc CLK_VDSOC_LAT>,
+					 <&vdecsoc CLK_VDSOC_LARB7>;
 				clock-names = "sel", "soc-vdec", "soc-lat", "vdec";
 				assigned-clocks = <&topckgen CLK_TOP_VDEC_LAE_SEL>;
 				assigned-clock-parents = <&topckgen CLK_TOP_VDECPLL>;
