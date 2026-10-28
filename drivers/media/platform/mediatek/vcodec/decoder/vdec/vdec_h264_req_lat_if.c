@@ -206,6 +206,7 @@ struct vdec_h264_lat_shdr {
 	u32 slice_type;		/* 0-4, modulo 5 */
 	u32 slice_type_raw;	/* 0-9, as coded */
 	u32 frame_num;
+	bool field_pic, bottom_field;
 	u32 idr_pic_id;
 	u32 poc_lsb;
 	s32 delta_poc_bottom;
@@ -232,6 +233,7 @@ struct vdec_h264_lat_ref {
 	s32 top_poc, bottom_poc;
 	bool long_term;
 	bool mbaff;		/* a frame of an MBAFF sequence */
+	bool field;		/* decoded as fields */
 };
 
 /* What a picture's LAT run hands the core */
@@ -242,10 +244,11 @@ struct vdec_h264_lat_share {
 	struct v4l2_ctrl_h264_decode_params dec;
 	struct vdec_h264_lat_shdr shdr;
 
-	/* The initial reference lists (8.2.4.2), as DPB indices */
+	/* The initial reference lists (8.2.4.2): DPB indices, and fields */
 	struct vdec_h264_lat_ref refs[V4L2_H264_NUM_DPB_ENTRIES];
-	u8 p0[V4L2_H264_REF_LIST_LEN], b0[V4L2_H264_REF_LIST_LEN],
-	   b1[V4L2_H264_REF_LIST_LEN];
+	struct v4l2_h264_reference p0[V4L2_H264_REF_LIST_LEN],
+				   b0[V4L2_H264_REF_LIST_LEN],
+				   b1[V4L2_H264_REF_LIST_LEN];
 	u8 num_refs;
 
 	u64 trans_start, trans_end;
@@ -465,9 +468,13 @@ static int vdec_h264_lat_parse_shdr(struct vdec_h264_lat_inst *inst,
 	if (sps->flags & V4L2_H264_SPS_FLAG_SEPARATE_COLOUR_PLANE)
 		vdec_h264_lat_bits(inst, 2);
 	h->frame_num = vdec_h264_lat_bits(inst, sps->log2_max_frame_num_minus4 + 4);
-	if (!(sps->flags & V4L2_H264_SPS_FLAG_FRAME_MBS_ONLY) &&
-	    vdec_h264_lat_bits(inst, 1))
-		return -EOPNOTSUPP;	/* field pictures: not yet */
+	h->field_pic = false;
+	h->bottom_field = false;
+	if (!(sps->flags & V4L2_H264_SPS_FLAG_FRAME_MBS_ONLY)) {
+		h->field_pic = vdec_h264_lat_bits(inst, 1);
+		if (h->field_pic)
+			h->bottom_field = vdec_h264_lat_bits(inst, 1);
+	}
 	if (sps->chroma_format_idc > 1)
 		return -EOPNOTSUPP;	/* 4:2:2 and 4:4:4 */
 	if (nal_type == NAL_IDR_SLICE)
@@ -475,12 +482,14 @@ static int vdec_h264_lat_parse_shdr(struct vdec_h264_lat_inst *inst,
 	if (sps->pic_order_cnt_type == 0) {
 		h->poc_lsb = vdec_h264_lat_bits(inst,
 						sps->log2_max_pic_order_cnt_lsb_minus4 + 4);
-		if (pps->flags & V4L2_H264_PPS_FLAG_BOTTOM_FIELD_PIC_ORDER_IN_FRAME_PRESENT)
+		if ((pps->flags & V4L2_H264_PPS_FLAG_BOTTOM_FIELD_PIC_ORDER_IN_FRAME_PRESENT) &&
+		    !h->field_pic)
 			h->delta_poc_bottom = vdec_h264_lat_se(inst);
 	} else if (sps->pic_order_cnt_type == 1 &&
 		   !(sps->flags & V4L2_H264_SPS_FLAG_DELTA_PIC_ORDER_ALWAYS_ZERO)) {
 		vdec_h264_lat_se(inst);
-		if (pps->flags & V4L2_H264_PPS_FLAG_BOTTOM_FIELD_PIC_ORDER_IN_FRAME_PRESENT)
+		if ((pps->flags & V4L2_H264_PPS_FLAG_BOTTOM_FIELD_PIC_ORDER_IN_FRAME_PRESENT) &&
+		    !h->field_pic)
 			vdec_h264_lat_se(inst);
 	}
 	if (pps->flags & V4L2_H264_PPS_FLAG_REDUNDANT_PIC_CNT_PRESENT)
@@ -697,9 +706,9 @@ static void vdec_h264_lat_build_lists(struct vdec_h264_lat_inst *inst,
 	v4l2_h264_build_b_ref_lists(&b, b0, b1);
 	sh->num_refs = b.num_valid;
 	for (i = 0; i < b.num_valid; i++) {
-		sh->p0[i] = p0[i].index;
-		sh->b0[i] = b0[i].index;
-		sh->b1[i] = b1[i].index;
+		sh->p0[i] = p0[i];
+		sh->b0[i] = b0[i];
+		sh->b1[i] = b1[i];
 	}
 
 	vdec_h264_lat_update_slots(inst, &sh->dec);
@@ -714,6 +723,7 @@ static void vdec_h264_lat_build_lists(struct vdec_h264_lat_inst *inst,
 		r->pic_num = b.refs[i].frame_num;
 		r->long_term = b.refs[i].longterm;
 		r->mbaff = !!(sh->sps.flags & V4L2_H264_SPS_FLAG_MB_ADAPTIVE_FRAME_FIELD);
+		r->field = !!(e->flags & V4L2_H264_DPB_ENTRY_FLAG_FIELD);
 		r->top_poc = b.refs[i].top_field_order_cnt;
 		r->bottom_poc = b.refs[i].bottom_field_order_cnt;
 	}
@@ -752,8 +762,9 @@ static void vdec_h264_lat_find_refs(struct vdec_h264_lat_inst *inst,
 static u32 vdec_h264_lat_desc(const struct vdec_h264_lat_ref *r, bool bottom,
 			      bool poc)
 {
+	/* Vdec_Drv_setDecPicInfo: bit 19 for a field pair, 18 an MBAFF frame */
 	u32 val = r->fb << 23 | bottom << 22 | r->long_term << 20 |
-		  r->mbaff << 18;	/* Vdec_Drv_setDecPicInfo */
+		  (r->field ? BIT(19) : r->mbaff ? BIT(18) : 0);
 
 	if (r->top_poc <= r->bottom_poc)
 		val |= BIT(21);
@@ -766,6 +777,82 @@ static u32 vdec_h264_lat_pic_num(const struct vdec_h264_lat_ref *r)
 {
 	return (r->pic_num & 0x7ffff) |
 	       (r->long_term ? AVC_PIC_NUM_LONG_TERM : 0);
+}
+
+/* A reference field's PicNum (8.2.4.1): odd for the current parity */
+static u32 vdec_h264_lat_field_pic_num(const struct vdec_h264_lat_ref *r,
+				       bool bottom, bool cur_bottom)
+{
+	return ((2 * r->pic_num + (bottom == cur_bottom)) & 0x7ffff) |
+	       (r->long_term ? AVC_PIC_NUM_LONG_TERM : 0);
+}
+
+/* A reference field's list descriptor: no frame bit 21; B lists add its POC */
+static u32 vdec_h264_lat_field_desc(const struct vdec_h264_lat_ref *r,
+				    bool bottom, bool poc)
+{
+	u32 val = r->fb << 23 | bottom << 22 | r->long_term << 20 |
+		  (r->field ? BIT(19) : r->mbaff ? BIT(18) : 0);
+
+	if (poc)
+		val += (bottom ? r->bottom_poc : r->top_poc) & MV_POC_MASK;
+	return val;
+}
+
+/* The field lists (H264_HAL_Set{P,B}RefPicListReg, field paths) */
+static void vdec_h264_lat_set_field_lists(struct vdec_h264_lat_hw *hw,
+					  const struct vdec_h264_lat_share *sh,
+					  bool cur_bottom)
+{
+	u32 bot_p = 0, bot_b0 = 0, bot_b1 = 0;
+	int i;
+
+	for (i = 0; i < sh->num_refs && i < 32; i++) {
+		const struct vdec_h264_lat_ref *r = &sh->refs[sh->p0[i].index];
+		bool bot = sh->p0[i].fields == V4L2_H264_BOTTOM_FIELD_REF;
+
+		writel(vdec_h264_lat_field_pic_num(r, bot, cur_bottom),
+		       hw->avc + AVC_P_PIC_NUM(i));
+		writel(vdec_h264_lat_field_desc(r, bot, false),
+		       hw->mv + MV_P_DESC(i));
+		bot_p |= bot << i;
+		if (!hw->lat) {
+			writel(r->y, hw->mc + MC_REF_Y(i));
+			writel(r->c, hw->mc + MC_REF_C(i));
+		}
+	}
+
+	for (i = 0; i < sh->num_refs && i < 32; i++) {
+		const struct vdec_h264_lat_ref *r0 = &sh->refs[sh->b0[i].index];
+		const struct vdec_h264_lat_ref *r1 = &sh->refs[sh->b1[i].index];
+		bool bot0 = sh->b0[i].fields == V4L2_H264_BOTTOM_FIELD_REF;
+		bool bot1 = sh->b1[i].fields == V4L2_H264_BOTTOM_FIELD_REF;
+
+		writel(vdec_h264_lat_field_pic_num(r0, bot0, cur_bottom),
+		       hw->avc + AVC_B0_PIC_NUM(i));
+		writel(vdec_h264_lat_field_pic_num(r1, bot1, cur_bottom),
+		       hw->avc + AVC_B1_PIC_NUM(i));
+		bot_b0 |= bot0 << i;
+		bot_b1 |= bot1 << i;
+		if (hw->lat)
+			continue;
+		writel(r0->y, hw->mc + MC_REF_Y(MC_REF_B0 + i));
+		writel(r0->c, hw->mc + MC_REF_C(MC_REF_B0 + i));
+		writel(vdec_h264_lat_field_desc(r0, bot0, true),
+		       hw->mv + MV_B0_DESC(i));
+		writel(r1->y, hw->mc + MC_REF_Y(MC_REF_B1 + i));
+		writel(r1->c, hw->mc + MC_REF_C(MC_REF_B1 + i));
+		writel(vdec_h264_lat_field_desc(r1, bot1, true),
+		       hw->mv + MV_B1_DESC(i));
+		/* A bottom field's motion vectors follow the top field's */
+		writel((r1->mv >> 4) + (bot1 ? 2 : 0), hw->mv + MV_B1_MV(i));
+	}
+
+	if (!hw->lat) {
+		writel(bot_p, hw->mc + MC_BOTTOM_P);
+		writel(bot_b0, hw->mc + MC_BOTTOM_B0);
+		writel(bot_b1, hw->mc + MC_BOTTOM_B1);
+	}
 }
 
 /*
@@ -798,9 +885,15 @@ static void vdec_h264_lat_set_lists(struct vdec_h264_lat_inst *inst,
 		writel(0, hw->mc + MC_BOTTOM_P);
 	writel(1, hw->avc + AVC_LIST_INIT);
 	readl_poll_timeout(hw->avc + AVC_LIST_INIT, val, !(val & BIT(0)), 1, 1000);
-	writel(1 << (sh->sps.log2_max_frame_num_minus4 + 4),
-	       hw->avc + AVC_MAX_FRAME_NUM);
-	writel(dec->frame_num, hw->avc + AVC_CUR_PIC_NUM);
+	if (sh->shdr.field_pic) {
+		writel(2 << (sh->sps.log2_max_frame_num_minus4 + 4),
+		       hw->avc + AVC_MAX_FRAME_NUM);
+		writel(2 * dec->frame_num + 1, hw->avc + AVC_CUR_PIC_NUM);
+	} else {
+		writel(1 << (sh->sps.log2_max_frame_num_minus4 + 4),
+		       hw->avc + AVC_MAX_FRAME_NUM);
+		writel(dec->frame_num, hw->avc + AVC_CUR_PIC_NUM);
+	}
 
 	/* Unused entries point at the picture itself */
 	if (!hw->lat) {
@@ -811,8 +904,20 @@ static void vdec_h264_lat_set_lists(struct vdec_h264_lat_inst *inst,
 		}
 	}
 
+	if (sh->shdr.field_pic) {
+		bool bottom = sh->shdr.bottom_field;
+
+		/* H264_HAL_SetPOC: only this field's */
+		writel((bottom ? dec->bottom_field_order_cnt :
+			dec->top_field_order_cnt) & MV_POC_MASK, hw->mv + MV_POC);
+		if (!hw->lat)
+			vdec_h264_lat_set_mv_mode(hw, sh);
+		vdec_h264_lat_set_field_lists(hw, sh, bottom);
+		return;
+	}
+
 	for (i = 0; i < sh->num_refs; i++) {
-		const struct vdec_h264_lat_ref *r = &sh->refs[sh->p0[i]];
+		const struct vdec_h264_lat_ref *r = &sh->refs[sh->p0[i].index];
 
 		writel(vdec_h264_lat_pic_num(r), hw->avc + AVC_P_PIC_NUM(i));
 		writel(vdec_h264_lat_desc(r, false, false),
@@ -838,8 +943,8 @@ static void vdec_h264_lat_set_lists(struct vdec_h264_lat_inst *inst,
 		vdec_h264_lat_set_mv_mode(hw, sh);
 	}
 	for (i = 0; i < sh->num_refs; i++) {
-		const struct vdec_h264_lat_ref *r0 = &sh->refs[sh->b0[i]];
-		const struct vdec_h264_lat_ref *r1 = &sh->refs[sh->b1[i]];
+		const struct vdec_h264_lat_ref *r0 = &sh->refs[sh->b0[i].index];
+		const struct vdec_h264_lat_ref *r1 = &sh->refs[sh->b1[i].index];
 
 		writel(vdec_h264_lat_pic_num(r0), hw->avc + AVC_B0_PIC_NUM(i));
 		writel(vdec_h264_lat_pic_num(r1), hw->avc + AVC_B1_PIC_NUM(i));
@@ -937,7 +1042,8 @@ static void vdec_h264_lat_start_common(struct vdec_h264_lat_inst *inst,
 	u32 h = vdec_h264_lat_mb_rows(&sh->sps);
 	u32 val;
 
-	writel(w * h, hw->vld_top + VLD_TOP_06C);
+	/* PicSizeInMbs: a field has half the frame's rows */
+	writel(w * (sh->shdr.field_pic ? h / 2 : h), hw->vld_top + VLD_TOP_06C);
 	writel(0xffffffff, hw->vld_top + VLD_TOP_050);
 	writel((h * 16) << 16 | (w * 16), hw->vld_top + VLD_TOP_PIC_SIZE);
 
@@ -1202,7 +1308,8 @@ static int vdec_h264_lat_core_run(struct vdec_h264_lat_inst *inst,
 	u32 ube = q->wdma_addr.dma_addr;
 	u32 w = sh->sps.pic_width_in_mbs_minus1 + 1;
 	u32 h = vdec_h264_lat_mb_rows(&sh->sps);
-	dma_addr_t y, c;
+	u32 rows = sh->shdr.field_pic ? h / 2 : h;	/* the picture's */
+	dma_addr_t y, c, mv;
 	u32 val, mb_x, mb_y;
 	int i, ret;
 
@@ -1245,7 +1352,7 @@ static int vdec_h264_lat_core_run(struct vdec_h264_lat_inst *inst,
 	writel(1, hw->mc + MC_94);
 	writel(3, hw->mc + MC_8E);
 	writel(w - 1, hw->mc + MC_MB_W1);
-	writel(h - 1, hw->mc + MC_MB_H1);
+	writel(rows - 1, hw->mc + MC_MB_H1);
 	writel(w, hw->mc + MC_MB_WIDTH_8B);
 	writel(0, hw->mc + MC_15F);
 	val = readl(hw->mc + MC_19A);
@@ -1258,7 +1365,11 @@ static int vdec_h264_lat_core_run(struct vdec_h264_lat_inst *inst,
 	writel(w, hw->mc + MC_MB_WIDTH);
 	val = readl(hw->avc + AVC_178);
 	writel(val & ~0x20, hw->avc + AVC_178);
-	writel(inst->mv_buf[dst->index].dma_addr >> 4, hw->mv + MV_CUR);
+	/* A bottom field's motion vectors follow the top field's */
+	mv = inst->mv_buf[dst->index].dma_addr >> 4;
+	if (sh->shdr.bottom_field)
+		mv += sh->sps.flags & V4L2_H264_SPS_FLAG_DIRECT_8X8_INFERENCE ? 2 : 4;
+	writel(mv, hw->mv + MV_CUR);
 	writel(vdec_h264_lat_shdr2(sh), hw->avc + AVC_SHDR2);
 	vdec_h264_lat_cabac_init(hw, sh);
 	val = readl(hw->mc + MC_179);
@@ -1295,7 +1406,7 @@ static int vdec_h264_lat_core_run(struct vdec_h264_lat_inst *inst,
 	/* The last macroblock decoded tells whether the whole picture was */
 	mb_x = readl(hw->mc + 0x028);
 	mb_y = readl(hw->mc + 0x02c);
-	if (ret || mb_x != w - 1 || mb_y != h - 1) {
+	if (ret || mb_x != w - 1 || mb_y != rows - 1) {
 		mtk_vdec_err(ctx, "picture %d: %s, last macroblock (%u, %u)",
 			     ctx->decoded_frame_cnt, ret ? "timeout" : "short",
 			     mb_x, mb_y);
