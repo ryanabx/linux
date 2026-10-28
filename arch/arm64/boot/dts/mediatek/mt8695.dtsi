@@ -255,8 +255,10 @@
 						clocks = <&topckgen CLK_TOP_VDEC_SEL>,
 							 <&topckgen CLK_TOP_VDEC_SLOW_SEL>,
 							 <&topckgen CLK_TOP_VDEC_LAE_SEL>,
-							 <&vdecsoc CLK_VDSOC_SOC>;
-						clock-names = "vdec", "vdec1", "vdec2", "vdec-0";
+							 <&vdecsoc CLK_VDSOC_SOC>,
+							 <&vdecsoc CLK_VDSOC_LAT>;
+						clock-names = "vdec", "vdec1", "vdec2", "vdec-0",
+							      "vdec-1";
 						#power-domain-cells = <0>;
 					};
 
