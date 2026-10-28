@@ -15,12 +15,14 @@
  * (its register log of an MPEG-2 decode on Fire OS) and reads the two VLD
  * words that the library reads first. Nothing is decoded there either.
  *
- * /sys/kernel/debug/mt8695-vdec-replay decodes the first two pictures (I
- * and P) of the MPEG-2 stream written to /sys/kernel/debug/mt8695-vdec-bs,
- * with the vendor library's register lists for them (frames 0 and 1 of its
- * log of the 1080p test clip) and our own buffers, through the M4U. The
- * pictures land in /sys/kernel/debug/mt8695-vdec-fb and -fb1, in block
- * mode. Every read is compared with the value the vendor library got.
+ * /sys/kernel/debug/mt8695-vdec-replay decodes the first pictures of the
+ * MPEG-2 stream written to /sys/kernel/debug/mt8695-vdec-bs (one of two
+ * 1080p test clips, picked by the clip parameter: I and P, or I, P and B
+ * in decode order), with the vendor library's register lists for them
+ * (from its logs of those clips) and our own buffers, through the M4U.
+ * Each picture lands in its own frame buffer, /sys/kernel/debug/
+ * mt8695-vdec-fb, -fb1 and -fb2, in block mode. The reads the vendor
+ * library made are compared with what it got.
  */
 
 #include <linux/clk.h>
@@ -77,7 +79,8 @@
 #define VDEC_FB_Y_SIZE	(1920 * 1088)
 #define VDEC_FB_SIZE	(VDEC_FB_Y_SIZE * 3 / 2)
 #define VDEC_BS_SIZE	SZ_256K
-#define VDEC_RAW_SIZE	SZ_256K
+#define VDEC_RAW_SIZE	SZ_512K
+#define VDEC_NUM_FB	3
 
 struct vdec_probe {
 	struct device *dev;
@@ -89,9 +92,9 @@ struct vdec_probe {
 	size_t raw_len;
 	void *bs;		/* the picture's chunk of it, for the decoder */
 	dma_addr_t bs_iova;
-	void *fb[2];
-	dma_addr_t fb_iova[2];
-	struct debugfs_blob_wrapper fb_blob[2];
+	void *fb[VDEC_NUM_FB];
+	dma_addr_t fb_iova[VDEC_NUM_FB];
+	struct debugfs_blob_wrapper fb_blob[VDEC_NUM_FB];
 };
 
 static const struct {
@@ -200,6 +203,10 @@ module_param(clocks_first, bool, 0644);
  */
 static unsigned int pre_muxes;
 module_param(pre_muxes, uint, 0644);
+
+/* The replay's clip: 0, I and P (mpeg2-1080p30-ip); 1, I, P, B (-ipb) */
+static unsigned int clip;
+module_param(clip, uint, 0644);
 
 /* Say what comes next on the console, and wait until it is shown */
 static void vdec_probe_step(struct vdec_probe *vp, const char *what)
@@ -431,6 +438,18 @@ static u32 rp_r(struct vdec_replay *r, u32 block, u32 word, u32 expect)
 	return val;
 }
 
+/* Shift the barrel shifter @bits (1-31) with one read, and log it */
+static void rp_shift(struct vdec_replay *r, u32 bits)
+{
+	char what[48];
+	u32 val;
+
+	snprintf(what, sizeof(what), "VLD(%u)", bits);
+	vdec_probe_step(r->vp, what);
+	val = readl(r->vp->base + VLD + bits * 4);
+	seq_printf(r->s, "%s: 0x%08x\n", what, val);
+}
+
 static int rp_poll(struct vdec_replay *r, u32 off, u32 mask, u32 timeout_us,
 		   const char *what)
 {
@@ -446,23 +465,6 @@ static int rp_poll(struct vdec_replay *r, u32 off, u32 mask, u32 timeout_us,
 		   val);
 	return ret;
 }
-
-/*
- * The barrel shifter: reading VLD word n shifts the stream n bits, then
- * returns the next 32. What the vendor's reads returned in frame 0: the
- * sequence header on, up to the first slice's start code.
- */
-static const u32 vdec_replay_bits[] = {
-	0xb3780438, 0x3835ffff, 0xffe45800, 0x000001b5, 0xb5144a00,
-	0x00010000, 0x00000001, 0x01b80008, 0x08004000, 0x00000100,
-	0x00000fff, 0xfff80000, 0x0001b58f, 0x8ffff341, 0x41800000,
-};
-
-/* The same in frame 1: the picture header and its coding extension */
-static const u32 vdec_replay_bits1[] = {
-	0x000057ff, 0xfffb8000, 0x000001b5, 0xb5833ff3, 0xf3418000,
-	0x00000101,
-};
 
 /*
  * The start of each frame in the vendor's log after the setup: its chunk of
@@ -556,84 +558,122 @@ static int vdec_replay_finish(struct vdec_replay *r, int fb, int slot)
 }
 
 /*
- * Frame 0, the I picture: the stream from its start, through the
- * sequence header (the barrel shifter's reads), into frame buffer 0; both
- * reference slots point at the output.
+ * One picture of a clip, from the vendor's log of it: its chunk of the
+ * stream, VLD word 34 (the picture's type and f_codes), which frame buffer
+ * it goes to, its references, and MC word 9 (the output's slot: 0 or 1
+ * for the two reference slots, 4 for the B slot in MC words 39/40).
  */
-static int vdec_replay_frame0(struct vdec_replay *r)
-{
-	int i, ret;
+struct vdec_pic {
+	u32 off, len;
+	u32 start_code;		/* what VLD word 60 finds first */
+	u32 vld34;
+	int out, fwd, bwd;	/* frame buffers; -1: none */
+	u32 mc9;
+};
 
-	ret = vdec_replay_start(r, 0, 83095);
-	if (ret)
-		return ret;
-	rp_r(r, VLD, 60, 0x000001b3);
-	for (i = 0; i < ARRAY_SIZE(vdec_replay_bits); i++)
-		rp_r(r, VLD, 24, vdec_replay_bits[i]);
-	rp_r(r, VLD, 16, 0x00000101);
-	rp_r(r, VLD, 60, 0x00000101);
+static const struct vdec_pic vdec_clip_ip[] = {
+	{ 0, 83095, 0x1b3, 0xe020ffff, 0, -1, -1, 0 },
+	{ 82519, 131053, 0x100, 0xe04033ff, 1, 0, -1, 1 },
+};
 
-	rp_w(r, VLD, 34, 0xe020ffff);
-	vdec_replay_size(r);
-	vdec_replay_slot(r, 0, 0);
-	vdec_replay_slot(r, 1, 0);
-	vdec_replay_slot(r, 0, 0);
-	return vdec_replay_finish(r, 0, 0);
-}
+static const struct vdec_pic vdec_clip_ipb[] = {
+	{ 0, 83095, 0x1b3, 0xe020ffff, 0, -1, -1, 0 },
+	{ 82519, 137632, 0x100, 0xe04044ff, 1, 0, -1, 1 },
+	{ 219575, 90380, 0x100, 0xe0604411, 2, 0, 1, 4 },
+};
 
 /*
- * Frame 1, the P picture: the stream from the second picture start code,
- * into frame buffer 1 (slot 1), predicted from frame buffer 0 (slot 0,
- * MC word 6).
+ * The barrel shifter: reading VLD word n shifts the stream n bits, then
+ * returns the next 32; word 60 returns the start code at the position.
+ * After word 60 found the picture's first start code, shift to the first
+ * slice's (00 00 01 01, found in the chunk) in 24-bit steps and the rest,
+ * as the vendor library does over the headers it parses itself.
  */
-static int vdec_replay_frame1(struct vdec_replay *r)
+static int vdec_replay_to_slice(struct vdec_replay *r, const struct vdec_pic *pic)
 {
-	int i, ret;
+	const u8 *d = r->vp->raw + pic->off;
+	u32 bits, i;
 
-	ret = vdec_replay_start(r, 82519, 131053);
+	for (i = 0; i + 4 <= pic->len; i++)
+		if (d[i] == 0 && d[i + 1] == 0 && d[i + 2] == 1 && d[i + 3] == 1)
+			break;
+	if (i + 4 > pic->len) {
+		seq_puts(r->s, "no slice in the chunk\n");
+		return -EINVAL;
+	}
+	/* Position at the first start code; the chunks begin with it or 00s */
+	for (bits = 0; d[bits / 8] == 0 && d[bits / 8 + 1] == 0 &&
+	     d[bits / 8 + 2] == 0; bits += 8)
+		;
+	bits = i * 8 - bits;
+	seq_printf(r->s, "shift %u bits to the slice\n", bits);
+	while (bits >= 24) {
+		rp_shift(r, 24);
+		bits -= 24;
+	}
+	if (bits)
+		rp_shift(r, bits);
+	return 0;
+}
+
+static int vdec_replay_pic(struct vdec_replay *r, const struct vdec_pic *pic)
+{
+	int ret;
+
+	ret = vdec_replay_start(r, pic->off, pic->len);
 	if (ret)
 		return ret;
-	rp_r(r, VLD, 60, 0x00000100);
-	for (i = 0; i < ARRAY_SIZE(vdec_replay_bits1); i++)
-		rp_r(r, VLD, 24, vdec_replay_bits1[i]);
-	rp_r(r, VLD, 60, 0x00000101);
+	rp_r(r, VLD, 60, pic->start_code);
+	ret = vdec_replay_to_slice(r, pic);
+	if (ret)
+		return ret;
+	rp_r(r, VLD, 60, 0x101);
 
-	rp_w(r, VLD, 34, 0xe04033ff);
+	rp_w(r, VLD, 34, pic->vld34);
 	vdec_replay_size(r);
-	vdec_replay_slot(r, 0, 1);
-	vdec_replay_slot(r, 1, 1);
-	vdec_replay_slot(r, 0, 0);
-	vdec_replay_slot(r, 1, 1);
-	rp_w(r, MC, 6, 0x0);
-	return vdec_replay_finish(r, 1, 1);
+	/* The vendor first points both slots (and the B slot) at the output */
+	vdec_replay_slot(r, 0, pic->out);
+	vdec_replay_slot(r, 1, pic->out);
+	if (pic->mc9 == 4) {
+		rp_w(r, MC, 39, r->vp->fb_iova[pic->out] >> 9);
+		rp_w(r, MC, 40, (r->vp->fb_iova[pic->out] + VDEC_FB_Y_SIZE) >> 8);
+	}
+	if (pic->fwd >= 0) {
+		vdec_replay_slot(r, 0, pic->fwd);
+		vdec_replay_slot(r, 1, pic->bwd >= 0 ? pic->bwd : pic->out);
+		rp_w(r, MC, 6, 0x0);
+	} else {
+		vdec_replay_slot(r, 0, pic->out);
+	}
+	return vdec_replay_finish(r, pic->out, pic->mc9);
 }
 
 static int vdec_replay_show(struct seq_file *s, void *unused)
 {
 	struct vdec_probe *vp = s->private;
 	struct vdec_replay r = { .vp = vp, .s = s };
-	int ret;
+	const struct vdec_pic *pics;
+	int i, n, ret;
 
 	if (!vp->raw_len) {
 		seq_puts(s, "write the stream to mt8695-vdec-bs first\n");
 		return 0;
 	}
-	seq_printf(s, "stream %zu bytes; bitstream 0x%llx; frame buffers 0x%llx, 0x%llx\n",
-		   vp->raw_len, (u64)vp->bs_iova, (u64)vp->fb_iova[0],
-		   (u64)vp->fb_iova[1]);
-	memset(vp->fb[0], 0x5a, VDEC_FB_SIZE);
-	memset(vp->fb[1], 0x5a, VDEC_FB_SIZE);
+	pics = clip ? vdec_clip_ipb : vdec_clip_ip;
+	n = clip ? ARRAY_SIZE(vdec_clip_ipb) : ARRAY_SIZE(vdec_clip_ip);
+	seq_printf(s, "clip %u, stream %zu bytes; bitstream 0x%llx\n", clip,
+		   vp->raw_len, (u64)vp->bs_iova);
+	for (i = 0; i < VDEC_NUM_FB; i++)
+		memset(vp->fb[i], 0x5a, VDEC_FB_SIZE);
 
 	ret = vdec_probe_on(vp);
 	if (ret)
 		return ret;
-	seq_puts(s, "== frame 0\n");
-	vdec_probe_setup(vp, s);
-	ret = vdec_replay_frame0(&r);
-	if (!ret) {
-		seq_puts(s, "== frame 1\n");
+	for (i = 0; i < n && !ret; i++) {
+		seq_printf(s, "== picture %d, frame buffer %d (0x%llx)\n", i,
+			   pics[i].out, (u64)vp->fb_iova[pics[i].out]);
 		vdec_probe_setup(vp, s);
-		vdec_replay_frame1(&r);
+		ret = vdec_replay_pic(&r, &pics[i]);
 	}
 	vdec_probe_off(vp);
 	seq_printf(s, "%d reads differ from the vendor's\n", r.mismatches);
@@ -682,7 +722,7 @@ static int mt8695_vdec_probe_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
 	struct vdec_probe *vp;
-	int ret;
+	int i, ret;
 
 	vp = devm_kzalloc(dev, sizeof(*vp), GFP_KERNEL);
 	if (!vp)
@@ -708,18 +748,19 @@ static int mt8695_vdec_probe_probe(struct platform_device *pdev)
 		return ret;
 	vp->raw = devm_kzalloc(dev, VDEC_RAW_SIZE, GFP_KERNEL);
 	vp->bs = dmam_alloc_coherent(dev, VDEC_BS_SIZE, &vp->bs_iova, GFP_KERNEL);
-	vp->fb[0] = dmam_alloc_coherent(dev, VDEC_FB_SIZE, &vp->fb_iova[0], GFP_KERNEL);
-	vp->fb[1] = dmam_alloc_coherent(dev, VDEC_FB_SIZE, &vp->fb_iova[1], GFP_KERNEL);
-	if (!vp->raw || !vp->bs || !vp->fb[0] || !vp->fb[1])
+	if (!vp->raw || !vp->bs)
 		return -ENOMEM;
-	vp->fb_blob[0].data = vp->fb[0];
-	vp->fb_blob[0].size = VDEC_FB_SIZE;
-	vp->fb_blob[1].data = vp->fb[1];
-	vp->fb_blob[1].size = VDEC_FB_SIZE;
+	for (i = 0; i < VDEC_NUM_FB; i++) {
+		vp->fb[i] = dmam_alloc_coherent(dev, VDEC_FB_SIZE, &vp->fb_iova[i],
+						GFP_KERNEL);
+		if (!vp->fb[i])
+			return -ENOMEM;
+		vp->fb_blob[i].data = vp->fb[i];
+		vp->fb_blob[i].size = VDEC_FB_SIZE;
+	}
 
-	dev_info(dev, "%d clocks, bitstream at 0x%llx, frame buffers at 0x%llx, 0x%llx; see /sys/kernel/debug/mt8695-vdec-*\n",
-		 vp->num_clks, (u64)vp->bs_iova, (u64)vp->fb_iova[0],
-		 (u64)vp->fb_iova[1]);
+	dev_info(dev, "%d clocks, bitstream at 0x%llx; see /sys/kernel/debug/mt8695-vdec-*\n",
+		 vp->num_clks, (u64)vp->bs_iova);
 	debugfs_create_file("mt8695-vdec-probe", 0400, NULL, vp, &vdec_probe_fops);
 	debugfs_create_file("mt8695-vdec-setup", 0400, NULL, vp, &vdec_setup_fops);
 	debugfs_create_file("mt8695-vdec-offread", 0400, NULL, vp, &vdec_offread_fops);
@@ -727,6 +768,7 @@ static int mt8695_vdec_probe_probe(struct platform_device *pdev)
 	debugfs_create_file("mt8695-vdec-bs", 0200, NULL, vp, &vdec_bs_fops);
 	debugfs_create_blob("mt8695-vdec-fb", 0400, NULL, &vp->fb_blob[0]);
 	debugfs_create_blob("mt8695-vdec-fb1", 0400, NULL, &vp->fb_blob[1]);
+	debugfs_create_blob("mt8695-vdec-fb2", 0400, NULL, &vp->fb_blob[2]);
 	return 0;
 }
 
