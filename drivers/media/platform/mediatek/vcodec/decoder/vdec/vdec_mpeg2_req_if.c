@@ -106,6 +106,11 @@ struct vdec_mpeg2_slice_inst {
 	void __iomem *dec;
 	void __iomem *misc;
 	void __iomem *sys;
+
+	/* For field pictures: the last two reference frames, newest last */
+	dma_addr_t ref_y[2], ref_c[2];
+	int last_index;		/* the last picture's capture buffer */
+	u8 last_structure;
 };
 
 static const void *vdec_mpeg2_get_ctrl(struct mtk_vcodec_dec_ctx *ctx, u32 id)
@@ -232,14 +237,17 @@ static void vdec_mpeg2_load_matrix(struct vdec_mpeg2_slice_inst *inst,
 }
 
 static void vdec_mpeg2_set_size(struct vdec_mpeg2_slice_inst *inst,
-				const struct v4l2_ctrl_mpeg2_sequence *seq)
+				const struct v4l2_ctrl_mpeg2_sequence *seq,
+				bool field)
 {
 	u32 w16 = ALIGN(seq->horizontal_size, 16);
 	u32 h16 = ALIGN(seq->vertical_size, 16);
 
 	writel(VLD_PIC_SIZE_MPEG2 | h16 << 16 | 0x1ff,
 	       inst->dec + VLD_PIC_SIZE);
-	writel(h16 << 16 | w16, inst->dec + VLD_TOP_PIC_SIZE);
+	/* A field picture is half the height here, and only here */
+	writel((field ? h16 / 2 : h16) << 16 | w16,
+	       inst->dec + VLD_TOP_PIC_SIZE);
 	writel(w16 / 16, inst->dec + MC_MB_WIDTH);
 	writel(w16, inst->dec + MC_WIDTH);
 	writel(h16, inst->dec + MC_HEIGHT);
@@ -331,6 +339,59 @@ static void vdec_mpeg2_set_refs(struct vdec_mpeg2_slice_inst *inst,
 	writel(0, inst->dec + MC_SECOND_FIELD);
 }
 
+/*
+ * A field picture's slots: the references are the last two reference
+ * frames, which the driver tracks itself; an I or P field goes to slot 2
+ * with the previous reference frame in slot 1, and the second field of an
+ * I or P frame reads its first field there (MC word 8).
+ */
+static void vdec_mpeg2_set_field_refs(struct vdec_mpeg2_slice_inst *inst,
+				      const struct v4l2_ctrl_mpeg2_picture *pic,
+				      struct vdec_fb *fb, bool second)
+{
+	struct mtk_vcodec_dec_ctx *ctx = inst->ctx;
+	dma_addr_t out_y, out_c, start, end;
+	dma_addr_t old_y, old_c;
+
+	out_y = fb->base_y.dma_addr;
+	if (ctx->q_data[MTK_Q_DATA_DST].fmt->num_planes == 2)
+		out_c = fb->base_c.dma_addr;
+	else
+		out_c = out_y + ctx->picinfo.fb_sz[0];
+	/* A missing reference decodes from the output: garbage, no fault */
+	old_y = inst->ref_y[0] ? inst->ref_y[0] : out_y;
+	old_c = inst->ref_c[0] ? inst->ref_c[0] : out_c;
+
+	if (pic->picture_coding_type == V4L2_MPEG2_PIC_CODING_TYPE_B) {
+		writel(old_y >> 9, inst->dec + MC_REF1_Y);
+		writel(old_c >> 8, inst->dec + MC_REF1_C);
+		writel((inst->ref_y[1] ? inst->ref_y[1] : out_y) >> 9,
+		       inst->dec + MC_REF2_Y);
+		writel((inst->ref_c[1] ? inst->ref_c[1] : out_c) >> 8,
+		       inst->dec + MC_REF2_C);
+		writel(out_y >> 9, inst->dec + MC_B_Y);
+		writel(out_c >> 8, inst->dec + MC_B_C);
+		writel(0, inst->dec + MC_FWD_SLOT);
+		writel(MC_OUT_SLOT_B, inst->dec + MC_OUT_SLOT);
+	} else {
+		writel(old_y >> 9, inst->dec + MC_REF1_Y);
+		writel(old_c >> 8, inst->dec + MC_REF1_C);
+		writel(out_y >> 9, inst->dec + MC_REF2_Y);
+		writel(out_c >> 8, inst->dec + MC_REF2_C);
+		if (pic->picture_coding_type == V4L2_MPEG2_PIC_CODING_TYPE_P)
+			writel(0, inst->dec + MC_FWD_SLOT);
+		writel(1, inst->dec + MC_OUT_SLOT);
+	}
+
+	start = min(out_y, out_c);
+	end = max(out_y + ctx->picinfo.fb_sz[0], out_c + ctx->picinfo.fb_sz[1]);
+	writel(end >> 4, inst->dec + MC_OUT_END);
+	writel(start >> 4, inst->dec + MC_OUT_START);
+	writel(1, inst->dec + MC_OUT_ENABLE);
+	writel(second && pic->picture_coding_type != V4L2_MPEG2_PIC_CODING_TYPE_B,
+	       inst->dec + MC_SECOND_FIELD);
+}
+
 static int vdec_mpeg2_slice_decode(void *h_vdec, struct mtk_vcodec_mem *bs,
 				   struct vdec_fb *fb, bool *res_chg)
 {
@@ -340,8 +401,9 @@ static int vdec_mpeg2_slice_decode(void *h_vdec, struct mtk_vcodec_mem *bs,
 	const struct v4l2_ctrl_mpeg2_picture *pic;
 	const struct v4l2_ctrl_mpeg2_quantisation *quant;
 	struct mtk_video_dec_buf *src_buf_info, *dst_buf_info;
-	u32 mb_x, mb_y;
-	int ret;
+	bool field, second;
+	u32 mb_x, mb_y, rows;
+	int index, ret;
 
 	*res_chg = false;
 
@@ -355,10 +417,9 @@ static int vdec_mpeg2_slice_decode(void *h_vdec, struct mtk_vcodec_mem *bs,
 	if (IS_ERR(seq) || IS_ERR(pic) || IS_ERR(quant))
 		return -EINVAL;
 
-	if (pic->picture_structure != V4L2_MPEG2_PIC_FRAME) {
-		mtk_vdec_err(ctx, "field pictures are not supported yet");
+	if (pic->picture_structure < V4L2_MPEG2_PIC_TOP_FIELD ||
+	    pic->picture_structure > V4L2_MPEG2_PIC_FRAME)
 		return -EINVAL;
-	}
 	if (pic->picture_coding_type < V4L2_MPEG2_PIC_CODING_TYPE_I ||
 	    pic->picture_coding_type > V4L2_MPEG2_PIC_CODING_TYPE_B)
 		return -EINVAL;
@@ -374,6 +435,23 @@ static int vdec_mpeg2_slice_decode(void *h_vdec, struct mtk_vcodec_mem *bs,
 	v4l2_m2m_buf_copy_metadata(&src_buf_info->m2m_buf.vb,
 				   &dst_buf_info->m2m_buf.vb);
 
+	/* The second field of a frame goes into the first one's buffer */
+	index = dst_buf_info->m2m_buf.vb.vb2_buf.index;
+	field = pic->picture_structure != V4L2_MPEG2_PIC_FRAME;
+	second = field && inst->last_index == index &&
+		 inst->last_structure != V4L2_MPEG2_PIC_FRAME &&
+		 inst->last_structure != pic->picture_structure;
+	inst->last_index = index;
+	inst->last_structure = pic->picture_structure;
+	if (pic->picture_coding_type != V4L2_MPEG2_PIC_CODING_TYPE_B && !second) {
+		inst->ref_y[0] = inst->ref_y[1];
+		inst->ref_c[0] = inst->ref_c[1];
+		inst->ref_y[1] = fb->base_y.dma_addr;
+		inst->ref_c[1] = ctx->q_data[MTK_Q_DATA_DST].fmt->num_planes == 2 ?
+				 fb->base_c.dma_addr :
+				 fb->base_y.dma_addr + ctx->picinfo.fb_sz[0];
+	}
+
 	vdec_mpeg2_hw_setup(inst);
 	ret = vdec_mpeg2_start_bitstream(inst, bs,
 					 vb2_plane_size(&src_buf_info->m2m_buf.vb.vb2_buf, 0));
@@ -381,7 +459,7 @@ static int vdec_mpeg2_slice_decode(void *h_vdec, struct mtk_vcodec_mem *bs,
 		return -EIO;
 
 	writel(vdec_mpeg2_param(pic), inst->dec + VLD_PARAM);
-	vdec_mpeg2_set_size(inst, seq);
+	vdec_mpeg2_set_size(inst, seq, field);
 	writel(0, inst->dec + VLD_QMAT_CTRL);
 	writel(VLD_QMAT_INTRA | VLD_QMAT_NON_INTRA, inst->dec + VLD_QMAT_CTRL);
 	vdec_mpeg2_load_matrix(inst, VLD_QMAT_INTRA_ADDR,
@@ -390,7 +468,10 @@ static int vdec_mpeg2_slice_decode(void *h_vdec, struct mtk_vcodec_mem *bs,
 			       quant->non_intra_quantiser_matrix);
 	writel(0x1ff, inst->dec + VLD_094);
 	writel(0x3ff, inst->dec + VLD_098);
-	vdec_mpeg2_set_refs(inst, pic, fb);
+	if (field)
+		vdec_mpeg2_set_field_refs(inst, pic, fb, second);
+	else
+		vdec_mpeg2_set_refs(inst, pic, fb);
 
 	writel(VLD_CMD_DECODE, inst->dec + VLD_CMD);
 	ret = mtk_vcodec_wait_for_done_ctx(ctx, MTK_INST_IRQ_RECEIVED,
@@ -403,8 +484,11 @@ static int vdec_mpeg2_slice_decode(void *h_vdec, struct mtk_vcodec_mem *bs,
 	/* The last macroblock decoded tells whether the whole picture was */
 	mb_x = readl(inst->dec + MC_LAST_MB_X);
 	mb_y = readl(inst->dec + MC_LAST_MB_Y);
+	rows = DIV_ROUND_UP(seq->vertical_size, 16);
+	if (field)
+		rows = DIV_ROUND_UP(seq->vertical_size, 32);
 	if (ret || mb_x != DIV_ROUND_UP(seq->horizontal_size, 16) - 1 ||
-	    mb_y != DIV_ROUND_UP(seq->vertical_size, 16) - 1) {
+	    mb_y != rows - 1) {
 		mtk_vdec_err(ctx, "picture %d: %s, last macroblock (%u, %u)",
 			     ctx->decoded_frame_cnt, ret ? "timeout" : "short",
 			     mb_x, mb_y);
@@ -472,6 +556,7 @@ static int vdec_mpeg2_slice_init(struct mtk_vcodec_dec_ctx *ctx)
 	inst->dec = core->reg_base[VDEC_HW_DEC];
 	inst->misc = core->reg_base[VDEC_HW_MISC];
 	inst->sys = core->reg_base[VDEC_HW_SYS];
+	inst->last_index = -1;
 	ctx->drv_handle = inst;
 
 	return 0;
