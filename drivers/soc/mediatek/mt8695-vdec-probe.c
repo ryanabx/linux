@@ -181,6 +181,14 @@ static const struct {
 static bool soc_word_first = true;
 module_param(soc_word_first, bool, 0644);
 
+/*
+ * Enable the clocks before the runtime PM get (Y, the vendor's order), or
+ * after it (N): with the soc gate among the power domain's clocks, larb1
+ * should resume either way.
+ */
+static bool clocks_first = true;
+module_param(clocks_first, bool, 0644);
+
 /* Say what comes next on the console, and wait until it is shown */
 static void vdec_probe_step(struct vdec_probe *vp, const char *what)
 {
@@ -201,27 +209,40 @@ static int vdec_probe_on(struct vdec_probe *vp)
 {
 	int ret;
 
+	if (!clocks_first) {
+		vdec_probe_step(vp, "power domain and larb1 on, before the clocks");
+		ret = pm_runtime_resume_and_get(vp->dev);
+		if (ret)
+			return ret;
+	}
 	vdec_probe_step(vp, "clocks on");
 	ret = clk_bulk_prepare_enable(vp->num_clks, vp->clks);
 	if (ret)
-		return ret;
+		goto err_put;
 	vdec_probe_read(vp, NULL, "soc gcon +0xa8", SOC_GCON + 0xa8);
 	/* The vendor driver writes this word after the soc gate (+0xa0) */
 	if (soc_word_first) {
 		vdec_probe_step(vp, "write soc gcon +0xa8");
 		writel(0x1, vp->base + SOC_GCON + 0xa8);
 	}
-	vdec_probe_step(vp, "power domain and larb1 on");
-	ret = pm_runtime_resume_and_get(vp->dev);
-	if (ret) {
-		clk_bulk_disable_unprepare(vp->num_clks, vp->clks);
-		return ret;
+	if (clocks_first) {
+		vdec_probe_step(vp, "power domain and larb1 on");
+		ret = pm_runtime_resume_and_get(vp->dev);
+		if (ret) {
+			clk_bulk_disable_unprepare(vp->num_clks, vp->clks);
+			return ret;
+		}
 	}
 	if (!soc_word_first) {
 		vdec_probe_step(vp, "write soc gcon +0xa8 after larb1");
 		writel(0x1, vp->base + SOC_GCON + 0xa8);
 	}
 	return 0;
+
+err_put:
+	if (!clocks_first)
+		pm_runtime_put_sync(vp->dev);
+	return ret;
 }
 
 static void vdec_probe_off(struct vdec_probe *vp)
