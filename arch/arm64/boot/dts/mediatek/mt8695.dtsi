@@ -877,6 +877,67 @@
 			};
 		};
 
+		vcodec_dec: video-codec@16000000 {
+			compatible = "mediatek,mt8695-vcodec-dec";
+			reg = <0 0x16000000 0 0x2000>;
+			iommus = <&iommu M4U_PORT_HW_VDEC_MC_EXT>;
+			mediatek,vdecsys = <&vdeccore>;
+			mediatek,vdecsoc = <&vdecsoc>;
+			#address-cells = <2>;
+			#size-cells = <2>;
+			ranges = <0 0 0 0x16000000 0 0x29000>;
+
+			video-codec@10000 {
+				compatible = "mediatek,mtk-vcodec-lat";
+				reg = <0 0x10000 0 0x1000>,	/* misc */
+				      <0 0x11000 0 0x6000>;	/* VLD to PP */
+				interrupts = <GIC_SPI 211 IRQ_TYPE_LEVEL_LOW>;
+				iommus = <&iommu M4U_PORT_VDEC_LAT_VLD_EXT>,
+					 <&iommu M4U_PORT_VDEC_LAT_VLD2_EXT>,
+					 <&iommu M4U_PORT_VDEC_LAT_AVC_MV_EXT>,
+					 <&iommu M4U_PORT_VDEC_LAT_PRED_RD_EXT>,
+					 <&iommu M4U_PORT_VDEC_LAT_TILE_EXT>,
+					 <&iommu M4U_PORT_VDEC_LAT_WDMA_EXT>;
+				clocks = <&topckgen CLK_TOP_VDEC_LAE_SEL>,
+					 <&vdecsoc CLK_VDSOC_SOC>,
+					 <&vdecsoc CLK_VDSOC_LAT>,
+					 <&vdecsoc CLK_VDSOC_LARB7>;
+				clock-names = "sel", "soc-vdec", "soc-lat", "vdec";
+				assigned-clocks = <&topckgen CLK_TOP_VDEC_LAE_SEL>;
+				assigned-clock-parents = <&topckgen CLK_TOP_VDECPLL>;
+				power-domains = <&spm MT8695_POWER_DOMAIN_VDEC>;
+			};
+
+			video-codec@25000 {
+				compatible = "mediatek,mtk-vcodec-core";
+				reg = <0 0x25000 0 0x1000>,	/* misc */
+				      <0 0x20000 0 0x5000>,	/* VLD to PP */
+				      <0 0x26000 0 0x3000>;	/* BS2, HEVC and VP9 VLDs */
+				interrupts = <GIC_SPI 212 IRQ_TYPE_LEVEL_LOW>;
+				iommus = <&iommu M4U_PORT_HW_VDEC_MC_EXT>,
+					 <&iommu M4U_PORT_HW_VDEC_UFO_EXT>,
+					 <&iommu M4U_PORT_HW_VDEC_PP_EXT>,
+					 <&iommu M4U_PORT_HW_VDEC_PRED_RD_EXT>,
+					 <&iommu M4U_PORT_HW_VDEC_PRED_WR_EXT>,
+					 <&iommu M4U_PORT_HW_VDEC_PPWRAP_EXT>,
+					 <&iommu M4U_PORT_HW_VDEC_TILE>,
+					 <&iommu M4U_PORT_HW_VDEC_VLD_EXT>,
+					 <&iommu M4U_PORT_HW_VDEC_VLD2_EXT>,
+					 <&iommu M4U_PORT_HW_VDEC_AVC_MV_EXT>,
+					 <&iommu M4U_PORT_HW_VDEC_UFO_ENC_EXT>;
+				clocks = <&topckgen CLK_TOP_VDEC_SEL>,
+					 <&vdecsoc CLK_VDSOC_SOC>,
+					 <&vdeccore CLK_VDCORE_VDEC>,
+					 <&vdeccore CLK_VDCORE_LARB1>;
+				clock-names = "sel", "soc-vdec", "vdec", "larb";
+				assigned-clocks = <&topckgen CLK_TOP_VDEC_SEL>,
+						  <&topckgen CLK_TOP_VDEC_SLOW_SEL>;
+				assigned-clock-parents = <&topckgen CLK_TOP_VDECPLL>,
+							 <&topckgen CLK_TOP_OSDPLL_D2>;
+				power-domains = <&spm MT8695_POWER_DOMAIN_VDEC>;
+			};
+		};
+
 		larb7: larb@1600e000 {
 			compatible = "mediatek,mt8695-smi-larb";
 			reg = <0 0x1600e000 0 0x1000>;
