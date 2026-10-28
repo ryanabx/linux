@@ -68,6 +68,9 @@ description: |
     MT8192: LAT + Core
     MT8188: LAT + Core
     MT8186: Core
+    MT8695: LAT + Core, with no SCP: the kernel programs the decoder's
+            registers, so the LAT and the core also map them (the VLD to
+            PP blocks).
 
 properties:
   compatible:
@@ -76,6 +79,7 @@ properties:
       - mediatek,mt8186-vcodec-dec
       - mediatek,mt8188-vcodec-dec
       - mediatek,mt8195-vcodec-dec
+      - mediatek,mt8695-vcodec-dec
 
   reg:
     minItems: 1
@@ -95,6 +99,19 @@ properties:
     description: |
       The node of system control processor (SCP), using
       the remoteproc & rpmsg framework.
+
+  mediatek,vdecsys:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description:
+      The core's clock gate block (a syscon), whose dynamic clock control
+      the kernel sets up on SoCs without an SCP.
+
+  mediatek,vdecsoc:
+    $ref: /schemas/types.yaml#/definitions/phandle
+    description:
+      The SoC side's clock gate block (a syscon), which also holds settings
+      for the LAT's and the core's memory access that the kernel writes on
+      SoCs without an SCP.
 
   "#address-cells":
     const: 2
@@ -117,8 +134,15 @@ patternProperties:
           - mediatek,mtk-vcodec-lat-soc
 
       reg:
-        maxItems: 1
-        description: VDEC_MISC register space
+        minItems: 1
+        items:
+          - description: VDEC_MISC register space
+          - description:
+              The decode blocks, VLD to PP, on SoCs where the kernel programs
+              them
+          - description:
+              The decode blocks above the core's misc space (BS2, the HEVC
+              and VP9 VLDs), on SoCs where the kernel programs them
 
       interrupts:
         maxItems: 1
@@ -139,10 +163,12 @@ patternProperties:
         maxItems: 5
 
       assigned-clocks:
-        maxItems: 1
+        minItems: 1
+        maxItems: 2
 
       assigned-clock-parents:
-        maxItems: 1
+        minItems: 1
+        maxItems: 2
 
       power-domains:
         maxItems: 1
@@ -163,7 +189,6 @@ required:
   - compatible
   - reg
   - iommus
-  - mediatek,scp
   - ranges
 
 if:
@@ -179,6 +204,21 @@ then:
     - interrupts
 
 allOf:
+  - if:
+      properties:
+        compatible:
+          contains:
+            const: mediatek,mt8695-vcodec-dec
+    then:
+      properties:
+        mediatek,scp: false
+    else:
+      required:
+        - mediatek,scp
+      properties:
+        mediatek,vdecsys: false
+        mediatek,vdecsoc: false
+
   - if:
       properties:
         compatible:
