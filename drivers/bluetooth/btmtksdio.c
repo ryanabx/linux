@@ -1650,13 +1650,39 @@ static int mt6630_probe_init(struct btmtksdio_dev *bdev)
 
 static int mt6630_setup(struct hci_dev *hdev)
 {
+	struct btmtk_hci_wmt_params wmt_params;
 	struct hci_rp_read_bd_addr *rp;
 	struct sk_buff *skb;
-	int err;
+	u8 param = 1;
+	int err, i;
+	u32 status;
 
-	err = mt6630_func_ctrl(hdev, true);
-	if (err < 0)
-		return err;
+	/*
+	 * While the WLAN function is starting its firmware, the request is
+	 * refused, and the next command times out. Retry it, as MediaTek's
+	 * driver retries its power-on.
+	 */
+	wmt_params.op = BTMTK_WMT_FUNC_CTRL;
+	wmt_params.flag = 0;
+	wmt_params.dlen = sizeof(param);
+	wmt_params.data = &param;
+	wmt_params.status = &status;
+
+	for (i = 0; i < 10; i++) {
+		err = mtk_hci_wmt_sync(hdev, &wmt_params);
+		if (err < 0)
+			return err;
+
+		if (status == BTMTK_WMT_ON_DONE)
+			break;
+		bt_dev_dbg(hdev, "Bluetooth function refused to start, retrying");
+		msleep(500);
+	}
+
+	if (status != BTMTK_WMT_ON_DONE) {
+		bt_dev_err(hdev, "Bluetooth function refused to start");
+		return -EIO;
+	}
 
 	skb = __hci_cmd_sync(hdev, HCI_OP_READ_BD_ADDR, 0, NULL,
 			     HCI_INIT_TIMEOUT);
