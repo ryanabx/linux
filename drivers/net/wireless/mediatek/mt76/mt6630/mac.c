@@ -342,7 +342,6 @@ static int mt6630_mac_fill_rx(struct mt6630_dev *dev, struct sk_buff *skb)
 		status->chains = BIT(0);
 		status->chain_signal[0] = FIELD_GET(MT_RXV3_RCPI0, rxv3) / 2 -
 					  110;
-		status->signal = status->chain_signal[0];
 	} else {
 		status->flag |= RX_FLAG_NO_SIGNAL_VAL;
 	}
