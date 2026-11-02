@@ -1260,6 +1260,11 @@ static void vdec_h264_lat_alias_frames(struct vdec_h264_lat_inst *inst,
 {
 	int i;
 
+	/* One buffer per frame (MS21): chroma is at the same offset in all */
+	if (dst->num_planes == 1) {
+		vdec_h264_lat_buf_addr(inst->ctx, dst, y, c);
+		return;
+	}
 	inst->c_off = PAGE_ALIGN(vb2_plane_size(dst, 0));
 	if (vdec_h264_lat_alias_one(inst, dst, y, c))
 		goto unaligned;
@@ -1287,14 +1292,24 @@ unaligned:
 static void vdec_h264_lat_grey_chroma(struct vdec_h264_lat_inst *inst,
 				      struct vb2_buffer *dst)
 {
-	void *c = vb2_plane_vaddr(dst, 1);
+	unsigned long size;
+	void *c;
 
+	if (dst->num_planes == 1) {
+		c = vb2_plane_vaddr(dst, 0);
+		if (c)
+			c += inst->ctx->picinfo.fb_sz[0];
+		size = inst->ctx->picinfo.fb_sz[1];
+	} else {
+		c = vb2_plane_vaddr(dst, 1);
+		size = vb2_plane_size(dst, 1);
+	}
 	if (!c || dst->vb2_queue->non_coherent_mem) {
 		dev_warn_once(&inst->ctx->dev->plat_dev->dev,
 			      "4:0:0: can't make the chroma plane grey\n");
 		return;
 	}
-	memset(c, 0x80, vb2_plane_size(dst, 1));
+	memset(c, 0x80, size);
 }
 
 /* The core's run: reconstruct the picture from the LAT's output */

@@ -49,7 +49,9 @@ static bool mtk_vdec_get_cap_fmt(struct mtk_vcodec_dec_ctx *ctx, int format_inde
 		num_frame_count++;
 	}
 
-	if (num_frame_count == 1 || (!ctx->is_10bit_bitstream && fmt->fourcc == V4L2_PIX_FMT_MM21))
+	if (num_frame_count == 1 ||
+	    (!ctx->is_10bit_bitstream &&
+	     (fmt->fourcc == V4L2_PIX_FMT_MM21 || fmt->fourcc == V4L2_PIX_FMT_MS21)))
 		return true;
 
 	q_data = &ctx->q_data[MTK_Q_DATA_SRC];
@@ -339,6 +341,10 @@ static int vidioc_try_fmt(struct mtk_vcodec_dec_ctx *ctx, struct v4l2_format *f,
 		pix_fmt_mp->num_planes = fmt->num_planes;
 		pix_fmt_mp->plane_fmt[0].sizeimage =
 				pix_fmt_mp->width * pix_fmt_mp->height;
+		/* one buffer: chroma after luma */
+		if (pix_fmt_mp->num_planes == 1)
+			pix_fmt_mp->plane_fmt[0].sizeimage =
+				pix_fmt_mp->width * pix_fmt_mp->height * 3 / 2;
 		pix_fmt_mp->plane_fmt[0].bytesperline = pix_fmt_mp->width;
 
 		if (pix_fmt_mp->num_planes == 2) {
