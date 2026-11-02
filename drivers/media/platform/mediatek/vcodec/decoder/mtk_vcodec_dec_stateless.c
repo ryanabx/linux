@@ -883,6 +883,11 @@ static void mtk_vcodec_add_formats(unsigned int fourcc,
 		mtk_video_formats[count_formats].type = MTK_FMT_FRAME;
 		mtk_video_formats[count_formats].num_planes = 2;
 		break;
+	case V4L2_PIX_FMT_MS21:
+		mtk_video_formats[count_formats].fourcc = fourcc;
+		mtk_video_formats[count_formats].type = MTK_FMT_FRAME;
+		mtk_video_formats[count_formats].num_planes = 1;
+		break;
 	default:
 		mtk_v4l2_vdec_err(ctx, "Can not add unsupported format type");
 		return;
@@ -908,6 +913,11 @@ static void mtk_vcodec_get_supported_formats(struct mtk_vcodec_dec_ctx *ctx)
 		mtk_vcodec_add_formats(V4L2_PIX_FMT_MT2110T, ctx);
 		cap_format_count++;
 		mtk_vcodec_add_formats(V4L2_PIX_FMT_MT2110R, ctx);
+		cap_format_count++;
+	}
+	/* Before MM21, which stays the default: that's the last one added */
+	if (ctx->dev->dec_capability & MTK_VDEC_FORMAT_MS21) {
+		mtk_vcodec_add_formats(V4L2_PIX_FMT_MS21, ctx);
 		cap_format_count++;
 	}
 	if (ctx->dev->dec_capability & MTK_VDEC_FORMAT_MM21) {
@@ -1057,5 +1067,6 @@ const struct mtk_vcodec_dec_pdata mtk_vdec_8695_pdata = {
 	.hold_capture_buf = true,
 	.hw_arch = MTK_VDEC_LAT_SINGLE_CORE,
 	.dec_capability = VCODEC_CAPABILITY_4K_DISABLED | MTK_VDEC_FORMAT_MM21 |
-			  MTK_VDEC_FORMAT_MPEG2_SLICE | MTK_VDEC_FORMAT_H264_SLICE,
+			  MTK_VDEC_FORMAT_MS21 | MTK_VDEC_FORMAT_MPEG2_SLICE |
+			  MTK_VDEC_FORMAT_H264_SLICE,
 };
