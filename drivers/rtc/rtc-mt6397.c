@@ -377,7 +377,7 @@ static int mtk_rtc_register_clkout(struct device *dev, struct mt6397_rtc *rtc)
 	};
 	int ret;
 
-	if (!rtc->data->con || !of_property_present(dev->of_node, "#clock-cells"))
+	if (!of_property_present(dev->of_node, "#clock-cells") || !rtc->data->con)
 		return 0;
 
 	rtc->clkout.init = &init;
