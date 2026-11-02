@@ -133,9 +133,13 @@ static int mtk_vdout_kms_init(struct mtk_vdout *vd)
 	ret = drmm_mode_config_init(drm);
 	if (ret)
 		return ret;
-	/* The OSD scaler takes smaller buffers to the screen */
-	drm->mode_config.max_width = 1920;
-	drm->mode_config.max_height = 1080;
+	/*
+	 * Framebuffers may be larger than the screen (a decoded 1080p frame
+	 * is 1088 lines); the planes check their source against the mode.
+	 * 2048 is the video planes' pitch limit.
+	 */
+	drm->mode_config.max_width = 2048;
+	drm->mode_config.max_height = 2048;
 	drm->mode_config.funcs = &mtk_vdout_mode_config_funcs;
 	drm->mode_config.helper_private = &mtk_vdout_mode_config_helpers;
 
