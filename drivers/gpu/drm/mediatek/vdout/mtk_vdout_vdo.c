@@ -172,8 +172,12 @@ static const u32 mtk_vdout_vdo_formats[] = {
 	DRM_FORMAT_NV61,
 };
 
+/* Linear, and the video decoder's block layout (16x32 luma, 16x16 chroma tiles) */
+#define VDO_MOD_BLOCK	DRM_FORMAT_MOD_MTK(MTK_FMT_MOD_TILE_16L32S)
+
 static const u64 mtk_vdout_vdo_modifiers[] = {
 	DRM_FORMAT_MOD_LINEAR,
+	VDO_MOD_BLOCK,
 	DRM_FORMAT_MOD_INVALID,
 };
 
@@ -304,6 +308,11 @@ static size_t mtk_vdout_vdo_extent(const struct drm_framebuffer *fb,
 {
 	unsigned int vsub = i ? fb->format->vsub : 1;
 
+	/* Whole rows of tiles: 32 luma lines, 16 chroma lines */
+	if (fb->modifier == VDO_MOD_BLOCK)
+		return fb->offsets[i] +
+		       (size_t)ALIGN(src->h, 32) / vsub * fb->pitches[0];
+
 	/* It reads whole pitches, and the height rounded up to 4 lines */
 	return fb->offsets[i] +
 	       (size_t)(src->y + ALIGN(src->h, 4)) / vsub * fb->pitches[0];
@@ -337,6 +346,10 @@ static int mtk_vdout_vdo_atomic_check(struct drm_plane *plane,
 
 	/* The pixel skip drops bit 0; 4:2:0 chroma starts on an even line */
 	if (src.x % 2 || src.y % fb->format->vsub)
+		return -EINVAL;
+
+	/* Blocks are read from their buffer's start (the vendor's crops by start line) */
+	if (fb->modifier == VDO_MOD_BLOCK && (src.x || src.y))
 		return -EINVAL;
 
 	/* One pitch for both planes, in 16-byte units */
@@ -455,7 +468,8 @@ static void mtk_vdout_vdo_dma_update(struct mtk_vdout_vdo *vdo,
 	writel(DIV_ROUND_UP(pitch, 16), vdo->regs + UFOD_PITCH);
 	writel(0, vdo->regs + UFOD_Y_LENGTH);
 	writel(0, vdo->regs + UFOD_C_LENGTH);
-	writel(UFOD_RASTER | UFOD_PACK_8BIT | (pitch > 1024 ? UFOD_UHD4K : 0) |
+	writel((fb->modifier == VDO_MOD_BLOCK ? 0 : UFOD_RASTER) |
+	       UFOD_PACK_8BIT | (pitch > 1024 ? UFOD_UHD4K : 0) |
 	       (yuv422 ? UFOD_YUV422 : 0), vdo->regs + UFOD_MODE);
 	writel(5, vdo->regs + UFOD_TH);
 	writel(vdo->data->ufod_ultra, vdo->regs + UFOD_ULTRA);
@@ -519,6 +533,16 @@ static const struct drm_plane_helper_funcs mtk_vdout_vdo_helper_funcs = {
 	.atomic_disable = mtk_vdout_vdo_atomic_disable,
 };
 
+static bool mtk_vdout_vdo_format_mod_supported(struct drm_plane *plane,
+					       u32 format, u64 modifier)
+{
+	/* The decoder's 4:2:0 block layout, Cb first */
+	if (modifier == VDO_MOD_BLOCK)
+		return format == DRM_FORMAT_NV12;
+
+	return modifier == DRM_FORMAT_MOD_LINEAR;
+}
+
 static const struct drm_plane_funcs mtk_vdout_vdo_funcs = {
 	.update_plane = drm_atomic_helper_update_plane,
 	.disable_plane = drm_atomic_helper_disable_plane,
@@ -526,6 +550,7 @@ static const struct drm_plane_funcs mtk_vdout_vdo_funcs = {
 	.atomic_duplicate_state = drm_atomic_helper_plane_duplicate_state,
 	.atomic_destroy_state = drm_atomic_helper_plane_destroy_state,
 	.destroy = drm_plane_cleanup,
+	.format_mod_supported = mtk_vdout_vdo_format_mod_supported,
 };
 
 /* The registers read only while the plane is powered, and kept so */
