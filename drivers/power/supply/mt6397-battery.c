@@ -838,31 +838,47 @@ static void mt6397_bat_learn_qmax(struct mt6397_battery *bat, int span)
 	power_supply_changed(bat->psy);
 }
 
-static void mt6397_bat_read_charger(struct mt6397_battery *bat)
+/*
+ * Called without bat->lock: power_supply_get_property() takes the charger's
+ * epc_sem, and ours is held whenever our get_property takes bat->lock.
+ */
+static void mt6397_bat_read_charger(struct mt6397_battery *bat, bool *online,
+				    int *status)
 {
 	union power_supply_propval val;
-	bool was_full = bat->full;
 
-	bat->charger_online = false;
-	bat->full = false;
-	bat->status = POWER_SUPPLY_STATUS_DISCHARGING;
+	*online = false;
+	*status = POWER_SUPPLY_STATUS_DISCHARGING;
 
 	if (!bat->charger)
 		return;
 
 	if (!power_supply_get_property(bat->charger, POWER_SUPPLY_PROP_ONLINE, &val))
-		bat->charger_online = val.intval;
+		*online = val.intval;
+	if (!*online)
+		return;
 
-	if (!bat->charger_online) {
+	if (!power_supply_get_property(bat->charger, POWER_SUPPLY_PROP_STATUS, &val))
+		*status = val.intval;
+	else
+		*status = POWER_SUPPLY_STATUS_CHARGING;
+}
+
+static void mt6397_bat_update_charger(struct mt6397_battery *bat, bool online,
+				      int status)
+{
+	bool was_full = bat->full;
+
+	bat->charger_online = online;
+	bat->status = status;
+	bat->full = status == POWER_SUPPLY_STATUS_FULL;
+
+	if (!bat->charger)
+		return;
+
+	if (!online) {
 		bat->reached_full = false;
 		return;
-	}
-
-	if (!power_supply_get_property(bat->charger, POWER_SUPPLY_PROP_STATUS, &val)) {
-		bat->status = val.intval;
-		bat->full = val.intval == POWER_SUPPLY_STATUS_FULL;
-	} else {
-		bat->status = POWER_SUPPLY_STATUS_CHARGING;
 	}
 
 	/*
@@ -1009,15 +1025,17 @@ static void mt6397_bat_work(struct work_struct *work)
 {
 	struct mt6397_battery *bat = container_of(to_delayed_work(work),
 						  struct mt6397_battery, work);
-	int ui_before, status_before, temp_mc, err;
+	int ui_before, status_before, temp_mc, err, status;
+	bool online;
 
 	err = thermal_zone_get_temp(bat->tz, &temp_mc);
+	mt6397_bat_read_charger(bat, &online, &status);
 
 	scoped_guard(mutex, &bat->lock) {
 		ui_before = bat->ui_soc;
 		status_before = bat->status;
 
-		mt6397_bat_read_charger(bat);
+		mt6397_bat_update_charger(bat, online, status);
 		mt6397_bat_update_temp(bat, err, temp_mc);
 		mt6397_bat_meter_run(bat);
 		mt6397_bat_calibrate(bat);
@@ -1044,11 +1062,12 @@ static void mt6397_bat_work(struct work_struct *work)
  * trust: the latched power-on OCV, the load-compensated live voltage, and what
  * the previous boot left in the RTC.
  */
-static void mt6397_bat_init_soc(struct mt6397_battery *bat)
+static void mt6397_bat_init_soc(struct mt6397_battery *bat, bool online,
+				int status)
 {
 	int hw_cap, sw_cap, cap, rtc;
 
-	mt6397_bat_read_charger(bat);
+	mt6397_bat_update_charger(bat, online, status);
 
 	if (mt6397_bat_read_vi(bat)) {
 		bat->vbat_mv = 3800;
@@ -1389,7 +1408,8 @@ static int mt6397_battery_probe(struct platform_device *pdev)
 	struct device *dev = &pdev->dev;
 	struct mt6397_chip *chip = dev_get_drvdata(dev->parent);
 	struct mt6397_battery *bat;
-	int ret, err, temp_mc;
+	int ret, err, temp_mc, status;
+	bool online;
 
 	bat = devm_kzalloc(dev, sizeof(*bat), GFP_KERNEL);
 	if (!bat)
@@ -1466,10 +1486,11 @@ static int mt6397_battery_probe(struct platform_device *pdev)
 		return ret;
 
 	err = thermal_zone_get_temp(bat->tz, &temp_mc);
+	mt6397_bat_read_charger(bat, &online, &status);
 
 	scoped_guard(mutex, &bat->lock) {
 		mt6397_bat_update_temp(bat, err, temp_mc);
-		mt6397_bat_init_soc(bat);
+		mt6397_bat_init_soc(bat, online, status);
 	}
 
 	platform_set_drvdata(pdev, bat);
