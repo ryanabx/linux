@@ -60,6 +60,7 @@ extern const struct vdec_common_if vdec_vp8_if;
 extern const struct vdec_common_if vdec_vp8_slice_if;
 extern const struct vdec_common_if vdec_vp9_if;
 extern const struct vdec_common_if vdec_vp9_slice_lat_if;
+extern const struct vdec_common_if vdec_vp9_slice_nofw_if;
 extern const struct vdec_common_if vdec_hevc_slice_multi_if;
 extern const struct vdec_common_if vdec_av1_slice_lat_if;
 extern const struct vdec_common_if vdec_mpeg2_slice_if;
