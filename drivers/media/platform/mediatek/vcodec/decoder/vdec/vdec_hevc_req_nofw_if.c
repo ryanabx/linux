@@ -21,8 +21,10 @@
  * compression.
  */
 
+#include <linux/delay.h>
 #include <linux/dma-mapping.h>
 #include <linux/iopoll.h>
+#include <linux/moduleparam.h>
 #include <linux/regmap.h>
 #include <linux/slab.h>
 #include <media/v4l2-mem2mem.h>
@@ -42,6 +44,38 @@
 #define HEVC_ERR_MAP_SIZE		0x11000
 #define HEVC_SLICE_HDR2_OFFSET		0x21c00
 #define HEVC_MAX_MV_NUM			32
+
+/*
+ * DEBUG: 1 = UFO on, as the vendor, into a scratch frame in the vendor's
+ * layout (1920 pitch); 2 = the same scratch frame without UFO. hevc_dbg_bus
+ * overrides the core bus word when nonzero.
+ */
+static int hevc_dbg_ufo;
+module_param(hevc_dbg_ufo, int, 0644);
+static uint hevc_dbg_bus;
+module_param(hevc_dbg_bus, uint, 0644);
+/* DEBUG: 1 = the core decodes the bitstream itself, without the LAT's output */
+static int hevc_dbg_single;
+module_param(hevc_dbg_single, int, 0644);
+#define HEVC_DBG_BS_SIZE		SZ_1M
+/* DEBUG: offset, value pairs written to the core's PP and MC before its trigger */
+static uint hevc_dbg_pp[16];
+static int hevc_dbg_pp_n;
+module_param_array(hevc_dbg_pp, uint, &hevc_dbg_pp_n, 0644);
+static uint hevc_dbg_mc[16];
+static int hevc_dbg_mc_n;
+module_param_array(hevc_dbg_mc, uint, &hevc_dbg_mc_n, 0644);
+/*
+ * DEBUG: block, offset, value triples written last before the core's trigger;
+ * blocks 0 vld, 1 vld_top, 2 mc, 3 mv, 4 pp, 5 misc, 6 hevc, 7 sys
+ */
+static uint hevc_dbg_poke[30];
+static int hevc_dbg_poke_n;
+module_param_array(hevc_dbg_poke, uint, &hevc_dbg_poke_n, 0644);
+#define HEVC_DBG_FB_SIZE		0x302000
+#define HEVC_DBG_C_OFF			0x1fe000
+#define HEVC_DBG_YLEN_OFF		0x2fd000
+#define HEVC_DBG_CLEN_OFF		0x2ff080
 
 /* VLD and VLD_TOP, as for H.264 */
 #define VLD_CMD				0x08c
@@ -107,6 +141,7 @@
 #define PP_16				0x040
 #define PP_SQT				0x630
 #define PP_TAIL				0xb80
+#define PP_UFO				0xc90
 
 #define MC_WIDTH			0x208
 #define MC_HEIGHT			0x20c
@@ -122,6 +157,10 @@
 #define MC_REF_Y_L1(i)			(4 * (311 + (i)))
 #define MC_PITCH2			0x980
 #define MC_UFO				0xa60
+#define MC_UFO_Y_LEN			0xae8
+#define MC_UFO_C_LEN			0xaec
+#define MC_UFO_Y_OFF			0xce4
+#define MC_UFO_C_OFF			0xce8
 #define MC_2D7				0xb5c
 #define MC_REF_C_L0(i)			(4 * (760 + (i)))
 #define MC_REF_C_L1(i)			(4 * (792 + (i)))
@@ -140,6 +179,11 @@
 #define SYS_08				0x008
 #define SOCUFO_03			0x80c
 #define SOCUFO_14			0x838
+#define SOCUFO_Y_LEN			0x87c
+#define SOCUFO_C_LEN			0x880
+#define SOCUFO_Y			0x884
+#define SOCUFO_C			0x888
+#define SOCUFO_CFG			0x88c
 #define LAT_WDMA			0x1200
 #define  WDMA_07			(LAT_WDMA + 0x1c)
 #define  WDMA_RST			(LAT_WDMA + 0x2c)
@@ -211,6 +255,11 @@ struct vdec_hevc_nofw_inst {
 	bool realloc_mv_buf;
 	/* Larger error maps than the message queue's, one per LAT buffer */
 	struct mtk_vcodec_mem err_map[NUM_BUFFER_COUNT];
+	struct mtk_vcodec_mem dbg_fb;
+	/* DEBUG: the bit reader's half, and the bitstream copy for hevc_dbg_single */
+	struct vdec_hevc_nofw_hw *bsr;
+	struct mtk_vcodec_mem dbg_bs;
+	u32 dbg_bs_size;
 };
 
 static void vdec_hevc_nofw_soc_write(struct mtk_vcodec_dec_dev *dev, u32 off, u32 val)
@@ -247,15 +296,15 @@ static void vdec_hevc_nofw_reset(struct vdec_hevc_nofw_inst *inst,
 		readl_poll_timeout(inst->sys + WDMA_RST_DONE, val, val & BIT(0),
 				   1, 1000);
 	} else {
-		vdec_hevc_nofw_soc_write(dev, VDECSOC_CORE_BUS, 0x40004);
+		vdec_hevc_nofw_soc_write(dev, VDECSOC_CORE_BUS, hevc_dbg_bus ?:
+					 hevc_dbg_ufo == 1 ? 0x40000000 : 0x40004);
 	}
 	writel(0, hw->misc + MISC_SRST);
 	writel(0x101, hw->vld + VLD_SRST);
 	writel(1, hw->misc + MISC_DCM_CON);
 	writel(0, hw->misc + MISC_SPEC_CON);
-	/* The bits VP9's path without UFO sets, as an experiment */
-	writel(0x40000000, hw->misc + MISC_FUNC_CON);
-	writel(0x40, hw->misc + MISC_178);
+	writel(0, hw->misc + MISC_FUNC_CON);
+	writel(0, hw->misc + MISC_178);
 	writel(MISC_SYS_SEL_HEVC, hw->misc + MISC_SYS_SEL);
 	if (!hw->lat)
 		vdec_hevc_nofw_soc_write(dev, VDECSOC_04, 2);
@@ -299,7 +348,7 @@ static int vdec_hevc_nofw_start_bitstream(struct vdec_hevc_nofw_inst *inst,
 /* The LAT's bit reader */
 static u32 vdec_hevc_nofw_peek(struct vdec_hevc_nofw_inst *inst)
 {
-	return readl(inst->lat.hevc + HEVC_SHIFT(0));
+	return readl(inst->bsr->hevc + HEVC_SHIFT(0));
 }
 
 static u32 vdec_hevc_nofw_bits(struct vdec_hevc_nofw_inst *inst, unsigned int n)
@@ -308,18 +357,18 @@ static u32 vdec_hevc_nofw_bits(struct vdec_hevc_nofw_inst *inst, unsigned int n)
 
 	if (!n)
 		return 0;
-	readl(inst->lat.hevc + HEVC_SHIFT(n));
+	readl(inst->bsr->hevc + HEVC_SHIFT(n));
 	return val >> (32 - n);
 }
 
 static u32 vdec_hevc_nofw_ue(struct vdec_hevc_nofw_inst *inst)
 {
-	return readl(inst->lat.hevc + HEVC_UE);
+	return readl(inst->bsr->hevc + HEVC_UE);
 }
 
 static s32 vdec_hevc_nofw_se(struct vdec_hevc_nofw_inst *inst)
 {
-	return (s32)readl(inst->lat.hevc + HEVC_SE);
+	return (s32)readl(inst->bsr->hevc + HEVC_SE);
 }
 
 static void vdec_hevc_nofw_skip(struct vdec_hevc_nofw_inst *inst, u32 bits)
@@ -337,8 +386,8 @@ static int vdec_hevc_nofw_subparse(struct vdec_hevc_nofw_inst *inst, u32 what)
 {
 	u32 val;
 
-	writel(what, inst->lat.hevc + HEVC_SUBPARSE);
-	return readl_poll_timeout(inst->lat.hevc + HEVC_SUBPARSE, val, !val, 1, 10000);
+	writel(what, inst->bsr->hevc + HEVC_SUBPARSE);
+	return readl_poll_timeout(inst->bsr->hevc + HEVC_SUBPARSE, val, !val, 1, 10000);
 }
 
 /* The start code and the NAL header of the picture's first slice */
@@ -409,7 +458,7 @@ static int vdec_hevc_nofw_parse_shdr(struct vdec_hevc_nofw_inst *inst,
 	const struct v4l2_ctrl_hevc_pps *pps = &sh->pps;
 	const struct v4l2_ctrl_hevc_decode_params *dec = &sh->dec;
 	struct vdec_hevc_nofw_shdr *s = &sh->shdr;
-	struct vdec_hevc_nofw_hw *hw = &inst->lat;
+	struct vdec_hevc_nofw_hw *hw = inst->bsr;
 	u32 wc = vdec_hevc_nofw_ctbs(sps->pic_width_in_luma_samples, sps);
 	u32 hc = vdec_hevc_nofw_ctbs(sps->pic_height_in_luma_samples, sps);
 	u32 poc_bits = sps->log2_max_pic_order_cnt_lsb_minus4 + 4;
@@ -724,6 +773,124 @@ static void vdec_hevc_nofw_set_pic_words(struct vdec_hevc_nofw_hw *hw,
 }
 
 /* The LAT's run: the slice header, then all the picture's slice data */
+/* DEBUG: the vendor's last value of each LAT register for POC_A picture 0 */
+static const struct { u8 blk; u16 off; u32 val; } hevc_dbg_lat_regs[] = {
+	{ 3, 0xf4, 0x0 },
+	{ 3, 0xec, 0x1 },
+	{ 3, 0xc8, 0x0 },
+	{ 3, 0xcc, 0x0 },
+	{ 3, 0x178, 0x0 },
+	{ 3, 0x84, 0x2 },
+	{ 4, 0x84, 0x1 },
+	{ 0, 0xec, 0x10000000 },
+	{ 0, 0xb4, 0x798000 },
+	{ 0, 0xb8, 0x798112 },
+	{ 0, 0xb0, 0x1e600046 },
+	{ 0, 0x110, 0x1e604480 },
+	{ 5, 0x3c, 0x1dfe0000 },
+	{ 5, 0x1c, 0x3 },
+	{ 5, 0x50, 0x22000000 },
+	{ 5, 0x44, 0x22400000 },
+	{ 5, 0x40, 0x22000000 },
+	{ 5, 0x34, 0x22000000 },
+	{ 5, 0x80, 0x1e5c0000 },
+	{ 5, 0x84, 0x1e5e1c00 },
+	{ 1, 0x230, 0x1 },
+	{ 4, 0xbc, 0xa0500000 },
+	{ 4, 0xe0, 0xfffefffb },
+	{ 4, 0xd4, 0x4011d01 },
+	{ 4, 0xc0, 0x1a20 },
+	{ 4, 0xc4, 0x80000ff },
+	{ 4, 0xc8, 0x0 },
+	{ 4, 0xcc, 0x0 },
+	{ 4, 0xf4, 0xffff1315 },
+	{ 1, 0x68, 0x30006 },
+	{ 1, 0x70, 0xf001a0 },
+	{ 1, 0x94, 0x40007 },
+	{ 4, 0xa0, 0x7721 },
+	{ 4, 0xa4, 0x1104 },
+	{ 4, 0xa8, 0x575263 },
+	{ 4, 0xac, 0x2000000 },
+	{ 4, 0xb0, 0x1a60 },
+	{ 4, 0xb4, 0x1000000 },
+	{ 4, 0xb8, 0x0 },
+	{ 4, 0x140, 0x40 },
+	{ 4, 0x144, 0x0 },
+	{ 4, 0x148, 0x0 },
+	{ 4, 0x14c, 0x0 },
+	{ 4, 0x150, 0x0 },
+	{ 4, 0x154, 0x0 },
+	{ 4, 0x158, 0x0 },
+	{ 4, 0x15c, 0x0 },
+	{ 4, 0x160, 0x0 },
+	{ 4, 0x164, 0x0 },
+	{ 4, 0x168, 0x0 },
+	{ 4, 0x16c, 0x0 },
+	{ 4, 0x170, 0x0 },
+	{ 4, 0x174, 0x0 },
+	{ 4, 0x178, 0x0 },
+	{ 4, 0x17c, 0x0 },
+	{ 4, 0x1d0, 0x0 },
+	{ 4, 0x180, 0x8 },
+	{ 4, 0x184, 0x0 },
+	{ 4, 0x188, 0x0 },
+	{ 4, 0x18c, 0x0 },
+	{ 4, 0x190, 0x0 },
+	{ 4, 0x194, 0x0 },
+	{ 4, 0x198, 0x0 },
+	{ 4, 0x19c, 0x0 },
+	{ 4, 0x1a0, 0x0 },
+	{ 4, 0x1a4, 0x0 },
+	{ 4, 0x1a8, 0x0 },
+	{ 4, 0x1ac, 0x0 },
+	{ 4, 0x1b0, 0x0 },
+	{ 4, 0x1b4, 0x0 },
+	{ 4, 0x1b8, 0x0 },
+	{ 4, 0x1bc, 0x0 },
+	{ 4, 0x1ec, 0x0 },
+};
+
+static void vdec_hevc_nofw_dbg_lat_dump(struct vdec_hevc_nofw_inst *inst)
+{
+	static const char * const name[] = { "vld", "vld_top", "mv", "misc", "hevc", "wdma" };
+	struct vdec_hevc_nofw_hw *hw = &inst->lat;
+	void __iomem *base[] = { hw->vld, hw->vld_top, hw->mv, hw->misc, hw->hevc,
+				 inst->sys + LAT_WDMA };
+	int i, n = 0;
+
+	for (i = 0; i < ARRAY_SIZE(hevc_dbg_lat_regs); i++) {
+		u32 v = readl(base[hevc_dbg_lat_regs[i].blk] + hevc_dbg_lat_regs[i].off);
+
+		if (v == hevc_dbg_lat_regs[i].val)
+			continue;
+		n++;
+		dev_info(&inst->ctx->dev->plat_dev->dev, "LDUMP %s+0x%03x vendor 0x%08x ours 0x%08x\n",
+			 name[hevc_dbg_lat_regs[i].blk], hevc_dbg_lat_regs[i].off,
+			 hevc_dbg_lat_regs[i].val, v);
+	}
+	dev_info(&inst->ctx->dev->plat_dev->dev, "LDUMP %d of %zu differ\n", n,
+		 ARRAY_SIZE(hevc_dbg_lat_regs));
+}
+
+/* DEBUG: how much of a buffer is nonzero */
+static void vdec_hevc_nofw_dbg_extent(struct vdec_hevc_nofw_inst *inst, const char *what,
+				      const void *va, size_t size)
+{
+	const u32 *w = va;
+	size_t i, n = 0, first = size, last = 0;
+
+	for (i = 0; i < size / 4; i++) {
+		if (!w[i])
+			continue;
+		n++;
+		first = min(first, i * 4);
+		last = i * 4;
+	}
+	dev_info(&inst->ctx->dev->plat_dev->dev,
+		 "EXTENT %s: %zu nonzero words, 0x%zx..0x%zx of 0x%zx\n",
+		 what, n, first, last, size);
+}
+
 static int vdec_hevc_nofw_lat_run(struct vdec_hevc_nofw_inst *inst,
 				  struct vdec_hevc_nofw_share *sh,
 				  struct mtk_vcodec_mem *bs, size_t capacity,
@@ -737,6 +904,17 @@ static int vdec_hevc_nofw_lat_run(struct vdec_hevc_nofw_inst *inst,
 	u32 ube = q->wdma_addr.dma_addr;
 	int ret;
 
+	if (hevc_dbg_single && !inst->dbg_bs.va) {
+		inst->dbg_bs.size = HEVC_DBG_BS_SIZE;
+		ret = mtk_vcodec_mem_alloc(ctx, &inst->dbg_bs);
+		if (ret)
+			return ret;
+	}
+	if (hevc_dbg_single && bs->size + 1024 <= HEVC_DBG_BS_SIZE) {
+		memcpy(inst->dbg_bs.va, bs->va, bs->size);
+		memset(inst->dbg_bs.va + bs->size, 0, 1024);
+		inst->dbg_bs_size = bs->size;
+	}
 	vdec_hevc_nofw_reset(inst, hw);
 	ret = vdec_hevc_nofw_start_bitstream(inst, hw, start, end, start, end);
 	if (ret)
@@ -768,10 +946,31 @@ static int vdec_hevc_nofw_lat_run(struct vdec_hevc_nofw_inst *inst,
 	writel(0xfffefffb, hw->hevc + HEVC_0E0);
 	writel(0x04011d01, hw->hevc + HEVC_0D4);
 	vdec_hevc_nofw_set_pic_words(hw, sh);
+	if (!ctx->decoded_frame_cnt) {
+		int i;
+
+		vdec_hevc_nofw_dbg_lat_dump(inst);
+		for (i = 0; i < NUM_BUFFER_COUNT; i++)
+			if (inst->err_map[i].dma_addr == sh->err_map)
+				vdec_hevc_nofw_dbg_extent(inst, "errmap before", inst->err_map[i].va,
+							  inst->err_map[i].size);
+		vdec_hevc_nofw_dbg_extent(inst, "slicehdr before", lat_buf->slice_bc_addr.va,
+					  lat_buf->slice_bc_addr.size);
+	}
 	writel(1, hw->hevc + HEVC_DECODE);
 
 	ret = mtk_vcodec_wait_for_done_ctx(ctx, MTK_INST_IRQ_RECEIVED,
 					   HEVC_DEC_TIMEOUT_MS, MTK_VDEC_LAT0);
+	{
+		u32 w9 = readl(inst->sys + LAT_WDMA + 0x24);
+		u32 off0 = readl(inst->sys + WDMA_UBE_OFFSET);
+
+		udelay(1000);
+		dev_info(&ctx->dev->plat_dev->dev,
+			 "DEBUG lat %d: wdma9 0x%08x then 0x%08x, offset 0x%x then 0x%x\n",
+			 ctx->decoded_frame_cnt, w9, readl(inst->sys + LAT_WDMA + 0x24), off0,
+			 readl(inst->sys + WDMA_UBE_OFFSET));
+	}
 	vdec_hevc_nofw_soc_write(ctx->dev, VDECSOC_LAT_BUS, 0);
 	writel(0, hw->misc + MISC_SRST);
 	if (ret) {
@@ -783,6 +982,29 @@ static int vdec_hevc_nofw_lat_run(struct vdec_hevc_nofw_inst *inst,
 	sh->trans_start = q->wdma_wptr_addr;
 	sh->trans_end = ube + readl(inst->sys + WDMA_UBE_OFFSET);
 	vdec_msg_queue_update_ube_wptr(q, sh->trans_end);
+	if (ctx->decoded_frame_cnt < 2) {
+		u8 *u = q->wdma_addr.va + (sh->trans_end - ube);
+		int i;
+
+		print_hex_dump(KERN_INFO, "ube-start ", DUMP_PREFIX_OFFSET, 16, 4,
+			       q->wdma_addr.va + (sh->trans_start - ube), 64, false);
+		print_hex_dump(KERN_INFO, "ube-end ", DUMP_PREFIX_OFFSET, 16, 4, u - 48, 96, false);
+		for (i = 0; i < NUM_BUFFER_COUNT; i++)
+			if (inst->err_map[i].dma_addr == sh->err_map) {
+				dev_info(&ctx->dev->plat_dev->dev, "DEBUG errmap %d of lat_buf %p\n",
+					 i, lat_buf);
+				vdec_hevc_nofw_dbg_extent(inst, "errmap", inst->err_map[i].va,
+							  inst->err_map[i].size);
+			}
+		vdec_hevc_nofw_dbg_extent(inst, "slicehdr", lat_buf->slice_bc_addr.va,
+					  HEVC_SLICE_HDR2_OFFSET);
+		vdec_hevc_nofw_dbg_extent(inst, "slicehdr2",
+					  lat_buf->slice_bc_addr.va + HEVC_SLICE_HDR2_OFFSET,
+					  lat_buf->slice_bc_addr.size - HEVC_SLICE_HDR2_OFFSET);
+		vdec_hevc_nofw_dbg_extent(inst, "ube", q->wdma_addr.va, 0x20000);
+		print_hex_dump(KERN_INFO, "slicehdr2 ", DUMP_PREFIX_OFFSET, 16, 4,
+			       lat_buf->slice_bc_addr.va + HEVC_SLICE_HDR2_OFFSET, 64, false);
+	}
 	dev_info(&ctx->dev->plat_dev->dev,
 		 "DEBUG lat %d: nut %u type %u last ctb 0x%08x ube 0x%llx..0x%llx err 0x%08x 0x%08x\n",
 		 ctx->decoded_frame_cnt, sh->shdr.nut, sh->shdr.slice_type,
@@ -794,6 +1016,13 @@ static int vdec_hevc_nofw_lat_run(struct vdec_hevc_nofw_inst *inst,
 static void vdec_hevc_nofw_buf_addr(struct mtk_vcodec_dec_ctx *ctx,
 				    struct vb2_buffer *vb, dma_addr_t *y, dma_addr_t *c)
 {
+	struct vdec_hevc_nofw_inst *inst = ctx->drv_handle;
+
+	if (hevc_dbg_ufo && inst->dbg_fb.va) {
+		*y = inst->dbg_fb.dma_addr;
+		*c = *y + HEVC_DBG_C_OFF;
+		return;
+	}
 	*y = vb2_dma_contig_plane_dma_addr(vb, 0);
 	if (ctx->q_data[MTK_Q_DATA_DST].fmt->num_planes == 2)
 		*c = vb2_dma_contig_plane_dma_addr(vb, 1);
@@ -935,6 +1164,268 @@ static void vdec_hevc_nofw_set_lists(struct vdec_hevc_nofw_inst *inst,
 	}
 }
 
+/* DEBUG: the vendor's last value of each core register for POC_A picture 0 */
+static const struct { u8 blk; u16 off; u32 val; } hevc_dbg_regs[] = {
+	{ 5, 0xf4, 0x0 },
+	{ 5, 0xec, 0x1 },
+	{ 5, 0xc8, 0x0 },
+	{ 5, 0xcc, 0x0 },
+	{ 5, 0x178, 0x0 },
+	{ 5, 0x84, 0x2 },
+	{ 6, 0x84, 0x1 },
+	{ 0, 0xec, 0x10000000 },
+	{ 0, 0xb4, 0x880000 },
+	{ 0, 0xb8, 0x890000 },
+	{ 0, 0xb0, 0x22000000 },
+	{ 0, 0x110, 0x220054c0 },
+	{ 6, 0xbc, 0xa0500000 },
+	{ 2, 0xa60, 0x11 },
+	{ 7, 0x8c, 0x11301 },
+	{ 2, 0xae8, 0x226fd000 },
+	{ 2, 0xaec, 0x226ff080 },
+	{ 7, 0x7c, 0x226fd000 },
+	{ 7, 0x80, 0x226ff080 },
+	{ 7, 0x84, 0x112000 },
+	{ 7, 0x88, 0x225fe0 },
+	{ 2, 0xce4, 0x2fd000 },
+	{ 2, 0xce8, 0x101080 },
+	{ 4, 0xc90, 0x3 },
+	{ 2, 0x4dc, 0x22400000 },
+	{ 2, 0x45c, 0x22400000 },
+	{ 2, 0xbe0, 0x225fe000 },
+	{ 2, 0xc60, 0x225fe000 },
+	{ 3, 0x0, 0x1e78000 },
+	{ 3, 0x40, 0x1e78000 },
+	{ 2, 0x4e0, 0x22400000 },
+	{ 2, 0x460, 0x22400000 },
+	{ 2, 0xbe4, 0x225fe000 },
+	{ 2, 0xc64, 0x225fe000 },
+	{ 3, 0x4, 0x1e78000 },
+	{ 3, 0x44, 0x1e78000 },
+	{ 2, 0x4e4, 0x22400000 },
+	{ 2, 0x464, 0x22400000 },
+	{ 2, 0xbe8, 0x225fe000 },
+	{ 2, 0xc68, 0x225fe000 },
+	{ 3, 0x8, 0x1e78000 },
+	{ 3, 0x48, 0x1e78000 },
+	{ 2, 0x4e8, 0x22400000 },
+	{ 2, 0x468, 0x22400000 },
+	{ 2, 0xbec, 0x225fe000 },
+	{ 2, 0xc6c, 0x225fe000 },
+	{ 3, 0xc, 0x1e78000 },
+	{ 3, 0x4c, 0x1e78000 },
+	{ 2, 0x4ec, 0x22400000 },
+	{ 2, 0x46c, 0x22400000 },
+	{ 2, 0xbf0, 0x225fe000 },
+	{ 2, 0xc70, 0x225fe000 },
+	{ 3, 0x10, 0x1e78000 },
+	{ 3, 0x50, 0x1e78000 },
+	{ 2, 0x4f0, 0x22400000 },
+	{ 2, 0x470, 0x22400000 },
+	{ 2, 0xbf4, 0x225fe000 },
+	{ 2, 0xc74, 0x225fe000 },
+	{ 3, 0x14, 0x1e78000 },
+	{ 3, 0x54, 0x1e78000 },
+	{ 2, 0x4f4, 0x22400000 },
+	{ 2, 0x474, 0x22400000 },
+	{ 2, 0xbf8, 0x225fe000 },
+	{ 2, 0xc78, 0x225fe000 },
+	{ 3, 0x18, 0x1e78000 },
+	{ 3, 0x58, 0x1e78000 },
+	{ 2, 0x4f8, 0x22400000 },
+	{ 2, 0x478, 0x22400000 },
+	{ 2, 0xbfc, 0x225fe000 },
+	{ 2, 0xc7c, 0x225fe000 },
+	{ 3, 0x1c, 0x1e78000 },
+	{ 3, 0x5c, 0x1e78000 },
+	{ 2, 0x4fc, 0x22400000 },
+	{ 2, 0x47c, 0x22400000 },
+	{ 2, 0xc00, 0x225fe000 },
+	{ 2, 0xc80, 0x225fe000 },
+	{ 3, 0x20, 0x1e78000 },
+	{ 3, 0x60, 0x1e78000 },
+	{ 2, 0x500, 0x22400000 },
+	{ 2, 0x480, 0x22400000 },
+	{ 2, 0xc04, 0x225fe000 },
+	{ 2, 0xc84, 0x225fe000 },
+	{ 3, 0x24, 0x1e78000 },
+	{ 3, 0x64, 0x1e78000 },
+	{ 2, 0x504, 0x22400000 },
+	{ 2, 0x484, 0x22400000 },
+	{ 2, 0xc08, 0x225fe000 },
+	{ 2, 0xc88, 0x225fe000 },
+	{ 3, 0x28, 0x1e78000 },
+	{ 3, 0x68, 0x1e78000 },
+	{ 2, 0x508, 0x22400000 },
+	{ 2, 0x488, 0x22400000 },
+	{ 2, 0xc0c, 0x225fe000 },
+	{ 2, 0xc8c, 0x225fe000 },
+	{ 3, 0x2c, 0x1e78000 },
+	{ 3, 0x6c, 0x1e78000 },
+	{ 2, 0x50c, 0x22400000 },
+	{ 2, 0x48c, 0x22400000 },
+	{ 2, 0xc10, 0x225fe000 },
+	{ 2, 0xc90, 0x225fe000 },
+	{ 3, 0x30, 0x1e78000 },
+	{ 3, 0x70, 0x1e78000 },
+	{ 2, 0x510, 0x22400000 },
+	{ 2, 0x490, 0x22400000 },
+	{ 2, 0xc14, 0x225fe000 },
+	{ 2, 0xc94, 0x225fe000 },
+	{ 3, 0x34, 0x1e78000 },
+	{ 3, 0x74, 0x1e78000 },
+	{ 2, 0x514, 0x22400000 },
+	{ 2, 0x494, 0x22400000 },
+	{ 2, 0xc18, 0x225fe000 },
+	{ 2, 0xc98, 0x225fe000 },
+	{ 3, 0x38, 0x1e78000 },
+	{ 3, 0x78, 0x1e78000 },
+	{ 2, 0x518, 0x22400000 },
+	{ 2, 0x498, 0x22400000 },
+	{ 2, 0xc1c, 0x225fe000 },
+	{ 2, 0xc9c, 0x225fe000 },
+	{ 3, 0x3c, 0x1e78000 },
+	{ 3, 0x7c, 0x1e78000 },
+	{ 6, 0xe0, 0xfffefffb },
+	{ 6, 0xd4, 0x4011d01 },
+	{ 4, 0x40, 0xf011 },
+	{ 3, 0x210, 0x0 },
+	{ 3, 0x320, 0x0 },
+	{ 3, 0x20c, 0x1e78000 },
+	{ 2, 0xb5c, 0x1 },
+	{ 2, 0x208, 0x1a0 },
+	{ 2, 0x20c, 0xf0 },
+	{ 2, 0x980, 0x78 },
+	{ 2, 0x220, 0x1 },
+	{ 2, 0x224, 0x112000 },
+	{ 2, 0x228, 0x225fe0 },
+	{ 2, 0x22c, 0x78 },
+	{ 2, 0x238, 0x3 },
+	{ 2, 0x250, 0x1 },
+	{ 2, 0x260, 0x1b },
+	{ 2, 0x264, 0xf },
+	{ 4, 0x630, 0x0 },
+	{ 6, 0xc0, 0x1a20 },
+	{ 6, 0xc4, 0x80000ff },
+	{ 6, 0xc8, 0x0 },
+	{ 6, 0xcc, 0x0 },
+	{ 6, 0xf4, 0xffff1315 },
+	{ 1, 0x68, 0x30006 },
+	{ 1, 0x70, 0xf001a0 },
+	{ 1, 0x94, 0x40007 },
+	{ 6, 0xa0, 0x7721 },
+	{ 6, 0xa4, 0x1104 },
+	{ 6, 0xa8, 0x575263 },
+	{ 6, 0xac, 0x2000000 },
+	{ 6, 0xb0, 0x1a60 },
+	{ 6, 0xb4, 0x1000000 },
+	{ 6, 0xb8, 0x0 },
+	{ 6, 0x140, 0x40 },
+	{ 6, 0x144, 0x0 },
+	{ 6, 0x148, 0x0 },
+	{ 6, 0x14c, 0x0 },
+	{ 6, 0x150, 0x0 },
+	{ 6, 0x154, 0x0 },
+	{ 6, 0x158, 0x0 },
+	{ 6, 0x15c, 0x0 },
+	{ 6, 0x160, 0x0 },
+	{ 6, 0x164, 0x0 },
+	{ 6, 0x168, 0x0 },
+	{ 6, 0x16c, 0x0 },
+	{ 6, 0x170, 0x0 },
+	{ 6, 0x174, 0x0 },
+	{ 6, 0x178, 0x0 },
+	{ 6, 0x17c, 0x0 },
+	{ 6, 0x1d0, 0x0 },
+	{ 6, 0x180, 0x8 },
+	{ 6, 0x184, 0x0 },
+	{ 6, 0x188, 0x0 },
+	{ 6, 0x18c, 0x0 },
+	{ 6, 0x190, 0x0 },
+	{ 6, 0x194, 0x0 },
+	{ 6, 0x198, 0x0 },
+	{ 6, 0x19c, 0x0 },
+	{ 6, 0x1a0, 0x0 },
+	{ 6, 0x1a4, 0x0 },
+	{ 6, 0x1a8, 0x0 },
+	{ 6, 0x1ac, 0x0 },
+	{ 6, 0x1b0, 0x0 },
+	{ 6, 0x1b4, 0x0 },
+	{ 6, 0x1b8, 0x0 },
+	{ 6, 0x1bc, 0x0 },
+	{ 6, 0x1ec, 0x0 },
+	{ 1, 0x234, 0x1 },
+	{ 1, 0x23c, 0x1dfe0000 },
+	{ 1, 0x240, 0x1e5c0000 },
+	{ 1, 0x230, 0x2 },
+	{ 7, 0xc, 0x0 },
+	{ 4, 0xb80, 0x808010 },
+	{ 7, 0x38, 0x2 },
+};
+
+static void vdec_hevc_nofw_dbg_dump(struct vdec_hevc_nofw_inst *inst)
+{
+	static const char * const name[] = { "vld", "vld_top", "mc", "mv", "pp", "misc", "hevc", "socufo" };
+	struct vdec_hevc_nofw_hw *hw = &inst->core;
+	void __iomem *base[] = { hw->vld, hw->vld_top, hw->mc, hw->mv, hw->pp,
+				 hw->misc, hw->hevc, inst->sys + 0x800 };
+	int i, n = 0;
+
+	for (i = 0; i < ARRAY_SIZE(hevc_dbg_regs); i++) {
+		u32 v = readl(base[hevc_dbg_regs[i].blk] + hevc_dbg_regs[i].off);
+
+		if (v == hevc_dbg_regs[i].val)
+			continue;
+		n++;
+		dev_info(&inst->ctx->dev->plat_dev->dev, "DUMP %s+0x%03x vendor 0x%08x ours 0x%08x\n",
+			 name[hevc_dbg_regs[i].blk], hevc_dbg_regs[i].off,
+			 hevc_dbg_regs[i].val, v);
+	}
+	dev_info(&inst->ctx->dev->plat_dev->dev, "DUMP %d of %zu differ\n", n,
+		 ARRAY_SIZE(hevc_dbg_regs));
+}
+
+/* DEBUG: the core ranges the vendor's H265_HAL_DumpReg reads */
+#define HEVC_DBG_SNAP_WORDS	3200
+static const struct { u8 blk; u16 start, end; } hevc_dbg_ranges[] = {
+	{ 0, 0x084, 0x400 }, { 1, 0x000, 0x25c }, { 6, 0x084, 0x400 },
+	{ 5, 0x000, 0x234 }, { 3, 0x000, 0x3fc }, { 2, 0x000, 0x1000 },
+	{ 4, 0x000, 0x1000 },
+};
+
+static void vdec_hevc_nofw_dbg_snap(struct vdec_hevc_nofw_inst *inst, u32 *snap)
+{
+	static const char * const name[] = { "vld", "vld_top", "mc", "mv", "pp", "misc", "hevc" };
+	struct vdec_hevc_nofw_hw *hw = &inst->core;
+	void __iomem *base[] = { hw->vld, hw->vld_top, hw->mc, hw->mv, hw->pp,
+				 hw->misc, hw->hevc };
+	int i, n = 0, changed = 0;
+	u32 off;
+
+	for (i = 0; i < ARRAY_SIZE(hevc_dbg_ranges); i++) {
+		for (off = hevc_dbg_ranges[i].start; off < hevc_dbg_ranges[i].end; off += 4) {
+			u32 v;
+
+			if (hevc_dbg_ranges[i].blk == 6 && (off == 0x098 || off == 0x09c))
+				continue;
+			if (n >= HEVC_DBG_SNAP_WORDS)
+				break;
+			v = readl(base[hevc_dbg_ranges[i].blk] + off);
+			if (snap[HEVC_DBG_SNAP_WORDS] && v != snap[n]) {
+				changed++;
+				dev_info(&inst->ctx->dev->plat_dev->dev,
+					 "CHG %s+0x%03x 0x%08x -> 0x%08x\n",
+					 name[hevc_dbg_ranges[i].blk], off, snap[n], v);
+			}
+			snap[n++] = v;
+		}
+	}
+	if (snap[HEVC_DBG_SNAP_WORDS])
+		dev_info(&inst->ctx->dev->plat_dev->dev, "CHG %d of %d words changed\n",
+			 changed, n);
+	snap[HEVC_DBG_SNAP_WORDS] = 1;
+}
+
 /* The core's run: reconstruct the picture from the LAT's output */
 static int vdec_hevc_nofw_core_run(struct vdec_hevc_nofw_inst *inst,
 				   struct vdec_hevc_nofw_share *sh,
@@ -950,27 +1441,72 @@ static int vdec_hevc_nofw_core_run(struct vdec_hevc_nofw_inst *inst,
 	u32 ube = q->wdma_addr.dma_addr;
 	dma_addr_t y, c, mv = inst->mv_buf[dst->index % HEVC_MAX_MV_NUM].dma_addr;
 	u32 last;
+	u32 *snap;
 	int ret;
 
 	if (dst->index >= HEVC_MAX_MV_NUM)
 		return -EINVAL;
+	if (hevc_dbg_ufo && !inst->dbg_fb.va) {
+		inst->dbg_fb.size = HEVC_DBG_FB_SIZE;
+		ret = mtk_vcodec_mem_alloc(ctx, &inst->dbg_fb);
+		if (ret)
+			return ret;
+	}
+	if (hevc_dbg_ufo)
+		pitch = 1920;
+	vdec_hevc_nofw_buf_addr(ctx, dst, &y, &c);
 	vdec_hevc_nofw_reset(inst, hw);
-	ret = vdec_hevc_nofw_start_bitstream(inst, hw, ube, ube + q->wdma_addr.size,
-					     sh->trans_start,
-					     ube + ((sh->trans_end - ube + 0x800) & ~63));
-	if (ret)
-		return ret;
+	if (hevc_dbg_single && inst->dbg_bs.va) {
+		u32 bstart = inst->dbg_bs.dma_addr;
+		u32 bend = bstart + ALIGN(inst->dbg_bs_size, 128) + 512;
+		struct vdec_hevc_nofw_shdr keep = sh->shdr;
+
+		ret = vdec_hevc_nofw_start_bitstream(inst, hw, bstart, bend, bstart, bend);
+		if (ret)
+			return ret;
+		inst->bsr = &inst->core;
+		ret = vdec_hevc_nofw_find_slice(inst, &sh->shdr.nut);
+		if (!ret)
+			ret = vdec_hevc_nofw_parse_shdr(inst, sh);
+		inst->bsr = &inst->lat;
+		dev_info(&ctx->dev->plat_dev->dev,
+			 "DEBUG single %d: parse %d, nut %u/%u type %u/%u slice0 0x%08x\n",
+			 ctx->decoded_frame_cnt, ret, keep.nut, sh->shdr.nut,
+			 keep.slice_type, sh->shdr.slice_type, sh->slice0);
+		if (ret)
+			return ret;
+	} else {
+		ret = vdec_hevc_nofw_start_bitstream(inst, hw, ube, ube + q->wdma_addr.size,
+						     sh->trans_start,
+						     ube + ((sh->trans_end - ube + 0x800) & ~63));
+		if (ret)
+			return ret;
+	}
 
 	/* H265_HAL_SetCoreSliceReg */
 	writel(sh->slice0, hw->hevc + HEVC_SLICE0);
 	if (sh->shdr.slice_type != HEVC_SLICE_I)
 		writel(sh->slice2_early, hw->hevc + HEVC_SLICE2);
-	writel(0, hw->mc + MC_UFO);
+	if (hevc_dbg_ufo == 1) {
+		writel(0x11, hw->mc + MC_UFO);
+		vdec_hevc_nofw_rmw(inst->sys + SOCUFO_CFG, 0, 1);
+		writel(y + HEVC_DBG_YLEN_OFF, hw->mc + MC_UFO_Y_LEN);
+		writel(y + HEVC_DBG_CLEN_OFF, hw->mc + MC_UFO_C_LEN);
+		writel(y + HEVC_DBG_YLEN_OFF, inst->sys + SOCUFO_Y_LEN);
+		writel(y + HEVC_DBG_CLEN_OFF, inst->sys + SOCUFO_C_LEN);
+		writel(y >> 9, inst->sys + SOCUFO_Y);
+		writel(c >> 8, inst->sys + SOCUFO_C);
+		writel(HEVC_DBG_YLEN_OFF, hw->mc + MC_UFO_Y_OFF);
+		writel(HEVC_DBG_CLEN_OFF - HEVC_DBG_C_OFF, hw->mc + MC_UFO_C_OFF);
+		writel(3, hw->pp + PP_UFO);
+	} else {
+		writel(0, hw->mc + MC_UFO);
+		vdec_hevc_nofw_rmw(inst->sys + SOCUFO_CFG, 1, 0);
+	}
 
 	vdec_hevc_nofw_set_lists(inst, sh, dst, mv);
 
 	/* H265_HAL_SetPicInfoReg */
-	vdec_hevc_nofw_buf_addr(ctx, dst, &y, &c);
 	writel(w, hw->mc + MC_WIDTH);
 	writel(h, hw->mc + MC_HEIGHT);
 	writel(pitch / 16, hw->mc + MC_PITCH2);
@@ -982,24 +1518,81 @@ static int vdec_hevc_nofw_core_run(struct vdec_hevc_nofw_inst *inst,
 	writel(1, hw->mc + MC_94);
 	writel(vdec_hevc_nofw_ctbs(w, sps) * ctb / 16 - 1, hw->mc + MC_CTB_W);
 	writel(vdec_hevc_nofw_ctbs(h, sps) * ctb / 16 - 1, hw->mc + MC_CTB_H);
+	if (hevc_dbg_ufo == 1)
+		vdec_hevc_nofw_rmw(inst->sys + SOCUFO_CFG, 0xf0, 1);
 	writel(0, hw->pp + PP_SQT);
 
 	vdec_hevc_nofw_set_pic_words(hw, sh);
 
 	/* H265_HAL_SetCoreLatInfo */
-	vdec_hevc_nofw_rmw(hw->vld_top + VLD_TOP_234, 0, 1);
-	writel(sh->err_map, hw->vld_top + VLD_TOP_ERR_MAP);
-	writel(lat_buf->slice_bc_addr.dma_addr, hw->vld_top + VLD_TOP_SLICE_HDR);
-	vdec_hevc_nofw_rmw(hw->vld_top + VLD_TOP_230, 0, 2);
+	if (!hevc_dbg_single) {
+		vdec_hevc_nofw_rmw(hw->vld_top + VLD_TOP_234, 0, 1);
+		writel(sh->err_map, hw->vld_top + VLD_TOP_ERR_MAP);
+		writel(lat_buf->slice_bc_addr.dma_addr, hw->vld_top + VLD_TOP_SLICE_HDR);
+		vdec_hevc_nofw_rmw(hw->vld_top + VLD_TOP_230, 0, 2);
+	} else {
+		vdec_hevc_nofw_rmw(hw->vld_top + VLD_TOP_234, 1, 0);
+		vdec_hevc_nofw_rmw(hw->vld_top + VLD_TOP_230, 3, 0);
+	}
 	writel(0x101, hw->hevc + HEVC_088);
 	writel(0, hw->hevc + HEVC_088);
-	writel(0, inst->sys + SOCUFO_03);
+	if (hevc_dbg_ufo == 1)
+		writel(0, inst->sys + SOCUFO_03);
 	vdec_hevc_nofw_rmw(hw->pp + PP_TAIL, 4, 0);
-	vdec_hevc_nofw_rmw(inst->sys + SOCUFO_14, 0, 2);
+	if (hevc_dbg_ufo == 1)
+		vdec_hevc_nofw_rmw(inst->sys + SOCUFO_14, 0, 2);
+	{
+		int i;
+
+		for (i = 0; i + 1 < hevc_dbg_pp_n; i += 2)
+			writel(hevc_dbg_pp[i + 1], hw->pp + (hevc_dbg_pp[i] & 0xffc));
+		for (i = 0; i + 1 < hevc_dbg_mc_n; i += 2)
+			writel(hevc_dbg_mc[i + 1], hw->mc + (hevc_dbg_mc[i] & 0xffc));
+	}
+	{
+		void __iomem *base[] = { hw->vld, hw->vld_top, hw->mc, hw->mv, hw->pp,
+					 hw->misc, hw->hevc, inst->sys };
+		int i;
+
+		for (i = 0; i + 2 < hevc_dbg_poke_n; i += 3)
+			if (hevc_dbg_poke[i] < ARRAY_SIZE(base))
+				writel(hevc_dbg_poke[i + 2],
+				       base[hevc_dbg_poke[i]] + (hevc_dbg_poke[i + 1] & 0xffc));
+	}
+	snap = NULL;
+	if (!ctx->decoded_frame_cnt) {
+		snap = kzalloc((HEVC_DBG_SNAP_WORDS + 1) * sizeof(u32), GFP_KERNEL);
+		if (snap)
+			vdec_hevc_nofw_dbg_snap(inst, snap);
+	}
+	if (!ctx->decoded_frame_cnt) {
+		struct mtk_vcodec_dec_dev *dev = ctx->dev;
+		u32 g[3] = { }, so[6] = { }, r[3];
+		static const u32 go[] = { 0x0, 0x8, 0x18 }, soo[] = { 0x4, 0xa0, 0xa8, 0xb0, 0xf0, 0xf8 };
+		int i;
+
+		vdec_hevc_nofw_dbg_dump(inst);
+		for (i = 0; i < 3 && dev->vdecsys_regmap; i++)
+			regmap_read(dev->vdecsys_regmap, go[i], &g[i]);
+		for (i = 0; i < 6 && dev->vdecsoc_regmap; i++)
+			regmap_read(dev->vdecsoc_regmap, soo[i], &so[i]);
+		r[0] = readl(hw->hevc + HEVC_ROW_END_HI);
+		writel(0x5, hw->hevc + HEVC_ROW_END_HI);
+		r[1] = readl(hw->hevc + HEVC_ROW_END_HI);
+		writel(0, hw->hevc + HEVC_ROW_END_HI);
+		r[2] = readl(hw->hevc + HEVC_ROW_END_HI);
+		dev_info(&dev->plat_dev->dev,
+			 "DEBUG gates: vdecsys 0x0 0x%08x 0x8 0x%08x 0x18 0x%08x; vdecsoc 0x4 0x%08x 0xa0 0x%08x 0xa8 0x%08x 0xb0 0x%08x 0xf0 0x%08x 0xf8 0x%08x; 0x1ec 0x%x 0x%x 0x%x\n",
+			 g[0], g[1], g[2], so[0], so[1], so[2], so[3], so[4], so[5], r[0], r[1], r[2]);
+	}
 	writel(1, hw->hevc + HEVC_DECODE);
 
 	ret = mtk_vcodec_wait_for_done_ctx(ctx, MTK_INST_IRQ_RECEIVED,
 					   HEVC_DEC_TIMEOUT_MS, MTK_VDEC_CORE);
+	if (snap) {
+		vdec_hevc_nofw_dbg_snap(inst, snap);
+		kfree(snap);
+	}
 	dev_info(&ctx->dev->plat_dev->dev,
 		 "DEBUG core %d: ret %d misc41 0x%08x vld61 0x%08x vld58 0x%08x 56-58 0x%08x 0x%08x 0x%08x rptr 0x%08x wptr 0x%08x\n",
 		 ctx->decoded_frame_cnt, ret, readl(hw->misc + MISC_IRQ_CFG),
@@ -1208,6 +1801,10 @@ static void vdec_hevc_nofw_free(struct vdec_hevc_nofw_inst *inst)
 	for (i = 0; i < NUM_BUFFER_COUNT; i++)
 		if (inst->err_map[i].va)
 			mtk_vcodec_mem_free(inst->ctx, &inst->err_map[i]);
+	if (inst->dbg_fb.va)
+		mtk_vcodec_mem_free(inst->ctx, &inst->dbg_fb);
+	if (inst->dbg_bs.va)
+		mtk_vcodec_mem_free(inst->ctx, &inst->dbg_bs);
 }
 
 static int vdec_hevc_nofw_init(struct mtk_vcodec_dec_ctx *ctx)
@@ -1231,6 +1828,7 @@ static int vdec_hevc_nofw_init(struct mtk_vcodec_dec_ctx *ctx)
 	inst->sys = core->reg_base[VDEC_HW_SYS];
 	vdec_hevc_nofw_hw_init(&inst->lat, lat, true);
 	vdec_hevc_nofw_hw_init(&inst->core, core, false);
+	inst->bsr = &inst->lat;
 	for (i = 0; i < NUM_BUFFER_COUNT; i++) {
 		inst->err_map[i].size = HEVC_ERR_MAP_SIZE;
 		err = mtk_vcodec_mem_alloc(ctx, &inst->err_map[i]);

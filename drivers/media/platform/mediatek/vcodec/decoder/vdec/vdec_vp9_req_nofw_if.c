@@ -1248,6 +1248,43 @@ static void vdec_vp9_nofw_set_core_pic(struct vdec_vp9_nofw_inst *inst,
 }
 
 /* The core's run: reconstruct the frame from the LAT's output */
+/* DEBUG: a reference for the HEVC core's registers before and after a decode */
+#define VP9_DBG_SNAP_WORDS	3200
+static const struct { u8 blk; u16 start, end; } vp9_dbg_ranges[] = {
+	{ 0, 0x084, 0x400 }, { 1, 0x000, 0x25c }, { 5, 0x000, 0x234 },
+	{ 3, 0x000, 0x3fc }, { 2, 0x000, 0x1000 }, { 4, 0x000, 0x1000 },
+};
+
+static void vdec_vp9_nofw_dbg_snap(struct vdec_vp9_nofw_inst *inst, u32 *snap)
+{
+	static const char * const name[] = { "vld", "vld_top", "mc", "mv", "pp", "misc" };
+	struct vdec_vp9_nofw_hw *hw = &inst->core;
+	void __iomem *base[] = { hw->vld, hw->vld_top, hw->mc, hw->mv, hw->pp, hw->misc };
+	int i, n = 0, changed = 0;
+	u32 off;
+
+	for (i = 0; i < ARRAY_SIZE(vp9_dbg_ranges); i++) {
+		for (off = vp9_dbg_ranges[i].start; off < vp9_dbg_ranges[i].end; off += 4) {
+			u32 v;
+
+			if (n >= VP9_DBG_SNAP_WORDS)
+				break;
+			v = readl(base[vp9_dbg_ranges[i].blk] + off);
+			if (snap[VP9_DBG_SNAP_WORDS] && v != snap[n]) {
+				changed++;
+				dev_info(&inst->ctx->dev->plat_dev->dev,
+					 "VCHG %s+0x%03x 0x%08x -> 0x%08x\n",
+					 name[vp9_dbg_ranges[i].blk], off, snap[n], v);
+			}
+			snap[n++] = v;
+		}
+	}
+	if (snap[VP9_DBG_SNAP_WORDS])
+		dev_info(&inst->ctx->dev->plat_dev->dev, "VCHG %d of %d words changed\n",
+			 changed, n);
+	snap[VP9_DBG_SNAP_WORDS] = 1;
+}
+
 static int vdec_vp9_nofw_core_run(struct vdec_vp9_nofw_inst *inst,
 				  struct vdec_vp9_nofw_share *sh,
 				  struct vdec_lat_buf *lat_buf, struct vb2_buffer *dst)
@@ -1257,6 +1294,7 @@ static int vdec_vp9_nofw_core_run(struct vdec_vp9_nofw_inst *inst,
 	struct vdec_vp9_nofw_hw *hw = &inst->core;
 	const struct v4l2_ctrl_vp9_frame *f = &sh->f;
 	u32 ube = q->wdma_addr.dma_addr;
+	u32 *snap = NULL;
 	int ret;
 
 	ret = vdec_vp9_nofw_check_dst(ctx, f, dst);
@@ -1280,10 +1318,19 @@ static int vdec_vp9_nofw_core_run(struct vdec_vp9_nofw_inst *inst,
 	vdec_vp9_nofw_rmw(hw->vld_top + VLD_TOP_124, ~0x0fff0010, 0);
 	vdec_vp9_nofw_rmw(hw->vld_top + VLD_TOP_234, 0, 1);
 	writel(0, hw->vp9 + VP9_12C);
+	if (!ctx->decoded_frame_cnt) {
+		snap = kzalloc((VP9_DBG_SNAP_WORDS + 1) * sizeof(u32), GFP_KERNEL);
+		if (snap)
+			vdec_vp9_nofw_dbg_snap(inst, snap);
+	}
 	writel(1, hw->vp9 + VP9_DECODE);
 
 	ret = mtk_vcodec_wait_for_done_ctx(ctx, MTK_INST_IRQ_RECEIVED,
 					   VP9_DEC_TIMEOUT_MS, MTK_VDEC_CORE);
+	if (snap) {
+		vdec_vp9_nofw_dbg_snap(inst, snap);
+		kfree(snap);
+	}
 	writel(0x10, hw->misc + MISC_IRQ_CFG);
 	writel(0, hw->misc + MISC_IRQ_CFG);
 	if (ret) {
