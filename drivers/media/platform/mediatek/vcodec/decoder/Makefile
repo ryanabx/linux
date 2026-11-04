@@ -16,6 +16,7 @@ mtk-vcodec-dec-y := vdec/vdec_h264_if.o \
 		vdec/vdec_hevc_req_multi_if.o \
 		vdec/vdec_h264_req_lat_if.o \
 		vdec/vdec_vp9_req_nofw_if.o \
+		vdec/vdec_hevc_req_nofw_if.o \
 		vdec/vdec_mpeg2_req_if.o \
 		mtk_vcodec_dec_drv.o \
 		vdec_drv_if.o \

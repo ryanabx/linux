@@ -60,7 +60,11 @@ int vdec_if_init(struct mtk_vcodec_dec_ctx *ctx, unsigned int fourcc)
 		}
 		break;
 	case V4L2_PIX_FMT_HEVC_SLICE:
-		ctx->dec_if = &vdec_hevc_slice_multi_if;
+		if (!ctx->dev->fw_handler)
+			/* No firmware: the kernel programs the LAT and the core */
+			ctx->dec_if = &vdec_hevc_slice_nofw_if;
+		else
+			ctx->dec_if = &vdec_hevc_slice_multi_if;
 		ctx->hw_id = MTK_VDEC_LAT0;
 		break;
 	case V4L2_PIX_FMT_AV1_FRAME:
