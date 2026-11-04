@@ -105,6 +105,13 @@ static const struct mtk_stateless_control mtk_stateless_controls[] = {
 		.codec_type = V4L2_PIX_FMT_VP9_FRAME,
 	},
 	{
+		/* Only decoders without firmware adapt the probabilities themselves */
+		.cfg = {
+			.id = V4L2_CID_STATELESS_VP9_COMPRESSED_HDR,
+		},
+		.codec_type = V4L2_PIX_FMT_VP9_FRAME,
+	},
+	{
 		.cfg = {
 			.id = V4L2_CID_MPEG_VIDEO_VP9_PROFILE,
 			.min = V4L2_MPEG_VIDEO_VP9_PROFILE_0,
@@ -782,6 +789,9 @@ static int mtk_vcodec_dec_ctrls_setup(struct mtk_vcodec_dec_ctx *ctx)
 		struct v4l2_ctrl_config cfg = mtk_stateless_controls[i].cfg;
 		cfg.ops = &mtk_vcodec_dec_ctrl_ops;
 
+		if (cfg.id == V4L2_CID_STATELESS_VP9_COMPRESSED_HDR && ctx->dev->fw_handler)
+			continue;
+
 		mtk_vcodec_dec_reset_controls(&cfg, ctx);
 		v4l2_ctrl_new_custom(&ctx->ctrl_hdl, &cfg, NULL);
 		if (ctx->ctrl_hdl.error) {
@@ -1068,5 +1078,5 @@ const struct mtk_vcodec_dec_pdata mtk_vdec_8695_pdata = {
 	.hw_arch = MTK_VDEC_LAT_SINGLE_CORE,
 	.dec_capability = VCODEC_CAPABILITY_4K_DISABLED | MTK_VDEC_FORMAT_MM21 |
 			  MTK_VDEC_FORMAT_MS21 | MTK_VDEC_FORMAT_MPEG2_SLICE |
-			  MTK_VDEC_FORMAT_H264_SLICE,
+			  MTK_VDEC_FORMAT_H264_SLICE | MTK_VDEC_FORMAT_VP9_FRAME,
 };
