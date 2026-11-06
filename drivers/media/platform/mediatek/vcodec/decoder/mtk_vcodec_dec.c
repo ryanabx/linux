@@ -992,6 +992,7 @@ const struct v4l2_ioctl_ops mtk_vdec_ioctl_ops = {
 	.vidioc_g_fmt_vid_out_mplane	= vidioc_vdec_g_fmt,
 
 	.vidioc_create_bufs		= v4l2_m2m_ioctl_create_bufs,
+	.vidioc_remove_bufs		= v4l2_m2m_ioctl_remove_bufs,
 
 	.vidioc_enum_fmt_vid_cap	= vidioc_vdec_enum_fmt_vid_cap,
 	.vidioc_enum_fmt_vid_out	= vidioc_vdec_enum_fmt_vid_out,
