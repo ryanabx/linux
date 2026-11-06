@@ -36,6 +36,7 @@
 #include "../vdec_drv_base.h"
 #include "../vdec_drv_if.h"
 #include "../vdec_msg_queue.h"
+#include "vdec_vp9_req_common.h"
 
 #define VP9_DEC_TIMEOUT_MS		100
 #define VP9_FETCH_TIMEOUT_US		10000
@@ -254,75 +255,7 @@ static const u16 vp9_ac_q[256] = {
 	1725, 1759, 1793, 1828,
 };
 
-/*
- * The symbol counts the LAT writes by DMA: the same layout as the firmware
- * SoCs' (struct vdec_vp9_slice_frame_counts in vdec_vp9_req_lat_if.c).
- */
-struct vdec_vp9_nofw_counts {
-	union {
-		struct {
-			u32 band_0[3];
-			u32 padding0[1];
-			u32 band_1_5[5][6];
-			u32 padding1[2];
-		} eob_branch[4][2][2];
-		u32 eob_branch_space[256 * 4];
-	};
-
-	struct {
-		u32 band_0[3][4];
-		u32 band_1_5[5][6][4];
-	} coef_probs[4][2][2];
-
-	u32 intra_inter[4][2];
-	u32 comp_inter[5][2];
-	u32 comp_inter_padding[2];
-	u32 comp_ref[5][2];
-	u32 comp_ref_padding[2];
-	u32 single_ref[5][2][2];
-	u32 inter_mode[7][4];
-	u32 y_mode[4][12];
-	u32 uv_mode[10][10];
-	u32 partition[16][4];
-	u32 switchable_interp[4][4];
-
-	u32 tx_p8x8[2][2];
-	u32 tx_p16x16[2][4];
-	u32 tx_p32x32[2][4];
-
-	u32 skip[3][4];
-
-	u32 joint[4];
-
-	struct {
-		u32 sign[2];
-		u32 class0[2];
-		u32 classes[12];
-		u32 bits[10][2];
-		u32 padding[4];
-		u32 class0_fp[2][4];
-		u32 fp[4];
-		u32 class0_hp[2];
-		u32 hp[2];
-	} mvcomp[2];
-
-	u32 reserved[126][4];
-};
-
-/* Counts whose rows are wider than the helper's, copied to fit */
-struct vdec_vp9_nofw_counts_map {
-	u32 skip[3][2];
-	u32 y_mode[4][10];
-	u32 filter[4][3];
-	u32 sign[2][2];
-	u32 classes[2][11];
-	u32 class0[2][2];
-	u32 bits[2][10][2];
-	u32 class0_fp[2][2][4];
-	u32 fp[2][4];
-	u32 class0_hp[2][2];
-	u32 hp[2][2];
-};
+static_assert(sizeof(struct vdec_vp9_slice_frame_counts) <= VP9_COUNT_BUF_SIZE);
 
 /* What a frame's LAT run hands the core */
 struct vdec_vp9_nofw_share {
@@ -354,7 +287,7 @@ struct vdec_vp9_nofw_inst {
 
 	struct v4l2_vp9_frame_context fctx[4];
 	struct v4l2_vp9_frame_symbol_counts counts_helper;
-	struct vdec_vp9_nofw_counts_map counts_map;
+	struct vdec_vp9_slice_counts_map counts_map;
 
 	/* What the header's semantics carry from frame to frame */
 	u32 last_w, last_h;
@@ -1010,92 +943,6 @@ static void vdec_vp9_nofw_prepare(struct vdec_vp9_nofw_inst *inst,
 }
 
 /*
- * One transform size, plane and reference's coefficient counts: the
- * helper's EOB counts are the "more coefficients" branch and the hardware's
- * fourth word. Not inlined: clang's stack use explodes otherwise.
- */
-static noinline_for_stack
-void vdec_vp9_nofw_map_coef(struct vdec_vp9_nofw_counts *counts,
-			    struct v4l2_vp9_frame_symbol_counts *h, int i, int j, int k)
-{
-	int l, c;
-
-	for (c = 0; c < 3; c++) {
-		u32 (*band0)[4] = &counts->coef_probs[i][j][k].band_0[c];
-
-		h->coeff[i][j][k][0][c] = (u32 (*)[3])band0;
-		h->eob[i][j][k][0][c][0] = &counts->eob_branch[i][j][k].band_0[c];
-		h->eob[i][j][k][0][c][1] = &(*band0)[3];
-	}
-	for (l = 1; l < 6; l++) {
-		for (c = 0; c < 6; c++) {
-			u32 (*band)[4] = &counts->coef_probs[i][j][k].band_1_5[l - 1][c];
-
-			h->coeff[i][j][k][l][c] = (u32 (*)[3])band;
-			h->eob[i][j][k][l][c][0] =
-				&counts->eob_branch[i][j][k].band_1_5[l - 1][c];
-			h->eob[i][j][k][l][c][1] = &(*band)[3];
-		}
-	}
-}
-
-static void vdec_vp9_nofw_map_counts(struct vdec_vp9_nofw_inst *inst)
-{
-	struct vdec_vp9_nofw_counts *counts = inst->counts.va;
-	struct v4l2_vp9_frame_symbol_counts *h = &inst->counts_helper;
-	struct vdec_vp9_nofw_counts_map *m = &inst->counts_map;
-	int i, j, k;
-
-	for (i = 0; i < 4; i++)
-		for (j = 0; j < 2; j++)
-			for (k = 0; k < 2; k++)
-				vdec_vp9_nofw_map_coef(counts, h, i, j, k);
-
-	h->partition = &counts->partition;
-	h->intra_inter = &counts->intra_inter;
-	h->tx32p = &counts->tx_p32x32;
-	h->tx16p = &counts->tx_p16x16;
-	h->tx8p = &counts->tx_p8x8;
-	h->uv_mode = &counts->uv_mode;
-	h->comp = &counts->comp_inter;
-	h->comp_ref = &counts->comp_ref;
-	h->single_ref = &counts->single_ref;
-	h->mv_mode = &counts->inter_mode;
-	h->mv_joint = &counts->joint;
-
-	for (i = 0; i < 3; i++)
-		memcpy(m->skip[i], counts->skip[i], sizeof(m->skip[0]));
-	h->skip = &m->skip;
-	for (i = 0; i < 4; i++)
-		memcpy(m->y_mode[i], counts->y_mode[i], sizeof(m->y_mode[0]));
-	h->y_mode = &m->y_mode;
-	for (i = 0; i < 4; i++)
-		memcpy(m->filter[i], counts->switchable_interp[i], sizeof(m->filter[0]));
-	h->filter = &m->filter;
-	for (i = 0; i < 2; i++) {
-		memcpy(m->sign[i], counts->mvcomp[i].sign, sizeof(m->sign[0]));
-		memcpy(m->classes[i], counts->mvcomp[i].classes, sizeof(m->classes[0]));
-		memcpy(m->class0[i], counts->mvcomp[i].class0, sizeof(m->class0[0]));
-		for (j = 0; j < 10; j++)
-			memcpy(m->bits[i][j], counts->mvcomp[i].bits[j], sizeof(m->bits[0][0]));
-		for (j = 0; j < 2; j++)
-			memcpy(m->class0_fp[i][j], counts->mvcomp[i].class0_fp[j],
-			       sizeof(m->class0_fp[0][0]));
-		memcpy(m->fp[i], counts->mvcomp[i].fp, sizeof(m->fp[0]));
-		memcpy(m->class0_hp[i], counts->mvcomp[i].class0_hp, sizeof(m->class0_hp[0]));
-		memcpy(m->hp[i], counts->mvcomp[i].hp, sizeof(m->hp[0]));
-	}
-	h->sign = &m->sign;
-	h->classes = &m->classes;
-	h->class0 = &m->class0;
-	h->bits = &m->bits;
-	h->class0_fp = &m->class0_fp;
-	h->fp = &m->fp;
-	h->class0_hp = &m->class0_hp;
-	h->hp = &m->hp;
-}
-
-/*
  * The spec's refresh_probs() (8.4.2 and 6.1.2): the context the frame
  * loaded, with the compressed header's deltas for parallel or
  * error-resilient frames; otherwise the saved context adapted to the
@@ -1134,7 +981,8 @@ static void vdec_vp9_nofw_refresh_probs(struct vdec_vp9_nofw_inst *inst,
 	}
 	kfree(cur);
 
-	vdec_vp9_nofw_map_counts(inst);
+	vdec_vp9_slice_counts_map_helper(&inst->counts_map, inst->counts.va,
+					 &inst->counts_helper);
 	v4l2_vp9_adapt_coef_probs(probs, &inst->counts_helper,
 				  !inst->last_valid || inst->last_key, intra);
 	if (!intra)
