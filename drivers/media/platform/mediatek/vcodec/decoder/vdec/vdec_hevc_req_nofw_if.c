@@ -21,11 +21,13 @@
  * compression.
  */
 
+#include <linux/debugfs.h>
 #include <linux/delay.h>
 #include <linux/dma-mapping.h>
 #include <linux/iopoll.h>
 #include <linux/moduleparam.h>
 #include <linux/regmap.h>
+#include <linux/seq_file.h>
 #include <linux/slab.h>
 #include <media/v4l2-mem2mem.h>
 #include <media/videobuf2-dma-contig.h>
@@ -1385,6 +1387,20 @@ static void vdec_hevc_nofw_dbg_dump(struct vdec_hevc_nofw_inst *inst)
 		 ARRAY_SIZE(hevc_dbg_regs));
 }
 
+/*
+ * DEBUG: debugfs, mtk_hevc_dbg/: "snap" reads the first picture's core
+ * registers just before its trigger (the "before" snapshot), one
+ * "<block>+0x<off> 0x<val>" line per word, as tools/vdec/hevc-dump reads
+ * them; "poke" takes "<block> <off> <val>" triples (block numbers as
+ * hevc_dbg_poke's), written before every core trigger after
+ * hevc_dbg_poke's, "clear" empties it.
+ */
+#define HEVC_DBG_POKE_MAX	1024
+static u32 hevc_dbg_fpoke[HEVC_DBG_POKE_MAX][3];
+static int hevc_dbg_fpoke_n;
+static DEFINE_MUTEX(hevc_dbg_lock);
+static struct dentry *hevc_dbg_dir;
+
 /* DEBUG: the core ranges the vendor's H265_HAL_DumpReg reads */
 #define HEVC_DBG_SNAP_WORDS	3200
 static const struct { u8 blk; u16 start, end; } hevc_dbg_ranges[] = {
@@ -1392,6 +1408,9 @@ static const struct { u8 blk; u16 start, end; } hevc_dbg_ranges[] = {
 	{ 5, 0x000, 0x234 }, { 3, 0x000, 0x3fc }, { 2, 0x000, 0x1000 },
 	{ 4, 0x000, 0x1000 },
 };
+
+static u32 hevc_dbg_before[HEVC_DBG_SNAP_WORDS];
+static int hevc_dbg_before_n;
 
 static void vdec_hevc_nofw_dbg_snap(struct vdec_hevc_nofw_inst *inst, u32 *snap)
 {
@@ -1420,9 +1439,15 @@ static void vdec_hevc_nofw_dbg_snap(struct vdec_hevc_nofw_inst *inst, u32 *snap)
 			snap[n++] = v;
 		}
 	}
-	if (snap[HEVC_DBG_SNAP_WORDS])
+	if (snap[HEVC_DBG_SNAP_WORDS]) {
 		dev_info(&inst->ctx->dev->plat_dev->dev, "CHG %d of %d words changed\n",
 			 changed, n);
+	} else {
+		mutex_lock(&hevc_dbg_lock);
+		memcpy(hevc_dbg_before, snap, n * sizeof(u32));
+		hevc_dbg_before_n = n;
+		mutex_unlock(&hevc_dbg_lock);
+	}
 	snap[HEVC_DBG_SNAP_WORDS] = 1;
 }
 
@@ -1558,6 +1583,15 @@ static int vdec_hevc_nofw_core_run(struct vdec_hevc_nofw_inst *inst,
 			if (hevc_dbg_poke[i] < ARRAY_SIZE(base))
 				writel(hevc_dbg_poke[i + 2],
 				       base[hevc_dbg_poke[i]] + (hevc_dbg_poke[i + 1] & 0xffc));
+		mutex_lock(&hevc_dbg_lock);
+		for (i = 0; i < hevc_dbg_fpoke_n; i++)
+			if (hevc_dbg_fpoke[i][0] < ARRAY_SIZE(base))
+				writel(hevc_dbg_fpoke[i][2],
+				       base[hevc_dbg_fpoke[i][0]] + (hevc_dbg_fpoke[i][1] & 0xffc));
+		if (hevc_dbg_fpoke_n && !ctx->decoded_frame_cnt)
+			dev_info(&ctx->dev->plat_dev->dev, "DEBUG %d pokes from debugfs\n",
+				 hevc_dbg_fpoke_n);
+		mutex_unlock(&hevc_dbg_lock);
 	}
 	snap = NULL;
 	if (!ctx->decoded_frame_cnt) {
@@ -1807,6 +1841,107 @@ static void vdec_hevc_nofw_free(struct vdec_hevc_nofw_inst *inst)
 		mtk_vcodec_mem_free(inst->ctx, &inst->dbg_bs);
 }
 
+/* DEBUG: the debugfs files (see hevc_dbg_fpoke) */
+static int vdec_hevc_nofw_dbg_snap_show(struct seq_file *m, void *unused)
+{
+	static const char * const name[] = { "vld", "vld_top", "mc", "mv", "pp", "misc", "hevc" };
+	int i, n = 0;
+	u32 off;
+
+	mutex_lock(&hevc_dbg_lock);
+	for (i = 0; i < ARRAY_SIZE(hevc_dbg_ranges); i++) {
+		for (off = hevc_dbg_ranges[i].start; off < hevc_dbg_ranges[i].end; off += 4) {
+			if (hevc_dbg_ranges[i].blk == 6 && (off == 0x098 || off == 0x09c))
+				continue;
+			if (n >= hevc_dbg_before_n)
+				break;
+			seq_printf(m, "%s+0x%03x 0x%08x\n", name[hevc_dbg_ranges[i].blk],
+				   off, hevc_dbg_before[n++]);
+		}
+	}
+	mutex_unlock(&hevc_dbg_lock);
+	return 0;
+}
+DEFINE_SHOW_ATTRIBUTE(vdec_hevc_nofw_dbg_snap);
+
+static int vdec_hevc_nofw_dbg_poke_show(struct seq_file *m, void *unused)
+{
+	int i;
+
+	mutex_lock(&hevc_dbg_lock);
+	for (i = 0; i < hevc_dbg_fpoke_n; i++)
+		seq_printf(m, "%u 0x%03x 0x%08x\n", hevc_dbg_fpoke[i][0],
+			   hevc_dbg_fpoke[i][1], hevc_dbg_fpoke[i][2]);
+	mutex_unlock(&hevc_dbg_lock);
+	return 0;
+}
+
+static int vdec_hevc_nofw_dbg_poke_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, vdec_hevc_nofw_dbg_poke_show, NULL);
+}
+
+/* Appends "<block> <off> <val>" triples; "clear" empties the list */
+static ssize_t vdec_hevc_nofw_dbg_poke_write(struct file *file, const char __user *ubuf,
+					     size_t len, loff_t *ppos)
+{
+	char *buf, *p, *tok;
+	u32 t[3];
+	int k = 0, ret = len;
+
+	buf = memdup_user_nul(ubuf, len);
+	if (IS_ERR(buf))
+		return PTR_ERR(buf);
+	mutex_lock(&hevc_dbg_lock);
+	p = buf;
+	while ((tok = strsep(&p, " \t\n,")) != NULL) {
+		if (!*tok)
+			continue;
+		if (!strcmp(tok, "clear")) {
+			hevc_dbg_fpoke_n = 0;
+			k = 0;
+			continue;
+		}
+		if (kstrtou32(tok, 0, &t[k])) {
+			ret = -EINVAL;
+			break;
+		}
+		if (++k < 3)
+			continue;
+		k = 0;
+		if (hevc_dbg_fpoke_n >= HEVC_DBG_POKE_MAX) {
+			ret = -ENOSPC;
+			break;
+		}
+		memcpy(hevc_dbg_fpoke[hevc_dbg_fpoke_n++], t, sizeof(t));
+	}
+	mutex_unlock(&hevc_dbg_lock);
+	kfree(buf);
+	return ret;
+}
+
+static const struct file_operations vdec_hevc_nofw_dbg_poke_fops = {
+	.owner = THIS_MODULE,
+	.open = vdec_hevc_nofw_dbg_poke_open,
+	.read = seq_read,
+	.write = vdec_hevc_nofw_dbg_poke_write,
+	.llseek = seq_lseek,
+	.release = single_release,
+};
+
+static void vdec_hevc_nofw_dbg_files(void)
+{
+	mutex_lock(&hevc_dbg_lock);
+	if (!hevc_dbg_dir) {
+		hevc_dbg_dir = debugfs_create_dir("mtk_hevc_dbg", NULL);
+		debugfs_create_file("snap", 0444, hevc_dbg_dir, NULL,
+				    &vdec_hevc_nofw_dbg_snap_fops);
+		debugfs_create_file("poke", 0644, hevc_dbg_dir, NULL,
+				    &vdec_hevc_nofw_dbg_poke_fops);
+	}
+	mutex_unlock(&hevc_dbg_lock);
+}
+
 static int vdec_hevc_nofw_init(struct mtk_vcodec_dec_ctx *ctx)
 {
 	struct vdec_hevc_nofw_inst *inst;
@@ -1826,6 +1961,7 @@ static int vdec_hevc_nofw_init(struct mtk_vcodec_dec_ctx *ctx)
 		return -ENOMEM;
 	inst->ctx = ctx;
 	inst->sys = core->reg_base[VDEC_HW_SYS];
+	vdec_hevc_nofw_dbg_files();
 	vdec_hevc_nofw_hw_init(&inst->lat, lat, true);
 	vdec_hevc_nofw_hw_init(&inst->core, core, false);
 	inst->bsr = &inst->lat;
