@@ -493,6 +493,10 @@ static int mtk_vcodec_probe(struct platform_device *pdev)
 	memset(dev->vdec_racing_info, 0, sizeof(dev->vdec_racing_info));
 	mutex_init(&dev->dec_racing_info_mutex);
 
+	/* Removing buffers is for the stateless API; the firmware tracks its own */
+	if (!dev->vdec_pdata->uses_stateless_api)
+		v4l2_disable_ioctl(vfd_dec, VIDIOC_REMOVE_BUFS);
+
 	ret = video_register_device(vfd_dec, VFL_TYPE_VIDEO, -1);
 	if (ret) {
 		dev_err(&pdev->dev, "Failed to register video device");
