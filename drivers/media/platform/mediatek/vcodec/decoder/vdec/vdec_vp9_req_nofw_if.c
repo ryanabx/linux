@@ -361,8 +361,14 @@ struct vdec_vp9_nofw_inst {
 	u8 comp_fixed, comp_var[2];
 	u32 interp, allow_hp;
 
-	/* Frame sizes by capture buffer, for the references */
-	u32 fb_size[VIDEO_MAX_FRAME];
+	/*
+	 * By capture buffer, for the references: the frame decoded into it,
+	 * and the buffer's layout then (a size change brings new buffers
+	 * while the old ones are still referenced)
+	 */
+	struct {
+		u32 w, h, pitch, coff;
+	} fb[VIDEO_MAX_FRAME];
 };
 
 static void vdec_vp9_nofw_soc_write(struct mtk_vcodec_dec_dev *dev, u32 off, u32 val)
@@ -1223,14 +1229,37 @@ static struct vb2_buffer *vdec_vp9_nofw_ref(struct mtk_vcodec_dec_ctx *ctx, u64 
 	return vb2_find_buffer(v4l2_m2m_get_dst_vq(ctx->m2m_ctx), ts);
 }
 
-static void vdec_vp9_nofw_buf_addr(struct mtk_vcodec_dec_ctx *ctx,
-				   struct vb2_buffer *vb, dma_addr_t *y, dma_addr_t *c)
+static void vdec_vp9_nofw_buf_addr(struct vb2_buffer *vb, u32 coff,
+				   dma_addr_t *y, dma_addr_t *c)
 {
 	*y = vb2_dma_contig_plane_dma_addr(vb, 0);
-	if (ctx->q_data[MTK_Q_DATA_DST].fmt->num_planes == 2)
+	if (vb->num_planes == 2)
 		*c = vb2_dma_contig_plane_dma_addr(vb, 1);
 	else
-		*c = *y + ctx->picinfo.fb_sz[0];
+		*c = *y + coff;
+}
+
+/* The capture buffer has to hold the frame at the current layout */
+static int vdec_vp9_nofw_check_dst(struct mtk_vcodec_dec_ctx *ctx,
+				   const struct v4l2_ctrl_vp9_frame *f,
+				   struct vb2_buffer *dst)
+{
+	const struct vdec_pic_info *pi = &ctx->picinfo;
+	u32 w = f->frame_width_minus_1 + 1, h = f->frame_height_minus_1 + 1;
+	bool fits;
+
+	fits = ALIGN(w, 64) <= pi->buf_w && ALIGN(h, 64) <= pi->buf_h;
+	if (dst->num_planes == 2)
+		fits = fits && vb2_plane_size(dst, 0) >= pi->fb_sz[0] &&
+		       vb2_plane_size(dst, 1) >= pi->fb_sz[1];
+	else
+		fits = fits && vb2_plane_size(dst, 0) >= pi->fb_sz[0] + pi->fb_sz[1];
+	if (!fits) {
+		mtk_vdec_err(ctx, "%ux%u frame, capture buffer %u for %ux%u",
+			     w, h, dst->index, pi->pic_w, pi->pic_h);
+		return -EINVAL;
+	}
+	return 0;
 }
 
 /* VP9_setPicInfo, the core's part: references, output, dequantizer */
@@ -1244,11 +1273,11 @@ static void vdec_vp9_nofw_set_core_pic(struct vdec_vp9_nofw_inst *inst,
 	u32 w = f->frame_width_minus_1 + 1, h = f->frame_height_minus_1 + 1;
 	u32 pitch = ctx->picinfo.buf_w;
 	u64 ts[3] = { f->last_frame_ts, f->golden_frame_ts, f->alt_frame_ts };
-	u32 ref_w[3], ref_h[3], xs[3], ys[3], scaled = 0, filter = 0;
+	u32 ref_w[3], ref_h[3], ref_p[3], xs[3], ys[3], scaled = 0, filter = 0;
 	dma_addr_t y, c, ry, rc;
 	int i, s, segs;
 
-	vdec_vp9_nofw_buf_addr(ctx, dst, &y, &c);
+	vdec_vp9_nofw_buf_addr(dst, ctx->picinfo.fb_sz[0], &y, &c);
 	writel(w, hw->mc + MC_WIDTH);
 	writel(h, hw->mc + MC_HEIGHT);
 
@@ -1258,10 +1287,11 @@ static void vdec_vp9_nofw_set_core_pic(struct vdec_vp9_nofw_inst *inst,
 
 		if (!vdec_vp9_nofw_intra(f))
 			vb = vdec_vp9_nofw_ref(ctx, ts[i]);
-		if (vb && inst->fb_size[vb->index]) {
-			vdec_vp9_nofw_buf_addr(ctx, vb, &ry, &rc);
-			ref_w[i] = inst->fb_size[vb->index] >> 16;
-			ref_h[i] = inst->fb_size[vb->index] & 0xffff;
+		if (vb && inst->fb[vb->index].w) {
+			vdec_vp9_nofw_buf_addr(vb, inst->fb[vb->index].coff, &ry, &rc);
+			ref_w[i] = inst->fb[vb->index].w;
+			ref_h[i] = inst->fb[vb->index].h;
+			ref_p[i] = inst->fb[vb->index].pitch;
 		} else {
 			if (!vdec_vp9_nofw_intra(f))
 				mtk_vdec_err(ctx, "frame %d: no reference %d",
@@ -1270,6 +1300,7 @@ static void vdec_vp9_nofw_set_core_pic(struct vdec_vp9_nofw_inst *inst,
 			rc = c;
 			ref_w[i] = w;
 			ref_h[i] = h;
+			ref_p[i] = pitch;
 		}
 		writel(ry, hw->mc + MC_REF_Y(i));
 		writel(rc, hw->mc + MC_REF_C(i));
@@ -1306,7 +1337,7 @@ static void vdec_vp9_nofw_set_core_pic(struct vdec_vp9_nofw_inst *inst,
 				yc = (s32)ys[i] * 1000 < 0xfa4000 ? 4 : 3;
 			}
 			filter |= x << (24 - 4 * i) | yc << (8 - 4 * i);
-			writel((((pitch + 15) >> 4) + 3) & ~3, hw->mc + MC_REF_PITCH(i));
+			writel((((ref_p[i] + 15) >> 4) + 3) & ~3, hw->mc + MC_REF_PITCH(i));
 		}
 		writel(filter, hw->mc + MC_REF_FILTER);
 	}
@@ -1370,6 +1401,9 @@ static int vdec_vp9_nofw_core_run(struct vdec_vp9_nofw_inst *inst,
 	u32 ube = q->wdma_addr.dma_addr;
 	int ret;
 
+	ret = vdec_vp9_nofw_check_dst(ctx, f, dst);
+	if (ret)
+		return ret;
 	ret = vdec_vp9_nofw_reset(inst, hw);
 	if (ret)
 		return ret;
@@ -1398,8 +1432,10 @@ static int vdec_vp9_nofw_core_run(struct vdec_vp9_nofw_inst *inst,
 		mtk_vdec_err(ctx, "core timeout: frame %d", ctx->decoded_frame_cnt);
 		return -EIO;
 	}
-	inst->fb_size[dst->index] = (f->frame_width_minus_1 + 1) << 16 |
-				    (f->frame_height_minus_1 + 1);
+	inst->fb[dst->index].w = f->frame_width_minus_1 + 1;
+	inst->fb[dst->index].h = f->frame_height_minus_1 + 1;
+	inst->fb[dst->index].pitch = ctx->picinfo.buf_w;
+	inst->fb[dst->index].coff = ctx->picinfo.fb_sz[0];
 	return 0;
 }
 
@@ -1487,6 +1523,9 @@ static int vdec_vp9_nofw_decode(void *h_vdec, struct mtk_vcodec_mem *bs,
 		mtk_vdec_err(ctx, "%u-bit VP9 is not supported yet", f->bit_depth);
 		return -EOPNOTSUPP;
 	}
+	/* At most four tile rows; the control doesn't check it */
+	if (f->tile_rows_log2 > 2)
+		return -EINVAL;
 
 	lat_buf = vdec_msg_queue_dqbuf(&ctx->msg_queue.lat_ctx);
 	if (!lat_buf)
