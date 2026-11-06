@@ -350,6 +350,14 @@ mt7615_regd_notifier(struct wiphy *wiphy,
 
 	mt7615_mutex_acquire(dev);
 
+	/*
+	 * A stopped device gets all of it from mt7615_start(); in system
+	 * suspend the firmware may not answer any more (cfg80211 updates the
+	 * regulatory domain after the disconnect, alongside the bus suspend)
+	 */
+	if (!test_bit(MT76_STATE_RUNNING, &mphy->state))
+		goto out;
+
 	if (chandef->chan->flags & IEEE80211_CHAN_RADAR)
 		mt7615_dfs_init_radar_detector(phy);
 
@@ -358,6 +366,7 @@ mt7615_regd_notifier(struct wiphy *wiphy,
 		mt76_connac_mcu_set_rate_txpower(mphy);
 	}
 
+out:
 	mt7615_mutex_release(dev);
 }
 
