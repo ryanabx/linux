@@ -331,6 +331,7 @@ struct vdec_vp9_nofw_share {
 	u8 sign_bias;		/* the four, bits 0-3 */
 	u8 comp_fixed, comp_var[2];
 	bool use_prev_mvs;
+	bool seg_reset;		/* the previous segment ids are all 0 */
 	u32 interp, allow_hp;	/* as VP9_FLAGS has them */
 	u64 trans_start, trans_end;
 };
@@ -597,6 +598,8 @@ static void vdec_vp9_nofw_set_header(struct vdec_vp9_nofw_inst *inst,
 	}
 
 	/* VP9_setSegmentation; one map, read and written in place */
+	if (sh->seg_reset)
+		memset(inst->seg_buf[hw->lat ? 0 : 1].va, 0, VP9_SEG_BUF_SIZE);
 	if (vdec_vp9_nofw_seg(f)) {
 		const u8 *tp = seg->tree_probs, *pp = seg->pred_probs;
 		u32 map = inst->seg_buf[hw->lat ? 0 : 1].dma_addr;
@@ -992,6 +995,13 @@ static void vdec_vp9_nofw_prepare(struct vdec_vp9_nofw_inst *inst,
 	}
 	sh->interp = inst->interp;
 	sh->allow_hp = inst->allow_hp;
+
+	/*
+	 * libvpx clears the previous segment map in setup_past_independence()
+	 * and when the frame size changes (vp9_init_context_buffers())
+	 */
+	sh->seg_reset = intra || (f->flags & V4L2_VP9_FRAME_FLAG_ERROR_RESILIENT) ||
+			!inst->last_valid || w != inst->last_w || h != inst->last_h;
 
 	sh->use_prev_mvs = !(f->flags & V4L2_VP9_FRAME_FLAG_ERROR_RESILIENT) &&
 			   inst->last_valid && w == inst->last_w && h == inst->last_h &&
