@@ -98,6 +98,13 @@
 #define MT6397_BAT_PERIOD_S		10
 #define MT6397_BAT_SYSTEM_OFF_MV	3400
 #define MT6397_BAT_VBAT_AVG_SIZE	18
+/*
+ * The cut-off is judged on the average of this many terminal-voltage samples,
+ * about five minutes, as the vendor's BATTERY_AVERAGE_SIZE: one sample sagging
+ * under a burst of load is not an empty pack, and the cut-off also measures
+ * the capacity.
+ */
+#define MT6397_BAT_CUTOFF_AVG_SIZE	30
 #define MT6397_BAT_MIN_ERROR_OFFSET_MV	1000
 #define MT6397_BAT_TEMP_AVG_SIZE	12
 #define MT6397_BAT_R_COMP_ITERATIONS	5
@@ -115,6 +122,14 @@
  * end is a larger share of a shorter run. The vendor uses the same threshold.
  */
 #define MT6397_BAT_LEARN_MIN_SPAN	85
+
+/*
+ * Outside this the charger's JEITA rules end the charge early or the pack
+ * holds less for the cold, so "full" is not the pack's capacity; the vendor's
+ * learning skips the same window.
+ */
+#define MT6397_BAT_LEARN_MIN_TEMP_C	10
+#define MT6397_BAT_LEARN_MAX_TEMP_C	45
 
 /* The capacity, per mille of design, that is taken as the pack's own. */
 #define MT6397_BAT_HEALTH_MIN		500
@@ -188,6 +203,8 @@ struct mt6397_battery {
 	int zcv_mv;		/* compensated and averaged open-circuit voltage */
 	int vavg_buf[MT6397_BAT_VBAT_AVG_SIZE];
 	int vavg_sum, vavg_idx, vavg_mv;
+	int vcut_buf[MT6397_BAT_CUTOFF_AVG_SIZE];
+	int vcut_sum, vcut_idx, vcut_mv;
 	int cur_01ma;		/* magnitude, in 0.1 mA like the vendor */
 	bool charging;		/* sign of the current */
 	int cur_factor;		/* average load as a percentage of cv_current */
@@ -201,7 +218,9 @@ struct mt6397_battery {
 	/* the gauge */
 	int qmax_mah, qmax_aging_mah, qmax_hc_mah;
 	int qmax_health;	/* learned capacity per mille of design, 1000 = as new */
+	int design_mah;		/* the design capacity, whatever the temperature */
 	int dod0, dod1;
+	bool dod0_known;	/* dod0 set at full or near empty, not from a guess */
 	int cap_by_v, cap_by_c;
 	int soc;		/* after the load compensation */
 	int ui_soc;		/* what is reported; -1 until the first pass */
@@ -752,6 +771,17 @@ static void mt6397_bat_meter_run(struct mt6397_battery *bat)
 
 	zcv = bat->vbat_mv + mt6397_bat_compensate(bat, bat->vbat_mv);
 
+	if (!bat->vcut_mv) {
+		for (i = 0; i < MT6397_BAT_CUTOFF_AVG_SIZE; i++)
+			bat->vcut_buf[i] = bat->vbat_mv;
+		bat->vcut_sum = bat->vbat_mv * MT6397_BAT_CUTOFF_AVG_SIZE;
+	}
+	bat->vcut_sum -= bat->vcut_buf[bat->vcut_idx];
+	bat->vcut_sum += bat->vbat_mv;
+	bat->vcut_buf[bat->vcut_idx] = bat->vbat_mv;
+	bat->vcut_mv = bat->vcut_sum / MT6397_BAT_CUTOFF_AVG_SIZE;
+	bat->vcut_idx = (bat->vcut_idx + 1) % MT6397_BAT_CUTOFF_AVG_SIZE;
+
 	if (bat->ocv2cv)
 		mt6397_bat_update_current_factor(bat);
 
@@ -786,32 +816,40 @@ static void mt6397_bat_meter_run(struct mt6397_battery *bat)
 		bat->soc = bat->cap_by_c;
 }
 
-/* Re-anchor the coulomb counter at the displayed percentage. */
-static void mt6397_bat_meter_reset(struct mt6397_battery *bat, int ui_soc)
+/*
+ * Re-anchor the coulomb counter at the displayed percentage. @known says the
+ * pack is really there, rather than the display having been walked there.
+ */
+static void mt6397_bat_meter_reset(struct mt6397_battery *bat, int ui_soc,
+				   bool known)
 {
 	if (!mt6397_battery_reset_car(bat))
 		bat->car_uah = 0;
 	bat->dod0 = 100 - ui_soc;
 	bat->dod1 = bat->dod0;
+	bat->dod0_known = known;
 }
 
 /*
  * The charge that passes between two known states of the pack measures what it
- * now holds, which is what CHARGE_FULL is for: the vendor's meter recomputes it
- * when a charge that began deeply discharged terminates
- * (fg_qmax_update_for_aging()), and cpcap-battery learns the same figure from
- * its own coulomb counter between full and empty. Without it the meter counts
- * against the design capacity for the life of the pack; measured on a cell that
- * had lost 12 %, the percentage fell too slowly and read ten points high near
- * empty.
+ * now holds, which is what CHARGE_FULL is for. This is patterned on the
+ * vendor's fg_qmax_update_for_aging() (built only without its hardware-gauge
+ * mode, so not on the products that use this PMIC's gauge), and cpcap-battery
+ * learns the same figure from its own coulomb counter between full and empty.
+ * Without it the meter counts against the design capacity for the life of the
+ * pack; measured on a cell that had lost 12 %, the percentage fell too slowly
+ * and read ten points high near empty.
  *
- * Both ends are used, because they fail in different places. Charging measures
- * against the depth the pack was seeded at, which on an aged pack is itself
- * optimistic -- so that direction converges slowly or not at all. Discharging
- * from a full re-anchor to the cut-off spans the whole pack and needs no seed.
+ * Both ends are used, from whichever known state the run began at: a charge
+ * from a near-empty re-anchor up to full, and a discharge from full down to
+ * the cut-off. A run that began at a guess -- the seed from the previous boot,
+ * or the display walked up to 100 % -- measures the guess as much as the pack,
+ * and a wrong figure here is saved and outlives the boot, so it is not used.
  *
  * Kept as a proportion rather than an absolute, so that the capacity still
- * follows temperature the way the profiles describe.
+ * follows temperature the way the profiles describe. CHARGE_FULL gives and
+ * takes it against the design capacity rather than the present temperature's
+ * Qmax, so that a figure saved in the cold reads back the same when warm.
  *
  * Nothing on the PMIC is left to keep it across a reboot: of the RTC's four
  * spare bytes the bootloader keeps boot and shutdown reasons in three, and the
@@ -822,8 +860,12 @@ static void mt6397_bat_learn_qmax(struct mt6397_battery *bat, int span)
 {
 	int learned, health;
 
-	if (span < MT6397_BAT_LEARN_MIN_SPAN || !bat->car_uah ||
-	    bat->qmax_mah <= 0)
+	if (!bat->dod0_known || span < MT6397_BAT_LEARN_MIN_SPAN ||
+	    !bat->car_uah || bat->qmax_mah <= 0)
+		return;
+
+	if (bat->temp_c < MT6397_BAT_LEARN_MIN_TEMP_C ||
+	    bat->temp_c > MT6397_BAT_LEARN_MAX_TEMP_C)
 		return;
 
 	learned = DIV_ROUND_CLOSEST(abs(bat->car_uah) / 1000 * 100, span);
@@ -924,6 +966,10 @@ static void mt6397_bat_update_charger(struct mt6397_battery *bat, bool online,
  * try in the flat middle. Not while charging either: the pack polarises the
  * other way and the voltage reads high. Nor under a heavy load or soon after
  * one, where it reads low by more than the resistance accounts for.
+ *
+ * A re-anchor here is a known state that a charge to full can learn the
+ * capacity from; it leaves too little of the pack for the discharge learn,
+ * which so only runs on a discharge the count got right to the end.
  */
 static void mt6397_bat_calibrate(struct mt6397_battery *bat)
 {
@@ -945,7 +991,7 @@ static void mt6397_bat_calibrate(struct mt6397_battery *bat)
 		 "re-anchoring the counter: %d %% counted against %d %% by voltage\n",
 		 bat->cap_by_c, bat->cap_by_v);
 
-	mt6397_bat_meter_reset(bat, bat->cap_by_v);
+	mt6397_bat_meter_reset(bat, bat->cap_by_v, true);
 	bat->cap_by_c = bat->cap_by_v;
 	if (!bat->ocv2cv)
 		bat->soc = bat->cap_by_v;
@@ -957,13 +1003,13 @@ static void mt6397_bat_calibrate(struct mt6397_battery *bat)
  */
 static void mt6397_bat_update_ui(struct mt6397_battery *bat)
 {
-	bool reset = false;
+	bool reset = false, known = false;
 
 	if (bat->ui_soc < 0)
 		bat->ui_soc = bat->soc;
 
 	if (bat->charger_online) {
-		if (bat->vbat_mv <= MT6397_BAT_SYSTEM_OFF_MV) {
+		if (bat->vcut_mv <= MT6397_BAT_SYSTEM_OFF_MV) {
 			/* Discharged to the cut-off; the span is what is left. */
 			mt6397_bat_learn_qmax(bat, 100 - bat->dod0);
 			if (bat->ui_soc > 0)
@@ -975,6 +1021,7 @@ static void mt6397_bat_update_ui(struct mt6397_battery *bat)
 				bat->reached_full = true;
 				if (bat->full_reset_pending) {
 					reset = true;
+					known = true;
 					bat->full_reset_pending = false;
 				}
 			} else {
@@ -996,7 +1043,7 @@ static void mt6397_bat_update_ui(struct mt6397_battery *bat)
 				bat->ui_soc = 99;
 			bat->full_counter = 0;
 		}
-	} else if (bat->vbat_mv <= MT6397_BAT_SYSTEM_OFF_MV) {
+	} else if (bat->vcut_mv <= MT6397_BAT_SYSTEM_OFF_MV) {
 		mt6397_bat_learn_qmax(bat, 100 - bat->dod0);
 		if (bat->ui_soc > 0)
 			bat->ui_soc--;
@@ -1004,7 +1051,7 @@ static void mt6397_bat_update_ui(struct mt6397_battery *bat)
 	}
 
 	if (reset) {
-		mt6397_bat_meter_reset(bat, bat->ui_soc);
+		mt6397_bat_meter_reset(bat, bat->ui_soc, known);
 	} else if (!bat->full) {
 		if (bat->ui_soc > bat->soc && bat->ui_soc != 1) {
 			bat->sync_counter += MT6397_BAT_PERIOD_S;
@@ -1198,7 +1245,8 @@ static int mt6397_battery_get_property(struct power_supply *psy,
 		ret = mt6397_battery_read_car(bat, &val->intval);
 		break;
 	case POWER_SUPPLY_PROP_CHARGE_FULL:
-		val->intval = bat->qmax_aging_mah * 1000;
+		val->intval = DIV_ROUND_CLOSEST(bat->design_mah * bat->qmax_health,
+						1000) * 1000;
 		break;
 	case POWER_SUPPLY_PROP_CHARGE_NOW:
 		val->intval = bat->qmax_aging_mah * 1000 / 100 * bat->cap_by_c;
@@ -1229,11 +1277,11 @@ static int mt6397_battery_set_property(struct power_supply *psy,
 	guard(mutex)(&bat->lock);
 
 	/* the profiles that give the design capacity are built after register */
-	if (bat->qmax_mah <= 0)
+	if (bat->design_mah <= 0)
 		return -EAGAIN;
 
 	/* microamp-hours over milliamp-hours: per mille of design */
-	health = DIV_ROUND_CLOSEST(val->intval, bat->qmax_mah);
+	health = DIV_ROUND_CLOSEST(val->intval, bat->design_mah);
 	if (health < MT6397_BAT_HEALTH_MIN || health > MT6397_BAT_HEALTH_MAX)
 		return -EINVAL;
 
@@ -1506,6 +1554,10 @@ static int mt6397_battery_probe(struct platform_device *pdev)
 
 	/* The profiles are copied out of it, so it is not needed after this. */
 	ret = mt6397_bat_build_profiles(bat, info);
+	if (!ret)
+		bat->design_mah = info->charge_full_design_uah > 0 ?
+				  info->charge_full_design_uah / 1000 :
+				  mt6397_bat_qmax(bat, 25, false);
 	power_supply_put_battery_info(bat->psy, info);
 	if (ret)
 		return ret;
