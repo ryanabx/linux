@@ -128,6 +128,15 @@
  */
 #define MT6397_BAT_CALIB_MAX_CAP	15
 #define MT6397_BAT_CALIB_MIN_GAP	5
+/*
+ * ... and for how long the average load has to have stayed light, as a
+ * percentage of cv_current, before the compensated voltage is trusted. The
+ * resistance tables leave out the pack's slower polarisation, which takes
+ * minutes to fade: at 1.16 A they put a pack the count had at 37 % at 15 %,
+ * and three minutes after that load it still read 16-26 %.
+ */
+#define MT6397_BAT_CALIB_MAX_LOAD	60
+#define MT6397_BAT_CALIB_SETTLE_S	300
 
 struct mt6397_bat_point {
 	s32 x;		/* depth of discharge in %, or resistance in mOhm */
@@ -198,6 +207,7 @@ struct mt6397_battery {
 	int ui_soc;		/* what is reported; -1 until the first pass */
 	unsigned int sync_counter;
 	unsigned int full_counter;
+	unsigned int calib_settle_s;	/* time under a light discharge */
 	bool refresh_ui;
 	bool ready;		/* seeded; until then nothing reads or reruns */
 	bool full;
@@ -912,12 +922,20 @@ static void mt6397_bat_update_charger(struct mt6397_battery *bat, bool online,
  * because the curve is steep there, so pull the count onto it -- which is what
  * sc27xx_fgu_capacity_calibration() does, and for the same reason it does not
  * try in the flat middle. Not while charging either: the pack polarises the
- * other way and the voltage reads high.
+ * other way and the voltage reads high. Nor under a heavy load or soon after
+ * one, where it reads low by more than the resistance accounts for.
  */
 static void mt6397_bat_calibrate(struct mt6397_battery *bat)
 {
-	if (bat->charging)
+	if (bat->charging || bat->cur_factor > MT6397_BAT_CALIB_MAX_LOAD) {
+		bat->calib_settle_s = 0;
 		return;
+	}
+
+	if (bat->calib_settle_s < MT6397_BAT_CALIB_SETTLE_S) {
+		bat->calib_settle_s += MT6397_BAT_PERIOD_S;
+		return;
+	}
 
 	if (bat->cap_by_v > MT6397_BAT_CALIB_MAX_CAP ||
 	    abs(bat->cap_by_v - bat->cap_by_c) < MT6397_BAT_CALIB_MIN_GAP)
@@ -1520,9 +1538,15 @@ static int mt6397_battery_resume(struct device *dev)
 {
 	struct mt6397_battery *bat = dev_get_drvdata(dev);
 
-	/* The accumulator counted through the sleep; resync the display now. */
-	scoped_guard(mutex, &bat->lock)
+	/*
+	 * The accumulator counted through the sleep; resync the display now.
+	 * The voltage average still holds samples from before it, so the
+	 * near-empty re-anchor waits for a fresh light-load window.
+	 */
+	scoped_guard(mutex, &bat->lock) {
 		bat->refresh_ui = true;
+		bat->calib_settle_s = 0;
+	}
 	schedule_delayed_work(&bat->work, 0);
 	return 0;
 }
