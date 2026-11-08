@@ -199,6 +199,7 @@ struct mt6397_battery {
 	unsigned int sync_counter;
 	unsigned int full_counter;
 	bool refresh_ui;
+	bool ready;		/* seeded; until then nothing reads or reruns */
 	bool full;
 	bool full_reset_pending;
 	bool reached_full;	/* showed 100 % on this charger session */
@@ -1148,6 +1149,9 @@ static int mt6397_battery_get_property(struct power_supply *psy,
 
 	guard(mutex)(&bat->lock);
 
+	if (!bat->ready)
+		return -ENODATA;
+
 	switch (psp) {
 	case POWER_SUPPLY_PROP_STATUS:
 		val->intval = bat->status;
@@ -1232,7 +1236,9 @@ static void mt6397_battery_external_power_changed(struct power_supply *psy)
 	struct mt6397_battery *bat = power_supply_get_drvdata(psy);
 
 	/* re-run now so a plug or unplug is reflected without waiting a period */
-	mod_delayed_work(system_percpu_wq, &bat->work, HZ);
+	scoped_guard(mutex, &bat->lock)
+		if (bat->ready)
+			mod_delayed_work(system_percpu_wq, &bat->work, HZ);
 }
 
 static const struct power_supply_desc mt6397_battery_desc = {
@@ -1464,6 +1470,11 @@ static int mt6397_battery_probe(struct platform_device *pdev)
 	if (ret)
 		return dev_err_probe(dev, ret, "failed to start the fuel gauge\n");
 
+	/* before the supply, so that devm unregisters the supply first */
+	ret = devm_delayed_work_autocancel(dev, &bat->work, mt6397_bat_work);
+	if (ret)
+		return ret;
+
 	psy_cfg.drv_data = bat;
 	psy_cfg.fwnode = dev_fwnode(dev);
 	bat->psy = devm_power_supply_register(dev, &mt6397_battery_desc, &psy_cfg);
@@ -1481,20 +1492,18 @@ static int mt6397_battery_probe(struct platform_device *pdev)
 	if (ret)
 		return ret;
 
-	ret = devm_delayed_work_autocancel(dev, &bat->work, mt6397_bat_work);
-	if (ret)
-		return ret;
-
 	err = thermal_zone_get_temp(bat->tz, &temp_mc);
 	mt6397_bat_read_charger(bat, &online, &status);
 
 	scoped_guard(mutex, &bat->lock) {
 		mt6397_bat_update_temp(bat, err, temp_mc);
 		mt6397_bat_init_soc(bat, online, status);
+		bat->ready = true;
 	}
 
 	platform_set_drvdata(pdev, bat);
 	schedule_delayed_work(&bat->work, 0);
+	power_supply_changed(bat->psy);
 
 	return 0;
 }
