@@ -144,13 +144,14 @@
 #define MT6397_BAT_CALIB_MAX_CAP	15
 #define MT6397_BAT_CALIB_MIN_GAP	5
 /*
- * ... and for how long the average load has to have stayed light, as a
- * percentage of cv_current, before the compensated voltage is trusted. The
- * resistance tables leave out the pack's slower polarisation, which takes
- * minutes to fade: at 1.16 A they put a pack the count had at 37 % at 15 %,
- * and three minutes after that load it still read 16-26 %.
+ * ... and for how long the average discharge has to have stayed below
+ * Qmax / MT6397_BAT_CALIB_MAX_LOAD_DIV (C/16) before the compensated voltage
+ * is trusted. The resistance tables leave out the pack's slower
+ * polarisation, which takes minutes to fade: at 1.16 A they put a pack the
+ * count had at 37 % at 15 %, and three minutes after that load it still read
+ * 16-26 %.
  */
-#define MT6397_BAT_CALIB_MAX_LOAD	60
+#define MT6397_BAT_CALIB_MAX_LOAD_DIV	16
 #define MT6397_BAT_CALIB_SETTLE_S	300
 
 struct mt6397_bat_point {
@@ -208,6 +209,7 @@ struct mt6397_battery {
 	int cur_01ma;		/* magnitude, in 0.1 mA like the vendor */
 	bool charging;		/* sign of the current */
 	int cur_factor;		/* average load as a percentage of cv_current */
+	int cur_avg_01ma;	/* average discharge, 0 while charging */
 	int cur_buf[MT6397_BAT_TEMP_AVG_SIZE];
 	int cur_sum, cur_idx;
 	bool cur_init;
@@ -708,6 +710,7 @@ static void mt6397_bat_update_current_factor(struct mt6397_battery *bat)
 	if (bat->charging) {
 		bat->cur_init = false;
 		bat->cur_factor = 100;
+		bat->cur_avg_01ma = 0;
 		return;
 	}
 
@@ -724,6 +727,7 @@ static void mt6397_bat_update_current_factor(struct mt6397_battery *bat)
 	avg = bat->cur_sum / MT6397_BAT_TEMP_AVG_SIZE;
 	bat->cur_idx = (bat->cur_idx + 1) % MT6397_BAT_TEMP_AVG_SIZE;
 
+	bat->cur_avg_01ma = avg;
 	bat->cur_factor = bat->cv_current_01ma ?
 			  avg * 100 / bat->cv_current_01ma : 100;
 }
@@ -782,8 +786,7 @@ static void mt6397_bat_meter_run(struct mt6397_battery *bat)
 	bat->vcut_mv = bat->vcut_sum / MT6397_BAT_CUTOFF_AVG_SIZE;
 	bat->vcut_idx = (bat->vcut_idx + 1) % MT6397_BAT_CUTOFF_AVG_SIZE;
 
-	if (bat->ocv2cv)
-		mt6397_bat_update_current_factor(bat);
+	mt6397_bat_update_current_factor(bat);
 
 	if (mt6397_battery_read_car(bat, &bat->car_uah))
 		return;
@@ -973,7 +976,8 @@ static void mt6397_bat_update_charger(struct mt6397_battery *bat, bool online,
  */
 static void mt6397_bat_calibrate(struct mt6397_battery *bat)
 {
-	if (bat->charging || bat->cur_factor > MT6397_BAT_CALIB_MAX_LOAD) {
+	if (bat->charging ||
+	    bat->cur_avg_01ma / 10 > bat->qmax_mah / MT6397_BAT_CALIB_MAX_LOAD_DIV) {
 		bat->calib_settle_s = 0;
 		return;
 	}
