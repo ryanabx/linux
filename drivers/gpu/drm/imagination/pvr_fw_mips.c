@@ -8,7 +8,11 @@
 #include "pvr_rogue_mips.h"
 #include "pvr_vm_mips.h"
 
+#include <drm/drm_print.h>
+
 #include <linux/err.h>
+#include <linux/ioport.h>
+#include <linux/mm.h>
 #include <linux/types.h>
 
 #define ROGUE_FW_HEAP_MIPS_BASE 0xC0000000
@@ -98,6 +102,7 @@ pvr_mips_wrapper_init(struct pvr_device *pvr_dev)
 {
 	struct pvr_fw_mips_data *mips_data = pvr_dev->fw_dev.processor_data.mips_data;
 	const u64 remap_settings = ROGUE_MIPSFW_BOOT_REMAP_LOG2_SEGMENT_SIZE;
+	u64 regbank_addr;
 	u32 phys_bus_width;
 
 	int err = PVR_FEATURE_VALUE(pvr_dev, phys_bus_width, &phys_bus_width);
@@ -105,13 +110,37 @@ pvr_mips_wrapper_init(struct pvr_device *pvr_dev)
 	if (WARN_ON(err))
 		return err;
 
-	/* Currently MIPS FW only supported with physical bus width > 32 bits. */
-	if (WARN_ON(phys_bus_width <= 32))
-		return -EINVAL;
+	if (phys_bus_width > 32) {
+		/*
+		 * The MIPS core issues 32-bit physical addresses, which the wrapper
+		 * extends; the register bank sits at a fixed address in that space.
+		 */
+		regbank_addr = ROGUE_MIPSFW_REGISTERS_VIRTUAL_BASE;
+	} else {
+		/*
+		 * On a 32-bit bus the MIPS physical address space is the system's,
+		 * so the register bank has to be claimed at its real address.
+		 */
+		regbank_addr = pvr_dev->regs_resource->start;
+
+		/*
+		 * The boot, data and code remap windows take MIPS physical
+		 * addresses 0x1FC00000-0x1FC02FFF as input. Firmware memory placed
+		 * there would be remapped too; the downstream driver moves such
+		 * pages through a trampoline. Refuse instead.
+		 */
+		if (region_intersects(ROGUE_MIPSFW_BOOT_REMAP_PHYS_ADDR_IN,
+				      ROGUE_MIPSFW_TRAMPOLINE_SIZE,
+				      IORESOURCE_SYSTEM_RAM,
+				      IORES_DESC_NONE) != REGION_DISJOINT) {
+			drm_err(from_pvr_device(pvr_dev),
+				"system RAM overlaps the MIPS remap window, not supported\n");
+			return -EINVAL;
+		}
+	}
 
 	pvr_cr_write32(pvr_dev, ROGUE_CR_MIPS_WRAPPER_CONFIG,
-		       (ROGUE_MIPSFW_REGISTERS_VIRTUAL_BASE >>
-			ROGUE_MIPSFW_WRAPPER_CONFIG_REGBANK_ADDR_ALIGN) |
+		       (regbank_addr >> ROGUE_MIPSFW_WRAPPER_CONFIG_REGBANK_ADDR_ALIGN) |
 		       ROGUE_CR_MIPS_WRAPPER_CONFIG_BOOT_ISA_MODE_MICROMIPS);
 
 	/* Configure remap for boot code, boot data and exceptions code areas. */
@@ -122,13 +151,13 @@ pvr_mips_wrapper_init(struct pvr_device *pvr_dev)
 		       (mips_data->boot_code_dma_addr &
 			~ROGUE_CR_MIPS_ADDR_REMAP1_CONFIG2_ADDR_OUT_CLRMSK) | remap_settings);
 
-	if (PVR_HAS_QUIRK(pvr_dev, 63553)) {
-		/*
-		 * WA always required on 36 bit cores, to avoid continuous unmapped memory accesses
-		 * to address 0x0.
-		 */
-		WARN_ON(phys_bus_width != 36);
-
+	/*
+	 * BRN 63553: the MIPS core makes stray accesses to physical address 0.
+	 * Send them to the boot code, unless address 0 is real memory, which
+	 * can only be the case on a 32-bit bus.
+	 */
+	if (PVR_HAS_QUIRK(pvr_dev, 63553) &&
+	    (phys_bus_width > 32 || !page_is_ram(0))) {
 		pvr_cr_write64(pvr_dev, ROGUE_CR_MIPS_ADDR_REMAP5_CONFIG1,
 			       ROGUE_CR_MIPS_ADDR_REMAP5_CONFIG1_MODE_ENABLE_EN);
 		pvr_cr_write64(pvr_dev, ROGUE_CR_MIPS_ADDR_REMAP5_CONFIG2,
