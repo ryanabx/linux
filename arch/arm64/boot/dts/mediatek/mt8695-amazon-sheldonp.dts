@@ -178,6 +178,10 @@
 	proc-supply = <&mt6393_vproc>;
 };
 
+&gpu {
+	status = "okay";
+};
+
 &hdmi {
 	status = "okay";
 };
