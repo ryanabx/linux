@@ -7,6 +7,7 @@
 #include "pvr_rogue_cr_defs_client.h"
 #include "pvr_rogue_fwif.h"
 
+#include <drm/drm_print.h>
 #include <drm/drm_gem.h>
 #include <linux/bitops.h>
 #include <linux/math.h>
