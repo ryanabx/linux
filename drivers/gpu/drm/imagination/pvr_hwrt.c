@@ -11,6 +11,7 @@
 #include <drm/drm_gem.h>
 #include <linux/bitops.h>
 #include <linux/math.h>
+#include <linux/moduleparam.h>
 #include <linux/slab.h>
 #include <linux/xarray.h>
 #include <uapi/drm/pvr_drm.h>
@@ -89,6 +90,16 @@ hwrt_fini_common_fw_structure(struct pvr_hwrt_dataset *hwrt)
 {
 	pvr_fw_object_destroy(hwrt->common_fw_obj);
 }
+
+/* EXPERIMENT: format v1 macrotile knobs, writable at runtime. */
+static uint v1_div = 1;
+module_param(v1_div, uint, 0644);
+static bool v1_x23;
+module_param(v1_x23, bool, 0644);
+static uint v1_isp_div = 1;
+module_param(v1_isp_div, uint, 0644);
+static uint v1_stride_mode;
+module_param(v1_stride_mode, uint, 0644);
 
 static int
 get_cr_isp_mtile_size_val(struct pvr_device *pvr_dev, u32 samples,
@@ -234,6 +245,7 @@ hwrt_init_common_fw_structure(struct pvr_file *pvr_file,
 	struct drm_pvr_create_hwrt_geom_data_args *geom_data_args = &args->geom_data_args;
 	struct pvr_device *pvr_dev = pvr_file->pvr_dev;
 	struct pvr_rt_mtile_info info;
+	bool is_v1 = false;
 	int err;
 
 	err = PVR_FEATURE_VALUE(pvr_dev, tile_size_x, &info.tile_size_x);
@@ -264,17 +276,29 @@ hwrt_init_common_fw_structure(struct pvr_file *pvr_file,
 			info.mtile_y[0] = DIV_ROUND_UP(info.num_tiles_y, 8) * 2;
 			info.tile_max_x = round_up(info.num_tiles_x, 2) - 1;
 			info.tile_max_y = round_up(info.num_tiles_y, 2) - 1;
+			info.mtile_x[1] = 0;
+			info.mtile_y[1] = 0;
+			info.mtile_x[2] = 0;
+			info.mtile_y[2] = 0;
 		} else {
-			/* Format v1: one macrotile covering the whole render. */
-			info.mtile_x[0] = info.num_tiles_x;
-			info.mtile_y[0] = info.num_tiles_y;
+			/*
+			 * Format v1, EXPERIMENT knobs: macrotile boundary at
+			 * ceil(tiles / v1_div); v1_x23 also sets the second and
+			 * third boundaries (2x, 3x) like the non-simple format.
+			 */
+			u32 div = v1_div ? v1_div : 1;
+
+			is_v1 = true;
+
+			info.mtile_x[0] = DIV_ROUND_UP(info.num_tiles_x, div);
+			info.mtile_y[0] = DIV_ROUND_UP(info.num_tiles_y, div);
+			info.mtile_x[1] = v1_x23 ? info.mtile_x[0] * 2 : 0;
+			info.mtile_y[1] = v1_x23 ? info.mtile_y[0] * 2 : 0;
+			info.mtile_x[2] = v1_x23 ? info.mtile_x[0] * 3 : 0;
+			info.mtile_y[2] = v1_x23 ? info.mtile_y[0] * 3 : 0;
 			info.tile_max_x = info.num_tiles_x - 1;
 			info.tile_max_y = info.num_tiles_y - 1;
 		}
-		info.mtile_x[1] = 0;
-		info.mtile_y[1] = 0;
-		info.mtile_x[2] = 0;
-		info.mtile_y[2] = 0;
 	} else {
 		/* Set up 16 macrotiles with a multiple of 4x4 tiles per macrotile. */
 		info.mtile_x[0] = round_up(DIV_ROUND_UP(info.num_tiles_x, 4), 4);
@@ -336,6 +360,27 @@ hwrt_init_common_fw_structure(struct pvr_file *pvr_file,
 					&hwrt->common.isp_mtile_size);
 	if (err)
 		return err;
+
+	if (is_v1) {
+		u32 idiv = v1_isp_div ? v1_isp_div : 1;
+		struct pvr_rt_mtile_info isp = info;
+
+		isp.mtile_x[0] = DIV_ROUND_UP(info.num_tiles_x, idiv);
+		isp.mtile_y[0] = DIV_ROUND_UP(info.num_tiles_y, idiv);
+		err = get_cr_isp_mtile_size_val(pvr_dev, args->samples, &isp,
+						&hwrt->common.isp_mtile_size);
+		if (err)
+			return err;
+		if (v1_stride_mode == 1)
+			hwrt->common.mtile_stride = info.num_tiles_x * info.num_tiles_y;
+		else if (v1_stride_mode == 2)
+			hwrt->common.mtile_stride = 0;
+		drm_info(from_pvr_device(pvr_dev),
+			 "v1: tiles %ux%u te_mtile1 %08x te_mtile2 %08x te_screen %08x isp_mtile %08x stride %u\n",
+			 info.num_tiles_x, info.num_tiles_y, hwrt->common.te_mtile1,
+			 hwrt->common.te_mtile2, hwrt->common.te_screen,
+			 hwrt->common.isp_mtile_size, hwrt->common.mtile_stride);
+	}
 
 	hwrt->common.tpc_stride = geom_data_args->tpc_stride;
 	hwrt->common.tpc_size = geom_data_args->tpc_size;
