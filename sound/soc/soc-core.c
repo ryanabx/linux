@@ -387,6 +387,11 @@ static struct snd_soc_pcm_runtime *soc_new_pcm_runtime(
 		device_unregister(dev);
 		return NULL;
 	}
+	/*
+	 * devm_kzalloc_flex() set num_components to the array's capacity;
+	 * snd_soc_rtd_add_component() counts the components as they are added.
+	 */
+	rtd->num_components = 0;
 
 	rtd->dev = dev;
 	INIT_LIST_HEAD(&rtd->list);
