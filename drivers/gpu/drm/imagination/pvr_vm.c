@@ -70,7 +70,7 @@ struct pvr_vm_context {
 };
 
 /* EXPERIMENT (BRN 65273): DDK 1.10 RGX_MMU_INI{A,B}_BRN_65273_HEAP_BASE. */
-#define BRN65273_PROBE_SIZE SZ_2M
+#define BRN65273_PROBE_SIZE SZ_64K
 static const u64 brn65273_base[2] = { 0xF800000000ull, 0xF900000000ull };
 
 static inline
@@ -558,7 +558,7 @@ static void brn65273_probe_map(struct pvr_vm_context *vm_ctx)
 		}
 		vm_ctx->brn65273_obj[i] = obj;
 	}
-	drm_info(drm_dev, "brn65273 probe: mapped %u KiB at %llx and %llx\n",
+	drm_dbg(drm_dev, "brn65273 probe: mapped %u KiB at %llx and %llx\n",
 		 BRN65273_PROBE_SIZE / SZ_1K, brn65273_base[0], brn65273_base[1]);
 }
 
@@ -582,13 +582,13 @@ static void brn65273_probe_report(struct pvr_vm_context *vm_ctx)
 				last = j * 4;
 			}
 			if (count) {
-				drm_info(drm_dev,
+				drm_dbg(drm_dev,
 					 "brn65273 probe: %llx: %u nonzero words, bytes %#x-%#x\n",
 					 brn65273_base[i], count, first, last + 3);
-				print_hex_dump(KERN_INFO, "brn65273: ", DUMP_PREFIX_OFFSET, 16, 4,
+				print_hex_dump(KERN_DEBUG, "brn65273: ", DUMP_PREFIX_OFFSET, 16, 4,
 					       (u8 *)w + first, min(256u, last + 4 - first), false);
 			} else {
-				drm_info(drm_dev, "brn65273 probe: %llx untouched\n",
+				drm_dbg(drm_dev, "brn65273 probe: %llx untouched\n",
 					 brn65273_base[i]);
 			}
 			pvr_gem_object_vunmap(obj);
