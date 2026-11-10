@@ -100,6 +100,10 @@ static uint v1_isp_div = 1;
 module_param(v1_isp_div, uint, 0644);
 static uint v1_stride_mode;
 module_param(v1_stride_mode, uint, 0644);
+static uint v1_screen_mul = 1;
+module_param(v1_screen_mul, uint, 0644);
+static uint v1_screen_add;
+module_param(v1_screen_add, uint, 0644);
 
 static int
 get_cr_isp_mtile_size_val(struct pvr_device *pvr_dev, u32 samples,
@@ -296,8 +300,8 @@ hwrt_init_common_fw_structure(struct pvr_file *pvr_file,
 			info.mtile_y[1] = v1_x23 ? info.mtile_y[0] * 2 : 0;
 			info.mtile_x[2] = v1_x23 ? info.mtile_x[0] * 3 : 0;
 			info.mtile_y[2] = v1_x23 ? info.mtile_y[0] * 3 : 0;
-			info.tile_max_x = info.num_tiles_x - 1;
-			info.tile_max_y = info.num_tiles_y - 1;
+			info.tile_max_x = info.num_tiles_x * (v1_screen_mul ? v1_screen_mul : 1) - 1 + v1_screen_add;
+			info.tile_max_y = info.num_tiles_y * (v1_screen_mul ? v1_screen_mul : 1) - 1 + v1_screen_add;
 		}
 	} else {
 		/* Set up 16 macrotiles with a multiple of 4x4 tiles per macrotile. */
