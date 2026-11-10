@@ -415,6 +415,12 @@ pvr_free_list_create(struct pvr_file *pvr_file,
 	struct pvr_free_list *free_list;
 	int err;
 
+	/* EXPERIMENT: log the free list to match GPU fault addresses. */
+	drm_info(from_pvr_device(pvr_file->pvr_dev),
+		 "free list: %llx pages init %u max %u grow %u\n",
+		 args->free_list_gpu_addr, args->initial_num_pages,
+		 args->max_num_pages, args->grow_num_pages);
+
 	/* Create and fill out the kernel structure */
 	free_list = kzalloc_obj(*free_list);
 

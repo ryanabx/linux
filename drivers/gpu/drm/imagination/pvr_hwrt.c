@@ -456,6 +456,20 @@ pvr_hwrt_dataset_create(struct pvr_file *pvr_file,
 	struct pvr_hwrt_dataset *hwrt;
 	int err, i = 0;
 
+	/* EXPERIMENT: log the dataset's buffers to match GPU fault addresses. */
+	drm_info(from_pvr_device(pvr_file->pvr_dev),
+		 "hwrt: %ux%u s%u l%u tpc %llx+%x stride %u vheap %llx rtc %llx rgnhdr_size %x\n",
+		 args->width, args->height, args->samples, args->layers,
+		 args->geom_data_args.tpc_dev_addr, args->geom_data_args.tpc_size,
+		 args->geom_data_args.tpc_stride, args->geom_data_args.vheap_table_dev_addr,
+		 args->geom_data_args.rtc_dev_addr, args->region_header_size);
+	for (int j = 0; j < 2; j++)
+		drm_info(from_pvr_device(pvr_file->pvr_dev),
+			 "hwrt: rt%d mlist %llx mtile %llx rgnhdr %llx\n", j,
+			 args->rt_data_args[j].pm_mlist_dev_addr,
+			 args->rt_data_args[j].macrotile_array_dev_addr,
+			 args->rt_data_args[j].region_header_dev_addr);
+
 	/* Create and fill out the kernel structure */
 	hwrt = kzalloc_obj(*hwrt);
 
