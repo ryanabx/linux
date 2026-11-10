@@ -22,6 +22,7 @@
 #include <linux/firmware.h>
 #include <linux/gfp.h>
 #include <linux/interrupt.h>
+#include <linux/moduleparam.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
@@ -200,11 +201,51 @@ static void pvr_device_handle_safety_events(struct pvr_device *pvr_dev)
 	}
 }
 
+/*
+ * EXPERIMENT: dump GPU registers [regdump_start, regdump_end) in 8-byte
+ * steps on the next regdump interrupts (non-zero values only).
+ */
+static int regdump;
+module_param(regdump, int, 0644);
+static uint regdump_start = 0x0c00;
+module_param(regdump_start, uint, 0644);
+static uint regdump_end = 0x1000;
+module_param(regdump_end, uint, 0644);
+
+static void pvr_device_regdump(struct pvr_device *pvr_dev)
+{
+	struct drm_device *drm_dev = from_pvr_device(pvr_dev);
+	char line[160];
+	int len = 0;
+	u32 off;
+
+	if (READ_ONCE(regdump) <= 0)
+		return;
+	WRITE_ONCE(regdump, regdump - 1);
+
+	drm_info(drm_dev, "regdump %04x-%04x:\n", regdump_start, regdump_end);
+	for (off = regdump_start & ~7u; off < regdump_end && off < 0x20000; off += 8) {
+		u64 v = pvr_cr_read64(pvr_dev, off);
+
+		if (!v)
+			continue;
+		len += scnprintf(line + len, sizeof(line) - len, " %04x=%llx", off, v);
+		if (len > 110) {
+			drm_info(drm_dev, "rd%s\n", line);
+			len = 0;
+		}
+	}
+	if (len)
+		drm_info(drm_dev, "rd%s\n", line);
+}
+
 static irqreturn_t pvr_device_irq_thread_handler(int irq, void *data)
 {
 	struct pvr_device *pvr_dev = data;
 	struct drm_device *drm_dev = from_pvr_device(pvr_dev);
 	irqreturn_t ret = IRQ_NONE;
+
+	pvr_device_regdump(pvr_dev);
 
 	/* We are in the threaded handler, we can keep dequeuing events until we
 	 * don't see any. This should allow us to reduce the number of interrupts
