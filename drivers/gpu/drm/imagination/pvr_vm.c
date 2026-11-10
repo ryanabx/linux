@@ -64,7 +64,14 @@ struct pvr_vm_context {
 	 * should use the @dummy_gem.resv and not their own _resv field.
 	 */
 	struct drm_gem_object dummy_gem;
+
+	/* EXPERIMENT (BRN 65273): objects mapped at the DDK's INIA/INIB heaps. */
+	struct pvr_gem_object *brn65273_obj[2];
 };
+
+/* EXPERIMENT (BRN 65273): DDK 1.10 RGX_MMU_INI{A,B}_BRN_65273_HEAP_BASE. */
+#define BRN65273_PROBE_SIZE SZ_2M
+static const u64 brn65273_base[2] = { 0xF800000000ull, 0xF900000000ull };
 
 static inline
 struct pvr_vm_context *to_pvr_vm_context(struct drm_gpuvm *gpuvm)
@@ -244,7 +251,9 @@ pvr_vm_bind_op_map_init(struct pvr_vm_bind_op *bind_op,
 		return -EINVAL;
 
 	if (is_user &&
-	    !pvr_find_heap_containing(vm_ctx->pvr_dev, device_addr, size)) {
+	    !pvr_find_heap_containing(vm_ctx->pvr_dev, device_addr, size) &&
+	    !((device_addr == brn65273_base[0] || device_addr == brn65273_base[1]) &&
+	      size == BRN65273_PROBE_SIZE)) {
 		return -EINVAL;
 	}
 
@@ -526,6 +535,69 @@ fw_mem_context_init(void *cpu_ptr, void *priv)
 	fw_mem_ctx->page_cat_base_reg_set = ROGUE_FW_BIF_INVALID_PCSET;
 }
 
+/* EXPERIMENT (BRN 65273): map zeroed memory at INIA/INIB, report what got written. */
+static void brn65273_probe_map(struct pvr_vm_context *vm_ctx)
+{
+	struct drm_device *drm_dev = from_pvr_device(vm_ctx->pvr_dev);
+
+	for (int i = 0; i < 2; i++) {
+		struct pvr_gem_object *obj;
+		int err;
+
+		obj = pvr_gem_object_create(vm_ctx->pvr_dev, BRN65273_PROBE_SIZE, 0);
+		if (IS_ERR(obj)) {
+			drm_warn(drm_dev, "brn65273 probe: alloc failed %ld\n", PTR_ERR(obj));
+			return;
+		}
+		err = pvr_vm_map(vm_ctx, obj, 0, brn65273_base[i], BRN65273_PROBE_SIZE);
+		if (err) {
+			drm_warn(drm_dev, "brn65273 probe: map %llx failed %d\n",
+				 brn65273_base[i], err);
+			pvr_gem_object_put(obj);
+			return;
+		}
+		vm_ctx->brn65273_obj[i] = obj;
+	}
+	drm_info(drm_dev, "brn65273 probe: mapped %u KiB at %llx and %llx\n",
+		 BRN65273_PROBE_SIZE / SZ_1K, brn65273_base[0], brn65273_base[1]);
+}
+
+static void brn65273_probe_report(struct pvr_vm_context *vm_ctx)
+{
+	struct drm_device *drm_dev = from_pvr_device(vm_ctx->pvr_dev);
+
+	for (int i = 0; i < 2; i++) {
+		struct pvr_gem_object *obj = vm_ctx->brn65273_obj[i];
+		u32 *w, first = U32_MAX, last = 0, count = 0;
+
+		if (!obj)
+			continue;
+		w = pvr_gem_object_vmap(obj);
+		if (!IS_ERR(w)) {
+			for (u32 j = 0; j < BRN65273_PROBE_SIZE / 4; j++) {
+				if (!w[j])
+					continue;
+				count++;
+				first = min(first, j * 4);
+				last = j * 4;
+			}
+			if (count) {
+				drm_info(drm_dev,
+					 "brn65273 probe: %llx: %u nonzero words, bytes %#x-%#x\n",
+					 brn65273_base[i], count, first, last + 3);
+				print_hex_dump(KERN_INFO, "brn65273: ", DUMP_PREFIX_OFFSET, 16, 4,
+					       (u8 *)w + first, min(256u, last + 4 - first), false);
+			} else {
+				drm_info(drm_dev, "brn65273 probe: %llx untouched\n",
+					 brn65273_base[i]);
+			}
+			pvr_gem_object_vunmap(obj);
+		}
+		pvr_gem_object_put(obj);
+		vm_ctx->brn65273_obj[i] = NULL;
+	}
+}
+
 /**
  * pvr_vm_create_context() - Create a new VM context.
  * @pvr_dev: Target PowerVR device.
@@ -594,6 +666,9 @@ pvr_vm_create_context(struct pvr_device *pvr_dev, bool is_userspace_context)
 	mutex_init(&vm_ctx->lock);
 	kref_init(&vm_ctx->ref_count);
 
+	if (is_userspace_context)
+		brn65273_probe_map(vm_ctx);
+
 	return vm_ctx;
 
 err_page_table_destroy:
@@ -620,6 +695,8 @@ pvr_vm_context_release(struct kref *ref_count)
 
 	if (vm_ctx->fw_mem_ctx_obj)
 		pvr_fw_object_destroy(vm_ctx->fw_mem_ctx_obj);
+
+	brn65273_probe_report(vm_ctx);
 
 	pvr_vm_unmap_all(vm_ctx);
 
