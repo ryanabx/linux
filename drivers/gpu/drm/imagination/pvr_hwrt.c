@@ -106,6 +106,10 @@ static uint v1_screen_add;
 module_param(v1_screen_add, uint, 0644);
 static uint v1_screen_div = 1;
 module_param(v1_screen_div, uint, 0644);
+static uint v1_ppp_mul = 1;
+module_param(v1_ppp_mul, uint, 0644);
+static int v1_teaa = -1;
+module_param(v1_teaa, int, 0644);
 
 static int
 get_cr_isp_mtile_size_val(struct pvr_device *pvr_dev, u32 samples,
@@ -371,6 +375,15 @@ hwrt_init_common_fw_structure(struct pvr_file *pvr_file,
 
 	if (is_v1) {
 		u32 idiv = v1_isp_div ? v1_isp_div : 1;
+		u32 pm = v1_ppp_mul ? v1_ppp_mul : 1;
+
+		hwrt->common.screen_pixel_max =
+			(((args->width * pm - 1) << ROGUE_CR_PPP_SCREEN_PIXXMAX_SHIFT) &
+			 ~ROGUE_CR_PPP_SCREEN_PIXXMAX_CLRMSK) |
+			(((args->height * pm - 1) << ROGUE_CR_PPP_SCREEN_PIXYMAX_SHIFT) &
+			 ~ROGUE_CR_PPP_SCREEN_PIXYMAX_CLRMSK);
+		if (v1_teaa >= 0)
+			hwrt->common.teaa = v1_teaa;
 		struct pvr_rt_mtile_info isp = info;
 
 		isp.mtile_x[0] = DIV_ROUND_UP(info.num_tiles_x, idiv);
@@ -384,8 +397,9 @@ hwrt_init_common_fw_structure(struct pvr_file *pvr_file,
 		else if (v1_stride_mode == 2)
 			hwrt->common.mtile_stride = 0;
 		drm_info(from_pvr_device(pvr_dev),
-			 "v1: tiles %ux%u te_mtile1 %08x te_mtile2 %08x te_screen %08x isp_mtile %08x stride %u\n",
-			 info.num_tiles_x, info.num_tiles_y, hwrt->common.te_mtile1,
+			 "v1: tiles %ux%u ppp %08x teaa %x te_mtile1 %08x te_mtile2 %08x te_screen %08x isp_mtile %08x stride %u\n",
+			 info.num_tiles_x, info.num_tiles_y, hwrt->common.screen_pixel_max,
+			 hwrt->common.teaa, hwrt->common.te_mtile1,
 			 hwrt->common.te_mtile2, hwrt->common.te_screen,
 			 hwrt->common.isp_mtile_size, hwrt->common.mtile_stride);
 	}
