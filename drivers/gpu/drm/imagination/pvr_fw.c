@@ -366,7 +366,8 @@ fw_sysinit_init(void *cpu_ptr, void *priv)
 	fwif_sysinit->hw_perf_filter = 0;
 	fwif_sysinit->firmware_perf = FW_PERF_CONF_NONE;
 	fwif_sysinit->initial_core_clock_speed = clock_speed_hz;
-	fwif_sysinit->active_pm_latency_ms = 0;
+	/* EXPERIMENT: the DDK's 50 ms (mt8695 sysconfig), not 0 */
+	fwif_sysinit->active_pm_latency_ms = 50;
 	fwif_sysinit->gpio_validation_mode = ROGUE_FWIF_GPIO_VAL_OFF;
 	fwif_sysinit->firmware_started = false;
 	fwif_sysinit->marker_val = 1;
@@ -403,7 +404,7 @@ fw_runtime_cfg_init(void *cpu_ptr, void *priv)
 	WARN_ON(!clock_speed_hz);
 
 	runtime_cfg->core_clock_speed = clock_speed_hz;
-	runtime_cfg->active_pm_latency_ms = 0;
+	runtime_cfg->active_pm_latency_ms = 50;
 	runtime_cfg->active_pm_latency_persistant = true;
 	WARN_ON(PVR_FEATURE_VALUE(pvr_dev, num_clusters,
 				  &runtime_cfg->default_dusts_num_init) != 0);
