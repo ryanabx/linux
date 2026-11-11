@@ -1057,8 +1057,14 @@ static const struct drm_pvr_heap pvr_heaps[] = {
 		.page_size_log2 = PVR_DEVICE_PAGE_SHIFT,
 	},
 	[DRM_PVR_HEAP_TRANSFER_FRAG] = {
-		.base = ROGUE_TRANSFER_FRAG_HEAP_BASE,
-		.size = ROGUE_TRANSFER_FRAG_HEAP_SIZE,
+		/*
+		 * EXPERIMENT (BRN 65273): DDK 1.10 puts its TQ3D parameters heap at
+		 * 0x0, 1 GiB, for this BRN (RGX_TQ3DPARAMETERS_BRN_65273_HEAP_BASE).
+		 * Transfer jobs on the GE8300 fault at the bare offsets of their
+		 * control streams in this heap, as if only the low bits were used.
+		 */
+		.base = 0x0ull,
+		.size = SZ_1G,
 		.flags = 0,
 		.page_size_log2 = PVR_DEVICE_PAGE_SHIFT,
 	},
