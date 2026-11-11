@@ -66,14 +66,12 @@ struct pvr_vm_context {
 	struct drm_gem_object dummy_gem;
 
 	/* EXPERIMENT (BRN 65273): objects mapped at the DDK's INIA/INIB heaps. */
-	struct pvr_gem_object *brn65273_obj[3];
+	struct pvr_gem_object *brn65273_obj[2];
 };
 
 /* EXPERIMENT (BRN 65273): DDK 1.10 RGX_MMU_INI{A,B}_BRN_65273_HEAP_BASE. */
 #define BRN65273_PROBE_SIZE SZ_64K
-/* The third: DDK RGX_TQ3DPARAMETERS_BRN_65273_HEAP_BASE (0x0, 1 GiB). */
-static const u64 brn65273_base[3] = { 0xF800000000ull, 0xF900000000ull, 0x0ull };
-static const u64 brn65273_size[3] = { SZ_64K, SZ_64K, SZ_1M };
+static const u64 brn65273_base[2] = { 0xF800000000ull, 0xF900000000ull };
 
 static inline
 struct pvr_vm_context *to_pvr_vm_context(struct drm_gpuvm *gpuvm)
@@ -254,9 +252,8 @@ pvr_vm_bind_op_map_init(struct pvr_vm_bind_op *bind_op,
 
 	if (is_user &&
 	    !pvr_find_heap_containing(vm_ctx->pvr_dev, device_addr, size) &&
-	    !(((device_addr == brn65273_base[0] || device_addr == brn65273_base[1]) &&
-	       size == BRN65273_PROBE_SIZE) ||
-	      (device_addr == brn65273_base[2] && size == brn65273_size[2]))) {
+	    !((device_addr == brn65273_base[0] || device_addr == brn65273_base[1]) &&
+	      size == BRN65273_PROBE_SIZE)) {
 		return -EINVAL;
 	}
 
@@ -543,16 +540,16 @@ static void brn65273_probe_map(struct pvr_vm_context *vm_ctx)
 {
 	struct drm_device *drm_dev = from_pvr_device(vm_ctx->pvr_dev);
 
-	for (int i = 0; i < 3; i++) {
+	for (int i = 0; i < 2; i++) {
 		struct pvr_gem_object *obj;
 		int err;
 
-		obj = pvr_gem_object_create(vm_ctx->pvr_dev, brn65273_size[i], 0);
+		obj = pvr_gem_object_create(vm_ctx->pvr_dev, BRN65273_PROBE_SIZE, 0);
 		if (IS_ERR(obj)) {
 			drm_warn(drm_dev, "brn65273 probe: alloc failed %ld\n", PTR_ERR(obj));
 			return;
 		}
-		err = pvr_vm_map(vm_ctx, obj, 0, brn65273_base[i], brn65273_size[i]);
+		err = pvr_vm_map(vm_ctx, obj, 0, brn65273_base[i], BRN65273_PROBE_SIZE);
 		if (err) {
 			drm_warn(drm_dev, "brn65273 probe: map %llx failed %d\n",
 				 brn65273_base[i], err);
@@ -569,7 +566,7 @@ static void brn65273_probe_report(struct pvr_vm_context *vm_ctx)
 {
 	struct drm_device *drm_dev = from_pvr_device(vm_ctx->pvr_dev);
 
-	for (int i = 0; i < 3; i++) {
+	for (int i = 0; i < 2; i++) {
 		struct pvr_gem_object *obj = vm_ctx->brn65273_obj[i];
 		u32 *w, first = U32_MAX, last = 0, count = 0;
 
@@ -577,21 +574,14 @@ static void brn65273_probe_report(struct pvr_vm_context *vm_ctx)
 			continue;
 		w = pvr_gem_object_vmap(obj);
 		if (!IS_ERR(w)) {
-			for (u32 j = 0; j < brn65273_size[i] / 4; j++) {
+			for (u32 j = 0; j < BRN65273_PROBE_SIZE / 4; j++) {
 				if (!w[j])
 					continue;
 				count++;
 				first = min(first, j * 4);
 				last = j * 4;
 			}
-			if (count && i == 2) {
-				/* The TQ probe: report at info level, with the extent. */
-				drm_info(drm_dev,
-					 "brn65273 tq probe: %u nonzero words, bytes %#x-%#x\n",
-					 count, first, last + 3);
-				print_hex_dump(KERN_INFO, "brn65273 tq: ", DUMP_PREFIX_OFFSET, 16, 4,
-					       (u8 *)w + first, min(1024u, last + 4 - first), false);
-			} else if (count) {
+			if (count) {
 				drm_dbg(drm_dev,
 					 "brn65273 probe: %llx: %u nonzero words, bytes %#x-%#x\n",
 					 brn65273_base[i], count, first, last + 3);
