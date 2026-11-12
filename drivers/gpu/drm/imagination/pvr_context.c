@@ -17,9 +17,11 @@
 
 #include <drm/drm_auth.h>
 #include <drm/drm_managed.h>
+#include <drm/drm_print.h>
 
 #include <linux/bug.h>
 #include <linux/errno.h>
+#include <linux/iopoll.h>
 #include <linux/kernel.h>
 #include <linux/list.h>
 #include <linux/sched.h>
@@ -433,6 +435,57 @@ pvr_context_destroy(struct pvr_file *pvr_file, u32 handle)
 	return 0;
 }
 
+/*
+ * How long to let a closed file's in-flight jobs finish, per queue, before
+ * its VM mappings are torn down.
+ */
+#define PVR_CONTEXT_CLOSE_DRAIN_TIMEOUT_US (500 * USEC_PER_MSEC)
+
+/**
+ * pvr_context_wait_idle() - Wait for the jobs already submitted to a killed
+ * context's queues to finish.
+ * @ctx: Target context, whose queues must have been killed.
+ *
+ * Killing the queues stops new jobs from being queued but lets the jobs
+ * already submitted to the firmware run to completion. Wait for them, up to
+ * %PVR_CONTEXT_CLOSE_DRAIN_TIMEOUT_US per queue, so their memory isn't
+ * unmapped while the GPU still uses it.
+ */
+static void pvr_context_wait_idle(struct pvr_context *ctx)
+{
+	struct pvr_queue *queues[2] = {};
+	unsigned int count = 0;
+
+	switch (ctx->type) {
+	case DRM_PVR_CTX_TYPE_RENDER:
+		queues[count++] = ctx->queues.geometry;
+		queues[count++] = ctx->queues.fragment;
+		break;
+	case DRM_PVR_CTX_TYPE_COMPUTE:
+		queues[count++] = ctx->queues.compute;
+		break;
+	case DRM_PVR_CTX_TYPE_TRANSFER_FRAG:
+		queues[count++] = ctx->queues.transfer;
+		break;
+	}
+
+	for (unsigned int i = 0; i < count; i++) {
+		int in_flight;
+
+		if (!queues[i])
+			continue;
+
+		if (read_poll_timeout(atomic_read, in_flight, !in_flight,
+				      USEC_PER_MSEC,
+				      PVR_CONTEXT_CLOSE_DRAIN_TIMEOUT_US, false,
+				      &queues[i]->in_flight_job_count)) {
+			drm_dbg(from_pvr_device(ctx->pvr_dev),
+				"context %u: %d job(s) still in flight on close\n",
+				ctx->ctx_id, in_flight);
+		}
+	}
+}
+
 /**
  * pvr_destroy_contexts_for_file: Destroy any contexts associated with the given file
  * @pvr_file: Pointer to pvr_file structure.
@@ -457,6 +510,15 @@ void pvr_destroy_contexts_for_file(struct pvr_file *pvr_file)
 
 		if (pvr_context_get_if_referenced(ctx)) {
 			spin_unlock(&pvr_dev->ctx_list_lock);
+
+			/*
+			 * Still referenced: jobs submitted before the close may
+			 * still be running. Let them finish before unmapping
+			 * the memory they use, or they fault and the GPU goes
+			 * through a recovery that also resets other clients'
+			 * contexts.
+			 */
+			pvr_context_wait_idle(ctx);
 
 			pvr_vm_unmap_all(ctx->vm_ctx);
 
