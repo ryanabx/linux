@@ -362,6 +362,8 @@ struct mt6630_ch_privilege_event {
 #define MT6630_SCAN_SSIDS		4
 #define MT6630_SCAN_CHANNELS		32
 #define MT6630_SCAN_IE_LEN		600
+/* a scan of one band takes under 5 s */
+#define MT6630_SCAN_TIMEOUT		(7 * HZ)
 
 #define MT6630_SCAN_TYPE_PASSIVE	0
 #define MT6630_SCAN_TYPE_ACTIVE		1
