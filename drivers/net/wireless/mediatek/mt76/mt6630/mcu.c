@@ -295,6 +295,8 @@ mt6630_mcu_parse_response(struct mt76_dev *mdev, int cmd,
 	if (!skb) {
 		dev_err(mdev->dev, "Message %02x (seq %d) timeout\n",
 			cmd & 0xff, seq);
+		mt6630_reset(container_of(mdev, struct mt6630_dev, mt76),
+			     false);
 		return -ETIMEDOUT;
 	}
 
@@ -880,7 +882,8 @@ int mt6630_mcu_hw_scan(struct mt6630_dev *dev, struct ieee80211_vif *vif,
 		return ret;
 	}
 	/* a scan the firmware drops would leave mac80211 waiting for ever */
-	ieee80211_queue_delayed_work(dev->mt76.hw, &dev->scan_work, 10 * HZ);
+	ieee80211_queue_delayed_work(dev->mt76.hw, &dev->scan_work,
+				     MT6630_SCAN_TIMEOUT);
 
 	return 0;
 }
@@ -912,6 +915,10 @@ void mt6630_scan_work(struct work_struct *work)
 
 	dev_warn(dev->mt76.dev, "Scan did not complete\n");
 	mt6630_mcu_scan_done(dev, true);
+
+	/* a firmware that stops reporting scans does not start again */
+	if (++dev->scan_timeouts >= MT6630_RESET_SCANS)
+		mt6630_reset(dev, false);
 }
 
 static void mt6630_mcu_beacon_loss(void *priv, u8 *mac,
@@ -970,6 +977,7 @@ void mt6630_mcu_rx_event(struct mt6630_dev *dev, struct sk_buff *skb)
 		if (len < sizeof(*ev) || ev->seq != dev->scan_seq)
 			break;
 
+		dev->scan_timeouts = 0;
 		cancel_delayed_work(&dev->scan_work);
 		mt6630_mcu_scan_done(dev, false);
 		break;

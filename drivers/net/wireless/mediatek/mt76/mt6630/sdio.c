@@ -219,6 +219,39 @@ static int mt6630s_wait_for_patch(struct sdio_func *func)
 	return 0;
 }
 
+/* The firmware runs from the chip's RAM, on a ROM patch only the Bluetooth
+ * function loads, and one that stopped answering cannot be stopped for a
+ * second download, so the card is power-cycled. With both functions bound,
+ * the MMC core does that by removing the card and detecting it again, which
+ * probes both drivers anew.
+ */
+static void mt6630s_reset_work(struct work_struct *work)
+{
+	struct mt6630_dev *dev = container_of(work, struct mt6630_dev,
+					      reset_work);
+	struct sdio_func *func = dev->mt76.sdio.func;
+
+	dev->chip_reset = true;
+
+	sdio_claim_host(func);
+	mmc_hw_reset(func->card);
+	sdio_release_host(func);
+}
+
+void mt6630_reset(struct mt6630_dev *dev, bool force)
+{
+	if (test_bit(MT76_REMOVED, &dev->mt76.phy.state))
+		return;
+
+	if (!force && time_before(jiffies, dev->reset_after)) {
+		dev_warn(dev->mt76.dev, "Chip reset held off\n");
+		return;
+	}
+
+	dev_err(dev->mt76.dev, "Resetting the chip\n");
+	queue_work(system_freezable_wq, &dev->reset_work);
+}
+
 static int mt6630s_probe(struct sdio_func *func,
 			 const struct sdio_device_id *id)
 {
@@ -253,6 +286,9 @@ static int mt6630s_probe(struct sdio_func *func,
 	dev = container_of(mdev, struct mt6630_dev, mt76);
 	sdio_set_drvdata(func, dev);
 	sdio = &mdev->sdio;
+
+	INIT_WORK(&dev->reset_work, mt6630s_reset_work);
+	dev->reset_after = jiffies + MT6630_RESET_HOLDOFF;
 
 	ret = mt76s_init(mdev, func, &mt6630s_ops);
 	if (ret)
@@ -343,9 +379,12 @@ static void mt6630s_remove(struct sdio_func *func)
 	struct mt6630_dev *dev = sdio_get_drvdata(func);
 	struct mt76_dev *mdev = &dev->mt76;
 
+	set_bit(MT76_REMOVED, &mdev->phy.state);
 	mt6630_unregister_device(dev);
+	cancel_work_sync(&dev->reset_work);
 
-	if (mt6630_mcu_stop(dev))
+	/* nothing answers on a card being reset */
+	if (!dev->chip_reset && mt6630_mcu_stop(dev))
 		dev_warn(mdev->dev, "Firmware did not stop\n");
 
 	clear_bit(MT76_STATE_INITIALIZED, &mdev->phy.state);
