@@ -633,6 +633,19 @@
 		};
 	};
 
+	/*
+	 * The enable of the headphone jack's TI TS3A226AE type switch. While
+	 * it is low, the switch leaves the sleeve and ring 2 unconnected, so
+	 * the headphones have no ground return; while it is high, the switch
+	 * detects the plug on insertion and grounds the right contact.
+	 */
+	headphone-switch-hog {
+		gpio-hog;
+		gpios = <37 GPIO_ACTIVE_HIGH>;
+		output-high;
+		line-name = "headphone-switch-en";
+	};
+
 	mmc0_pins_default: mmc0-default-pins {
 		pins-cmd-dat {
 			pinmux = <MT8173_PIN_57_MSDC0_DAT0__FUNC_MSDC0_DAT0>,
