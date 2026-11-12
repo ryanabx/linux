@@ -846,9 +846,6 @@
 
 		mt6397codec: audio-codec {
 			compatible = "mediatek,mt6397-codec";
-			mediatek,speaker-mode = <0>;
-			mediatek,adc-warmup-time-us = <10000>;
-			mediatek,dmic-warmup-time-us = <45000>;
 		};
 
 		/*
