@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: BSD-3-Clause-Clear
 /* Copyright (C) 2026 Ryan Brue <ryanbrue.dev@gmail.com> */
 
+#include <linux/debugfs.h>
+
 #include "mt6630.h"
 
 static int mt6630_init_wiphy(struct mt76_dev *mdev)
@@ -56,9 +58,20 @@ static void mt6630_mac_work(struct work_struct *work)
 {
 }
 
+static int mt6630_chip_reset_set(void *data, u64 val)
+{
+	mt6630_reset(data, true);
+
+	return 0;
+}
+
+DEFINE_DEBUGFS_ATTRIBUTE(fops_chip_reset, NULL, mt6630_chip_reset_set,
+			 "%llu\n");
+
 int mt6630_register_device(struct mt6630_dev *dev)
 {
 	struct ieee80211_hw *hw = dev->mt76.hw;
+	struct dentry *dir;
 	int ret;
 
 	init_completion(&dev->ch_grant);
@@ -91,8 +104,16 @@ int mt6630_register_device(struct mt6630_dev *dev)
 
 	dev->mt76.init_wiphy = mt6630_init_wiphy;
 
-	return mt76_register_device(&dev->mt76, true, mt76_rates,
-				    ARRAY_SIZE(mt76_rates));
+	ret = mt76_register_device(&dev->mt76, true, mt76_rates,
+				   ARRAY_SIZE(mt76_rates));
+	if (ret)
+		return ret;
+
+	dir = debugfs_create_dir("mt76", hw->wiphy->debugfsdir);
+	debugfs_create_file_unsafe("chip_reset", 0200, dir, dev,
+				   &fops_chip_reset);
+
+	return 0;
 }
 
 void mt6630_unregister_device(struct mt6630_dev *dev)
