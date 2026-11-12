@@ -21,6 +21,12 @@
 #define MT6630_TX_RING_PAGES	64
 #define MT6630_TX_MCU_PAGES	16
 
+/* Dropped scans in a row that reset the chip. A reset ends in a new probe,
+ * and none is started sooner than the hold-off after one.
+ */
+#define MT6630_RESET_SCANS	2
+#define MT6630_RESET_HOLDOFF	(5 * 60 * HZ)
+
 struct mt6630_sta {
 	struct mt76_wcid wcid; /* must be first */
 
@@ -55,8 +61,13 @@ struct mt6630_dev {
 	struct completion ch_grant;
 
 	u8 scan_seq;
+	u8 scan_timeouts;
 	unsigned long scan_pending;
 	struct delayed_work scan_work;
+
+	struct work_struct reset_work;
+	unsigned long reset_after;
+	bool chip_reset;
 
 	struct mt6630_wmm_params wmm;
 
@@ -93,6 +104,7 @@ static inline struct mt6630_dev *mt6630_hw_dev(struct ieee80211_hw *hw)
 	return container_of(phy->dev, struct mt6630_dev, mt76);
 }
 
+void mt6630_reset(struct mt6630_dev *dev, bool force);
 int mt6630_register_device(struct mt6630_dev *dev);
 void mt6630_unregister_device(struct mt6630_dev *dev);
 
