@@ -509,11 +509,6 @@
 	};
 };
 
-/* Consumes the VPU, which does not run here. See &vpu below. */
-&mdp_rdma0 {
-	status = "disabled";
-};
-
 &mfg_async {
 	domain-supply = <&mt6397_vgpu_reg>;
 };
@@ -1264,25 +1259,3 @@
 	status = "okay";
 };
 
-/* Consumes the VPU, which does not run here. See &vpu below. */
-&vcodec_dec {
-	status = "disabled";
-};
-
-&vcodec_enc_avc {
-	status = "disabled";
-};
-
-&vcodec_enc_vp8 {
-	status = "disabled";
-};
-
-/*
- * Disabled: the firmware never starts here and mtk_vpu_suspend() then
- * returns -EIO, aborting every suspend. Its four consumers resolve the
- * mediatek,vpu phandle through vpu_get_plat_device() and WARN_ON() a
- * disabled node, so they are disabled too rather than left to backtrace.
- */
-&vpu {
-	status = "disabled";
-};
