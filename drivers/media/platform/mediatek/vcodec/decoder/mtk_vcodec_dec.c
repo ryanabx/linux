@@ -5,6 +5,7 @@
  *         Tiffany Lin <tiffany.lin@mediatek.com>
  */
 
+#include <linux/sizes.h>
 #include <media/v4l2-event.h>
 #include <media/v4l2-mem2mem.h>
 #include <media/videobuf2-dma-contig.h>
@@ -382,10 +383,11 @@ static int vidioc_try_fmt_vid_out_mplane(struct file *file, void *priv,
 		fmt = mtk_vdec_find_format(f, dec_pdata);
 	}
 
-	if (pix_fmt_mp->plane_fmt[0].sizeimage == 0) {
-		mtk_v4l2_vdec_err(ctx, "sizeimage of output format must be given");
-		return -EINVAL;
-	}
+	/* The client may leave the size of the bitstream buffers to us */
+	if (pix_fmt_mp->plane_fmt[0].sizeimage == 0)
+		pix_fmt_mp->plane_fmt[0].sizeimage =
+			max_t(u32, SZ_1M,
+			      pix_fmt_mp->width * pix_fmt_mp->height * 3 / 4);
 
 	return vidioc_try_fmt(ctx, f, fmt);
 }
