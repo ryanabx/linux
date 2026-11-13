@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0
+// SPDX-License-Identifier: GPL-2.0-only
 //
 // mt8173-mt6391.c  --  MT8173 machine driver for boards using the MT6391
 // PMIC codec (the audio block of the MT6397 PMIC)
@@ -217,7 +217,7 @@ static int mt8173_mt6391_dev_probe(struct platform_device *pdev)
 	mt8173_mt6391_dais[DAI_LINK_CODEC].codecs[0].of_node = codec_node;
 
 	capture_node = of_parse_phandle(pdev->dev.of_node,
-					"mediatek,capture-codec", 0);
+					"mediatek,audio-codec", 1);
 	if (capture_node) {
 		mt8173_mt6391_dais[DAI_LINK_RT5514].codecs[0].of_node =
 			capture_node;
