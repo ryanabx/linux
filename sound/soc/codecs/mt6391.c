@@ -1,2863 +1,1082 @@
 // SPDX-License-Identifier: GPL-2.0-only
-/* Copyright (c) 2011-2013, The Linux Foundation. All rights reserved.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License version 2 and
- * only version 2 as published by the Free Software Foundation.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- */
+//
+// MT6391 (MT6397 PMIC) audio codec driver
+//
+// The power sequences are MediaTek's, from their MT6397 codec driver.
+//
+// Copyright (c) 2026 Ryan Brue <ryanbrue.dev@gmail.com>
 
-#include <linux/slab.h>
+#include <linux/bitfield.h>
 #include <linux/delay.h>
-#include <linux/module.h>
-#include <linux/of.h>
-#include <linux/debugfs.h>
-#include <sound/soc.h>
-#include "mt6391.h"
-#include <linux/mfd/mt6397/registers.h>
-
-/* to define valid register range of audio analog hardware in PMIC */
-#define PMIC_ANA_ADDR_START	    (MT6397_CID)
-#define PMIC_ANA_ADDR_END	    (MT6397_NCP_CLKDIV_CON1)
-
-#define MT6397_CODEC_NAME "mt6397-codec"
-#define PMIC6397_E1_CID_CODE 0x1097
-#define ENUM_TO_STR(enum) #enum
-
-#define USE_MT6397_REGMAP
-/* #define USE_PMIC_WRAP_DRIVER */
-
-#if defined(USE_MT6397_REGMAP)
+#include <linux/interrupt.h>
 #include <linux/mfd/mt6397/core.h>
-#elif defined(USE_PMIC_WRAP_DRIVER)
-#include <mt_pmic_wrap.h>
-#include <mt-plat/upmu_common.h>
-#endif
+#include <linux/mfd/mt6397/registers.h>
+#include <linux/module.h>
+#include <linux/platform_device.h>
+#include <linux/regmap.h>
+#include <linux/workqueue.h>
+#include <sound/jack.h>
+#include <sound/pcm_params.h>
+#include <sound/soc.h>
+#include <sound/tlv.h>
 
-#define MT6397_TRIM_ADDRESS1    (MT6397_EFUSE_DOUT_192_207)
-#define MT6397_TRIM_ADDRESS2    (MT6397_EFUSE_DOUT_208_223)
+#include "mt6391.h"
 
+#define MT6397_CID_E1			0x1097
 
-/* enum definition */
-enum mt6391_device_volume {
-	MT6391_VOL_HSOUTL = 0,
-	MT6391_VOL_HSOUTR,
-	MT6391_VOL_HPOUTL,
-	MT6391_VOL_HPOUTR,
-	MT6391_VOL_SPKL,
-	MT6391_VOL_SPKR,
-	MT6391_VOL_SPEAKER_HEADSET_R,
-	MT6391_VOL_SPEAKER_HEADSET_L,
-	MT6391_VOL_IV_BUFFER,
-	MT6391_VOL_LINEOUTL,
-	MT6391_VOL_LINEOUTR,
-	MT6391_VOL_LINEINL,
-	MT6391_VOL_LINEINR,
-	MT6391_VOL_MICAMPL,
-	MT6391_VOL_MICAMPR,
-	MT6391_VOL_LEVELSHIFTL,
-	MT6391_VOL_LEVELSHIFTR,
-	MT6391_VOL_TYPE_MAX
+/* HP trim fuses, EFUSE_DOUT_192_207 */
+#define MT6397_EFUSE_HPL_TRIM		GENMASK(6, 3)
+#define MT6397_EFUSE_HPR_TRIM		GENMASK(10, 7)
+#define MT6397_EFUSE_HP_TRIM_EN		BIT(11)
+#define MT6397_EFUSE_HPL_FINE_TRIM	GENMASK(13, 12)
+#define MT6397_EFUSE_HPR_FINE_TRIM	GENMASK(15, 14)
+
+/* Speaker offset trim readout through TEST_CON0/TEST_OUT_L */
+#define MT6397_TEST_SPKL_TRIM		0x0805
+#define MT6397_TEST_SPKL_TRIM_POL	0x0806
+#define MT6397_TEST_SPKR_TRIM		0x080e
+#define MT6397_TEST_SPKR_TRIM_POL	0x080f
+
+/*
+ * Headphone PGA: register 0 is +8 dB down to 12 at -4 dB in 1 dB steps,
+ * 13 and 14 are reserved, and 15 is -40 dB.
+ */
+#define MT6391_HP_GAIN_LOW		12
+#define MT6391_HP_GAIN_MUTE		15
+#define MT6391_HP_GAIN_MAX		13
+
+/*
+ * The platform starts the stream as soon as the amplifiers are up, so let
+ * them settle first: in the headphones, a stream that starts within 20 ms
+ * of power-up pops, and one that starts after 50 ms does not.
+ */
+#define MT6391_AMP_SETTLE_MS		50
+
+/*
+ * ACCDET compares the microphone contact of the jack against two
+ * thresholds, A and B: AB = 11 is an open contact (nothing plugged in),
+ * 01 a headset microphone, 00 a contact grounded by a three-pole plug or
+ * by a pressed headset button. Its times are in ticks of a 32 kHz clock.
+ *
+ * The microphone bias stays on (PWM threshold equal to the width): pulsed,
+ * an open contact does not charge past threshold A and reads as 01.
+ */
+#define MT6391_ACCDET_AB_GROUND		0
+#define MT6391_ACCDET_AB_HEADSET	1
+#define MT6391_ACCDET_AB_OPEN		3
+#define MT6391_ACCDET_RSV_2V8		0x5090	/* MediaTek's 2.8 V mode */
+#define MT6391_ACCDET_PWM_WIDTH		0x500
+#define MT6391_ACCDET_RISE_DELAY	0x1f0
+#define MT6391_ACCDET_DEBOUNCE		0x800
+#define MT6391_ACCDET_DEBOUNCE_OPEN	0x20
+/* An insertion slides the contacts through every state before settling */
+#define MT6391_ACCDET_SETTLE_MS		500
+
+enum {
+	SUPPLY_SEQ_AUD_CK,
+	SUPPLY_SEQ_ZCD,
+	SUPPLY_SEQ_DL_SRC,
+	SUPPLY_SEQ_SPK_CK,
 };
 
-enum mt6391_device_mux {
-	MT6391_MUX_VOICE = 0,
-	MT6391_MUX_AUDIO,
-	MT6391_MUX_IV_BUFFER,
-	MT6391_MUX_LINEIN_STEREO,
-	MT6391_MUX_LINEIN_L,
-	MT6391_MUX_LINEIN_R,
-	MT6391_MUX_LINEIN_AUDIO_MONO,
-	MT6391_MUX_LINEIN_AUDIO_STEREO,
-	MT6391_MUX_IN_MIC1,
-	MT6391_MUX_IN_MIC2,
-	MT6391_MUX_IN_MIC3,
-	MT6391_MUX_IN_PREAMP_1,
-	MT6391_MUX_IN_PREAMP_2,
-	MT6391_MUX_IN_LEVEL_SHIFT_BUFFER,
-	MT6391_MUX_MUTE,
-	MT6391_MUX_OPEN,
-	MT6391_MUX_MAX_TYPE
-};
-
-enum mt6391_device_type {
-	MT6391_DEV_OUT_EARPIECER = 0,
-	MT6391_DEV_OUT_EARPIECEL,
-	MT6391_DEV_OUT_HEADSETR,
-	MT6391_DEV_OUT_HEADSETL,
-	MT6391_DEV_OUT_SPEAKERR,
-	MT6391_DEV_OUT_SPEAKERL,
-	MT6391_DEV_OUT_SPEAKER_HEADSET_R,
-	MT6391_DEV_OUT_SPEAKER_HEADSET_L,
-	MT6391_DEV_IN_ADC1,
-	MT6391_DEV_IN_ADC2,
-	MT6391_DEV_IN_PREAMP_L,
-	MT6391_DEV_IN_PREAMP_R,
-	MT6391_DEV_IN_DIGITAL_MIC,
-	MT6391_DEV_MAX,
-	MT6391_DEV_OUT_MAX = MT6391_DEV_OUT_SPEAKER_HEADSET_L + 1,
-	MT6391_DEV_ADC_MAX = MT6391_DEV_IN_ADC2 + 1,
-	MT6391_DEV_IN_MAX = MT6391_DEV_IN_DIGITAL_MIC + 1,
-};
-
-enum mt6391_adda_type {
-	MT6391_ADDA_DAC,
-	MT6391_ADDA_ADC,
-	MT6391_ADDA_MAX
-};
-
-enum mt6391_speaker_mode {
-	MT6391_CLASS_D = 0,
-	MT6391_CLASS_AB,
-};
-
-enum mt6391_speaker_channel_sel {
-	MT6391_CHANNEL_SEL_STEREO = 0,
-	MT6391_CHANNEL_SEL_MONO_LEFT,
-	MT6391_CHANNEL_SEL_MONO_RIGHT,
-};
-
-enum mt6391_loopback {
-	CODEC_LOOPBACK_NONE = 0,
-	CODEC_LOOPBACK_AMIC_TO_SPK,
-	CODEC_LOOPBACK_AMIC_TO_HP,
-	CODEC_LOOPBACK_DMIC_TO_SPK,
-	CODEC_LOOPBACK_DMIC_TO_HP,
-	CODEC_LOOPBACK_HEADSET_MIC_TO_SPK,
-	CODEC_LOOPBACK_HEADSET_MIC_TO_HP,
-	CODEC_LOOPBACK_AMIC_TO_EXTDAC,
-	CODEC_LOOPBACK_HEADSET_MIC_TO_EXTDAC,
-};
-
-enum mt6391_dac_frequency {
-	DAC_FREQ_8000 = 0,
-	DAC_FREQ_11025,
-	DAC_FREQ_12000,
-	DAC_FREQ_16000,
-	DAC_FREQ_22050,
-	DAC_FREQ_24000,
-	DAC_FREQ_32000,
-	DAC_FREQ_44100,
-	DAC_FREQ_48000,
-};
-
-enum mt6391_adc_frequency {
-	ADC_FREQ_8000 = 0,
-	ADC_FREQ_16000,
-	ADC_FREQ_32000,
-	ADC_FREQ_48000,
-};
-
-enum mt6391_soc_enum_type {
-	ENUM_AUDIO_AMP = 0,
-	ENUM_VOICE_AMP,
-	ENUM_SPK_AMP,
-	ENUM_HS_SPK_AMP,
-	ENUM_HEADSETL_GAIN,
-	ENUM_HEADSETR_GAIN,
-	ENUM_HANDSET_GAIN,
-	ENUM_SPKL_GAIN,
-	ENUM_SPKR_GAIN,
-	ENUM_SPK_SEL,
-	ENUM_SPK_OC_FLAG,
-	ENUM_DAC_SCK,
-	ENUM_DMIC_SWITCH,
-	ENUM_ADC1_SWITCH,
-	ENUM_ADC2_SWITCH,
-	ENUM_PREAMP1_MUX,
-	ENUM_PREAMP2_MUX,
-	ENUM_PREAMP1_GAIN,
-	ENUM_PREAMP2_GAIN,
-	ENUM_LOOPBACK_SEL,
-	ENUM_DAC_SGEN,
-	ENUM_ADC_SGEN,
-	ENUM_DAC_FREQ,
-	ENUM_ADC_FREQ,
-};
-
-
-/* codec private data */
 struct mt6391_priv {
-	int device_volume[MT6391_VOL_TYPE_MAX];
-	int device_mux[MT6391_MUX_MAX_TYPE];
-	bool device_power[MT6391_DEV_MAX];
-	uint32_t sample_rate[MT6391_ADDA_MAX];
-	uint32_t speaker_channel_sel;
-	uint32_t speaker_mode;
-	uint32_t adc_warmup_time_us;
-	uint32_t dmic_warmup_time_us;
-	uint8_t hpl_trim;
-	uint8_t hpl_fine_trim;
-	uint8_t hpr_trim;
-	uint8_t hpr_fine_trim;
-	uint8_t iv_hpl_trim;
-	uint8_t iv_hpl_fine_trim;
-	uint8_t iv_hpr_trim;
-	uint8_t iv_hpr_fine_trim;
-	uint8_t spkl_polarity;
-	uint8_t ispkl_trim;
-	uint8_t spkr_polarity;
-	uint8_t ispkr_trim;
-	uint32_t codec_loopback_type;
-	uint32_t dac_sgen_switch;
-	uint32_t adc_sgen_switch;
-	int ana_clk_counter;
-	struct mutex ctrl_mutex;
-	struct mutex clk_mutex;
-	struct snd_soc_component *component;
-#ifdef CONFIG_DEBUG_FS
-	struct dentry *debugfs;
-#endif
+	struct device *dev;
+	struct regmap *regmap;
+	unsigned int dl_rate_mode;
+	bool dl_src_on;
+	int dl_users;
+	unsigned int spk_gain[2];
+	unsigned int hp_gain[2];
+	bool hp_on;
+	unsigned int spk_trim[2];
+	unsigned int hp_trim;
+	bool sgen;
+	struct snd_soc_jack *jack;
+	struct delayed_work jack_work;
+	int jack_type;
+	int accdet_irq;
 };
 
-
-/* Function implementation */
-
-static uint32_t mt6391_get_reg(struct mt6391_priv *codec_data, uint32_t offset)
+static int mt6391_dl_rate_mode(unsigned int rate)
 {
-	uint32_t data = 0;
-
-	if (((offset < PMIC_ANA_ADDR_START) || (offset > PMIC_ANA_ADDR_END)) &&
-		((offset < PMIC_DIG_ADDR_START) || (offset > PMIC_DIG_ADDR_END)))
-		return data;
-#if defined(USE_MT6397_REGMAP)
-	data = snd_soc_component_read(codec_data->component, offset);
-#elif defined(USE_PMIC_WRAP_DRIVER)
-	pwrap_read(offset, &data);
-#endif
-	return data;
-}
-
-static void mt6391_set_reg(struct mt6391_priv *codec_data, uint32_t offset,
-		uint32_t value, uint32_t mask)
-{
-	if (((offset < PMIC_ANA_ADDR_START) || (offset > PMIC_ANA_ADDR_END)) &&
-		((offset < PMIC_DIG_ADDR_START) || (offset > PMIC_DIG_ADDR_END)))
-		return;
-#if defined(USE_MT6397_REGMAP)
-	snd_soc_component_update_bits(codec_data->component, offset, mask, value);
-#elif defined(USE_PMIC_WRAP_DRIVER)
-	int ret = 0;
-	uint32_t reg_value = mt6391_get_reg(codec_data, offset);
-
-	reg_value &= (~mask);
-	reg_value |= (value & mask);
-	ret = pwrap_write(offset, reg_value);
-	reg_value = mt6391_get_reg(codec_data, offset);
-	if ((reg_value & mask) != (value & mask)) {
-		pr_debug("%s 0x%x-0x%x(0x%x) ret = %d reg_value = 0x%x\n",
-			 __func__, offset, value, mask, ret, reg_value);
-	}
-#endif
-}
-
-static void mt6391_control_top_clk(struct mt6391_priv *codec_data,
-		uint32_t mask, bool enable)
-{
-	/* set pmic register or analog CONTROL_IFACE_PATH */
-	uint32_t val;
-	uint32_t reg = enable ? MT6397_TOP_CKPDN_CLR : MT6397_TOP_CKPDN_SET;
-
-#if defined(USE_MT6397_REGMAP)
-	snd_soc_component_update_bits(codec_data->component, reg, mask, mask);
-	val = snd_soc_component_read(codec_data->component, MT6397_TOP_CKPDN);
-#elif defined(USE_PMIC_WRAP_DRIVER)
-	pwrap_write(reg, mask);
-	pwrap_read(MT6397_TOP_CKPDN, &val);
-#endif
-
-	if ((val & mask) != (enable ? 0 : mask))
-		pr_err("%s: data mismatch: mask=%04X, val=%04X, enable=%d\n",
-			__func__, mask, val, enable);
-}
-
-static void mt6391_ana_clk_on(struct mt6391_priv *codec_data)
-{
-	mutex_lock(&codec_data->clk_mutex);
-	if (codec_data->ana_clk_counter == 0) {
-		pr_debug("+%s ana_clk_counter:%d\n", __func__, codec_data->ana_clk_counter);
-#if defined(USE_MT6397_REGMAP)
-		mt6391_set_reg(codec_data, MT6397_TOP_CKCON1, 0x0010, 0x0010);
-#elif defined(USE_PMIC_WRAP_DRIVER)
-		upmu_set_rg_clksq_en(1);
-#endif
-		mt6391_control_top_clk(codec_data, 0x0003, true);
-	}
-	codec_data->ana_clk_counter++;
-	mutex_unlock(&codec_data->clk_mutex);
-	pr_debug("-%s ana_clk_counter:%d\n", __func__, codec_data->ana_clk_counter);
-}
-
-static void mt6391_ana_clk_off(struct mt6391_priv *codec_data)
-{
-	mutex_lock(&codec_data->clk_mutex);
-	codec_data->ana_clk_counter--;
-	if (codec_data->ana_clk_counter == 0) {
-		pr_debug("+%s ana_clk_counter:%d\n", __func__, codec_data->ana_clk_counter);
-#if defined(USE_MT6397_REGMAP)
-		mt6391_set_reg(codec_data, MT6397_TOP_CKCON1, 0x0000, 0x0010);
-#elif defined(USE_PMIC_WRAP_DRIVER)
-		upmu_set_rg_clksq_en(0);
-#endif
-		mt6391_control_top_clk(codec_data, 0x0003, false);
-	} else if (codec_data->ana_clk_counter < 0) {
-		pr_err("%s ana_clk_counter:%d<0\n", __func__, codec_data->ana_clk_counter);
-		codec_data->ana_clk_counter = 0;
-	}
-	mutex_unlock(&codec_data->clk_mutex);
-	pr_debug("-%s ana_clk_counter:%d\n", __func__, codec_data->ana_clk_counter);
-}
-
-static void mt6391_suspend_clk_on(struct mt6391_priv *codec_data)
-{
-	if (codec_data->ana_clk_counter > 0) {
-		pr_debug("%s ana_clk_counter:%d\n", __func__, codec_data->ana_clk_counter);
-#if defined(USE_MT6397_REGMAP)
-		mt6391_set_reg(codec_data, MT6397_TOP_CKCON1, 0x0010, 0x0010);
-#elif defined(USE_PMIC_WRAP_DRIVER)
-		upmu_set_rg_clksq_en(1);
-#endif
-	}
-}
-
-static void mt6391_suspend_clk_off(struct mt6391_priv *codec_data)
-{
-	if (codec_data->ana_clk_counter > 0) {
-		pr_debug("%s ana_clk_counter:%d\n", __func__, codec_data->ana_clk_counter);
-#if defined(USE_MT6397_REGMAP)
-		mt6391_set_reg(codec_data, MT6397_TOP_CKCON1, 0x0000, 0x0010);
-#elif defined(USE_PMIC_WRAP_DRIVER)
-		upmu_set_rg_clksq_en(0);
-#endif
-	}
-}
-
-static uint32_t mt6391_get_dl_input_mode(unsigned int frequency)
-{
-	uint32_t reg_value = 0;
-
-	pr_debug("%s frequency = %d\n", __func__, frequency);
-	switch (frequency) {
+	switch (rate) {
 	case 8000:
-		reg_value = 0;
-		break;
+		return 0;
 	case 11025:
-		reg_value = 1;
-		break;
+		return 1;
 	case 12000:
-		reg_value = 2;
-		break;
+		return 2;
 	case 16000:
-		reg_value = 3;
-		break;
+		return 3;
 	case 22050:
-		reg_value = 4;
-		break;
+		return 4;
 	case 24000:
-		reg_value = 5;
-		break;
+		return 5;
 	case 32000:
-		reg_value = 6;
-		break;
+		return 6;
 	case 44100:
-		reg_value = 7;
-		break;
+		return 7;
 	case 48000:
-		reg_value = 8;
-		break;
+		return 8;
 	default:
-		pr_warn("%s unexpected frequency = %d\n", __func__, frequency);
-		break;
+		return -EINVAL;
 	}
-	return reg_value;
 }
 
-static uint32_t mt6391_get_ul_voice_mode(uint32_t frequency)
+static void mt6391_set_dl_rate(struct mt6391_priv *priv)
 {
-	uint32_t reg_value = 0;
-
-	pr_debug("%s frequency = %d\n", __func__, frequency);
-
-	switch (frequency) {
-	case 8000:
-		reg_value = 0x0 << 1;
-		break;
-	case 16000:
-		reg_value = 0x5 << 1;
-		break;
-	case 32000:
-		reg_value = 0xa << 1;
-		break;
-	case 48000:
-		reg_value = 0xf << 1;
-		break;
-	default:
-		pr_warn("%s unsupported frequency = %d\n", __func__, frequency);
-	}
-	pr_debug("%s reg_value = %d\n", __func__, reg_value);
-	return reg_value;
+	regmap_update_bits(priv->regmap, MT6397_AFE_PMIC_NEWIF_CFG0,
+			   MT6397_NEWIF_DL_RATE,
+			   FIELD_PREP(MT6397_NEWIF_DL_RATE, priv->dl_rate_mode));
+	regmap_update_bits(priv->regmap, MT6397_AFE_DL_SRC2_CON0_H,
+			   MT6397_DL_2_INPUT_MODE,
+			   FIELD_PREP(MT6397_DL_2_INPUT_MODE, priv->dl_rate_mode));
 }
 
-static bool mt6391_get_dl_status(struct mt6391_priv *codec_data)
+/* Reference generators, NV regulator, LDOs and the negative charge pump */
+static void mt6391_dl_analog_on(struct mt6391_priv *priv)
 {
-	int i = 0;
-
-	for (i = 0; i < MT6391_DEV_OUT_MAX; i++) {
-		if (codec_data->device_power[i])
-			return true;
-	}
-	return false;
+	regmap_write(priv->regmap, MT6397_AUDLDO_CFG0,
+		     MT6397_AUDLDO_DEFAULT | MT6397_RG_VA28REFGEN_EN |
+		     MT6397_RG_VA33REFGEN_EN);
+	regmap_write(priv->regmap, MT6397_AUDNVREGGLB_CFG0,
+		     MT6397_DA_NVREG_EN | MT6397_RG_ACC_DCC_SEL_AUDGLB);
+	regmap_set_bits(priv->regmap, MT6397_AUD_NCP0,
+			MT6397_RG_NCP_REMOTE_SENSE | MT6397_DA_HCLDO_EN |
+			MT6397_DA_LCLDO_EN);
+	regmap_write(priv->regmap, MT6397_NCP_CLKDIV_CON0,
+		     MT6397_RG_DIVCKS_ON | FIELD_PREP(MT6397_RG_DIVCKS_PRG, 0x2b));
+	regmap_write(priv->regmap, MT6397_NCP_CLKDIV_CON1, 0);
+	usleep_range(200, 250);
 }
 
-static bool mt6391_get_ul_status(struct mt6391_priv *codec_data)
+static void mt6391_dl_analog_off(struct mt6391_priv *priv)
 {
-	int i = 0;
-
-	for (i = MT6391_DEV_IN_ADC1; i < MT6391_DEV_IN_MAX; i++) {
-		if (codec_data->device_power[i])
-			return true;
-	}
-	return false;
+	regmap_write(priv->regmap, MT6397_AUDNVREGGLB_CFG0,
+		     MT6397_RG_ACC_DCC_SEL_AUDGLB | MT6397_RG_AUDGLB_PWRDN);
+	regmap_write(priv->regmap, MT6397_NCP_CLKDIV_CON1, MT6397_RG_PWD_NCP);
+	regmap_clear_bits(priv->regmap, MT6397_AUD_NCP0,
+			  MT6397_DA_HCLDO_EN | MT6397_DA_LCLDO_EN);
+	regmap_write(priv->regmap, MT6397_AUDLDO_CFG0, MT6397_AUDLDO_DEFAULT);
 }
 
-static bool mt6391_get_adc_status(struct mt6391_priv *codec_data)
+static void mt6391_dac_on(struct mt6391_priv *priv)
 {
-	int i = 0;
-
-	for (i = MT6391_DEV_IN_ADC1; i < MT6391_DEV_ADC_MAX; i++) {
-		if (codec_data->device_power[i])
-			return true;
-	}
-	return false;
+	regmap_set_bits(priv->regmap, MT6397_AUDCLKGEN_CFG0,
+			MT6397_RG_RSTB_DECODER);
+	regmap_write(priv->regmap, MT6397_AUDDAC_CON0,
+		     MT6397_RG_AUD_DAC_PWL_UP | MT6397_RG_AUD_DAC_PWR_UP |
+		     MT6397_RG_AUDDACRPWRUP | MT6397_RG_AUDDACLPWRUP);
+	usleep_range(100, 150);
 }
 
-static void mt6391_set_mux(struct mt6391_priv *codec_data,
-	enum mt6391_device_type device_type, enum mt6391_device_mux mux_type)
+static void mt6391_hp_write_gain(struct mt6391_priv *priv, unsigned int l,
+				 unsigned int r)
 {
-	uint32_t reg_value = 0;
+	regmap_update_bits(priv->regmap, MT6397_ZCD_CON2,
+			   MT6397_RG_AUDHPLGAIN | MT6397_RG_AUDHPRGAIN,
+			   FIELD_PREP(MT6397_RG_AUDHPLGAIN, l) |
+			   FIELD_PREP(MT6397_RG_AUDHPRGAIN, r));
+}
 
-	switch (device_type) {
-	case MT6391_DEV_OUT_EARPIECEL:
-	case MT6391_DEV_OUT_EARPIECER:
-		if (mux_type == MT6391_MUX_OPEN) {
-			reg_value = 0;
-		} else if (mux_type == MT6391_MUX_MUTE) {
-			reg_value = 1 << 3;
-		} else if (mux_type == MT6391_MUX_VOICE) {
-			reg_value = 2 << 3;
-		} else {
-			reg_value = 2 << 3;
-			pr_warn("%s %d %d\n", __func__, device_type, mux_type);
-		}
-		mt6391_set_reg(codec_data, MT6397_AUDBUF_CFG0, reg_value, 0x000000018);
-		break;
-	case MT6391_DEV_OUT_HEADSETL:
-		if (mux_type == MT6391_MUX_OPEN) {
-			reg_value = 0;
-		} else if (mux_type == MT6391_MUX_LINEIN_L) {
-			reg_value = 1 << 5;
-		} else if (mux_type == MT6391_MUX_LINEIN_R) {
-			reg_value = 2 << 5;
-		} else if (mux_type == MT6391_MUX_LINEIN_STEREO) {
-			reg_value = 3 << 5;
-		} else if (mux_type == MT6391_MUX_AUDIO) {
-			reg_value = 4 << 5;
-		} else if (mux_type == MT6391_MUX_LINEIN_AUDIO_MONO) {
-			reg_value = 5 << 5;
-		} else if (mux_type == MT6391_MUX_IV_BUFFER) {
-			reg_value = 8 << 5;
-		} else {
-			reg_value = 4 << 5;
-			pr_warn("%s %d %d\n", __func__, device_type, mux_type);
-		}
-		mt6391_set_reg(codec_data, MT6397_AUDBUF_CFG0, reg_value, 0x000001e0);
-		break;
-	case MT6391_DEV_OUT_HEADSETR:
-		if (mux_type == MT6391_MUX_OPEN) {
-			reg_value = 0;
-		} else if (mux_type == MT6391_MUX_LINEIN_L) {
-			reg_value = 1 << 9;
-		} else if (mux_type == MT6391_MUX_LINEIN_R) {
-			reg_value = 2 << 9;
-		} else if (mux_type == MT6391_MUX_LINEIN_STEREO) {
-			reg_value = 3 << 9;
-		} else if (mux_type == MT6391_MUX_AUDIO) {
-			reg_value = 4 << 9;
-		} else if (mux_type == MT6391_MUX_LINEIN_AUDIO_MONO) {
-			reg_value = 5 << 9;
-		} else if (mux_type == MT6391_MUX_IV_BUFFER) {
-			reg_value = 8 << 9;
-		} else {
-			reg_value = 4 << 9;
-			pr_warn("%s %d %d\n", __func__, device_type, mux_type);
-		}
-		mt6391_set_reg(codec_data, MT6397_AUDBUF_CFG0, reg_value, 0x00001e00);
-		break;
-	case MT6391_DEV_OUT_SPEAKERR:
-	case MT6391_DEV_OUT_SPEAKERL:
-	case MT6391_DEV_OUT_SPEAKER_HEADSET_R:
-	case MT6391_DEV_OUT_SPEAKER_HEADSET_L:
-		if (mux_type == MT6391_MUX_OPEN) {
-			reg_value = 0;
-		} else if ((mux_type == MT6391_MUX_LINEIN_L)
-			   || (mux_type == MT6391_MUX_LINEIN_R)) {
-			reg_value = 1 << 2;
-		} else if (mux_type == MT6391_MUX_LINEIN_STEREO) {
-			reg_value = 2 << 2;
-		} else if (mux_type == MT6391_MUX_OPEN) {
-			reg_value = 3 << 2;
-		} else if (mux_type == MT6391_MUX_AUDIO) {
-			reg_value = 4 << 2;
-		} else if (mux_type == MT6391_MUX_LINEIN_AUDIO_MONO) {
-			reg_value = 5 << 2;
-		} else if (mux_type == MT6391_MUX_LINEIN_AUDIO_STEREO) {
-			reg_value = 6 << 2;
-		} else {
-			reg_value = 4 << 2;
-			pr_warn("%s %d %d\n", __func__, device_type, mux_type);
-		}
-		mt6391_set_reg(codec_data, MT6397_AUD_IV_CFG0,
-			       reg_value | (reg_value << 8), 0x00001c1c);
-		break;
-	case MT6391_DEV_IN_PREAMP_L:
-		if (mux_type == MT6391_MUX_IN_MIC1) {
-			reg_value = 1 << 2;
-		} else if (mux_type == MT6391_MUX_IN_MIC2) {
-			reg_value = 2 << 2;
-		} else if (mux_type == MT6391_MUX_IN_MIC3) {
-			reg_value = 3 << 2;
-		} else {
-			reg_value = 1 << 2;
-			pr_warn("%s %d %d\n", __func__, device_type, mux_type);
-		}
-		mt6391_set_reg(codec_data, MT6397_AUDPREAMP_CON0, reg_value, 0x0000001c);
-		break;
-	case MT6391_DEV_IN_PREAMP_R:
-		if (mux_type == MT6391_MUX_IN_MIC1) {
-			reg_value = 1 << 5;
-		} else if (mux_type == MT6391_MUX_IN_MIC2) {
-			reg_value = 2 << 5;
-		} else if (mux_type == MT6391_MUX_IN_MIC3) {
-			reg_value = 3 << 5;
-		} else {
-			reg_value = 1 << 5;
-			pr_warn("%s %d %d\n", __func__, device_type, mux_type);
-		}
-		mt6391_set_reg(codec_data, MT6397_AUDPREAMP_CON0, reg_value, 0x000000e0);
-		break;
-	case MT6391_DEV_IN_ADC1:
-		if (mux_type == MT6391_MUX_IN_MIC1) {
-			reg_value = 1 << 2;
-		} else if (mux_type == MT6391_MUX_IN_PREAMP_1) {
-			reg_value = 4 << 2;
-		} else if (mux_type == MT6391_MUX_IN_LEVEL_SHIFT_BUFFER) {
-			reg_value = 5 << 2;
-		} else {
-			reg_value = 1 << 2;
-			pr_warn("%s %d %d\n", __func__, device_type, mux_type);
-		}
-		mt6391_set_reg(codec_data, MT6397_AUDADC_CON0, reg_value, 0x0000001c);
-		break;
-	case MT6391_DEV_IN_ADC2:
-		if (mux_type == MT6391_MUX_IN_MIC1) {
-			reg_value = 1 << 5;
-		} else if (mux_type == MT6391_MUX_IN_PREAMP_2) {
-			reg_value = 4 << 5;
-		} else if (mux_type == MT6391_MUX_IN_LEVEL_SHIFT_BUFFER) {
-			reg_value = 5 << 5;
-		} else {
-			reg_value = 1 << 5;
-			pr_warn("%s %d %d\n", __func__, device_type, mux_type);
-		}
-		mt6391_set_reg(codec_data, MT6397_AUDADC_CON0, reg_value, 0x000000e0);
-		break;
-	default:
-		break;
-	}
+static unsigned int mt6391_hp_gain_step(unsigned int from, unsigned int to)
+{
+	if (from == to)
+		return to;
+	if (from == MT6391_HP_GAIN_MUTE)
+		return MT6391_HP_GAIN_LOW;
+	if (from == MT6391_HP_GAIN_LOW && to == MT6391_HP_GAIN_MUTE)
+		return MT6391_HP_GAIN_MUTE;
+
+	return from > to ? from - 1 : from + 1;
 }
 
 /*
- * Program the downlink SRC with the rate it is about to be fed.
- * mt6391_turn_on_dac() writes these same two fields as part of its power-up
- * sequence; this is them on their own, for when the rate changes under a DAC
- * that is already running.
+ * Change the headphone gain one step at a time rather than in one write, so
+ * that a large change does not pop. There are no steps between -40 dB and
+ * -4 dB, so the amplifier crosses that gap only while its output is not
+ * connected (mt6391_hp_start_gain()).
  */
-static void mt6391_set_dl_rate(struct mt6391_priv *codec_data, uint32_t rate)
+static void mt6391_hp_ramp_gain(struct mt6391_priv *priv,
+				const unsigned int *from, const unsigned int *to)
 {
-	uint32_t mode = mt6391_get_dl_input_mode(rate);
+	unsigned int l = from[0], r = from[1];
 
-	mt6391_set_reg(codec_data, MT6397_AFE_PMIC_NEWIF_CFG0, mode << 12, 0xf000);
-	mt6391_set_reg(codec_data, MT6397_AFE_DL_SRC2_CON0_H, mode << 12, 0xf000);
+	while (l != to[0] || r != to[1]) {
+		l = mt6391_hp_gain_step(l, to[0]);
+		r = mt6391_hp_gain_step(r, to[1]);
+		mt6391_hp_write_gain(priv, l, r);
+		usleep_range(1000, 1500);
+	}
+}
+
+/* The gain to connect the output at: -4 dB, or -40 dB if that is the gain */
+static unsigned int mt6391_hp_start_gain(unsigned int gain)
+{
+	return gain == MT6391_HP_GAIN_MUTE ? gain : MT6391_HP_GAIN_LOW;
+}
+
+/* Zero-crossing detection on the IV buffer, and the IV buffer itself */
+static void mt6391_iv_buffer_on(struct mt6391_priv *priv)
+{
+	regmap_update_bits(priv->regmap, MT6397_ZCD_CON0, MT6397_RG_AUDZCDMUXSEL,
+			   FIELD_PREP(MT6397_RG_AUDZCDMUXSEL, MT6397_ZCD_MUX_IV));
+	regmap_set_bits(priv->regmap, MT6397_ZCD_CON0, MT6397_RG_AUDZCDENABLE);
+	regmap_write(priv->regmap, MT6397_IBIASDIST_CFG0, MT6397_AUDBIASADJ);
+	regmap_write(priv->regmap, MT6397_ZCD_CON4,
+		     FIELD_PREP(MT6397_RG_AUDIVLGAIN, 5) |
+		     FIELD_PREP(MT6397_RG_AUDIVRGAIN, 5));
+	regmap_write(priv->regmap, MT6397_AUD_IV_CFG0,
+		     MT6397_RG_AUDIVLPWRUP | MT6397_RG_AUDIVRPWRUP |
+		     FIELD_PREP(MT6397_RG_AUDIVLMUXSEL, MT6397_IV_MUX_AUDIO) |
+		     FIELD_PREP(MT6397_RG_AUDIVRMUXSEL, MT6397_IV_MUX_AUDIO));
+	usleep_range(100, 150);
+}
+
+static void mt6391_spk_amp_on(struct mt6391_priv *priv, bool first)
+{
+	struct regmap *map = priv->regmap;
+	unsigned int spk_ctrl = FIELD_PREP(MT6397_RG_SPKAB_OBIAS, 1) |
+				FIELD_PREP(MT6397_RG_SPK_SLEW, 1);
+
+	regmap_set_bits(map, MT6397_AFUNC_AUD_CON2, MT6397_CCI_AUD_DAC_ANA_MUTE);
+	regmap_update_bits(map, MT6397_SPK_CON1, MT6397_SPK_TRIM,
+			   priv->spk_trim[0]);
+	regmap_update_bits(map, MT6397_SPK_CON4, MT6397_SPK_TRIM,
+			   priv->spk_trim[1]);
+	if (first)
+		mt6391_dl_analog_on(priv);
+	mt6391_iv_buffer_on(priv);
+	if (first)
+		mt6391_dac_on(priv);
+	regmap_clear_bits(map, MT6397_AFUNC_AUD_CON2,
+			  MT6397_CCI_AUD_DAC_ANA_MUTE);
+
+	/* Enable both channels in Class-D at 0 dB, then apply the gain */
+	regmap_update_bits(map, MT6397_SPK_CON9, MT6397_RG_SPKPGA_GAINL,
+			   FIELD_PREP(MT6397_RG_SPKPGA_GAINL, 1));
+	regmap_update_bits(map, MT6397_SPK_CON5, MT6397_RG_SPKPGA_GAINR,
+			   FIELD_PREP(MT6397_RG_SPKPGA_GAINR, 1));
+	regmap_write(map, MT6397_SPK_CON0,
+		     FIELD_PREP(MT6397_RG_SPK_GAIN, 3) | MT6397_SPK_EN);
+	regmap_write(map, MT6397_SPK_CON3,
+		     FIELD_PREP(MT6397_RG_SPK_GAIN, 3) | MT6397_SPK_EN);
+	regmap_write(map, MT6397_SPK_CON2, spk_ctrl);
+	regmap_update_bits(map, MT6397_SPK_CON5, MT6397_SPK_CTRL, spk_ctrl);
+	regmap_update_bits(map, MT6397_SPK_CON9, MT6397_RG_SPKPGA_GAINL,
+			   FIELD_PREP(MT6397_RG_SPKPGA_GAINL, priv->spk_gain[0]));
+	regmap_update_bits(map, MT6397_SPK_CON5, MT6397_RG_SPKPGA_GAINR,
+			   FIELD_PREP(MT6397_RG_SPKPGA_GAINR, priv->spk_gain[1]));
+
+	regmap_write(map, MT6397_SPK_CON11,
+		     MT6397_SPK_OUTSTG_EN_L_SW | MT6397_SPK_OUTSTG_EN_R_SW |
+		     MT6397_SPK_EN_L_SW | MT6397_SPK_EN_R_SW);
+	usleep_range(4000, 5000);
+
+	msleep(MT6391_AMP_SETTLE_MS);
+}
+
+static void mt6391_spk_amp_off(struct mt6391_priv *priv, bool last)
+{
+	struct regmap *map = priv->regmap;
+
+	regmap_set_bits(map, MT6397_AFUNC_AUD_CON2, MT6397_CCI_AUD_DAC_ANA_MUTE);
+	regmap_write(map, MT6397_SPK_CON0, 0);
+	regmap_write(map, MT6397_SPK_CON3, 0);
+	regmap_write(map, MT6397_SPK_CON11, 0);
+	if (last) {
+		regmap_clear_bits(map, MT6397_AUDCLKGEN_CFG0,
+				  MT6397_RG_RSTB_DECODER);
+		regmap_write(map, MT6397_AUDDAC_CON0, 0);
+	}
+	regmap_write(map, MT6397_AUD_IV_CFG0, 0);
+	if (last) {
+		regmap_write(map, MT6397_IBIASDIST_CFG0,
+			     MT6397_AUDBIASADJ | MT6397_RG_AUDIBIASPWRDN);
+		mt6391_dl_analog_off(priv);
+	}
+	regmap_clear_bits(map, MT6397_AFUNC_AUD_CON2,
+			  MT6397_CCI_AUD_DAC_ANA_MUTE);
+}
+
+static void mt6391_hp_amp_on(struct mt6391_priv *priv, bool first)
+{
+	unsigned int start[2] = {
+		mt6391_hp_start_gain(priv->hp_gain[0]),
+		mt6391_hp_start_gain(priv->hp_gain[1]),
+	};
+	struct regmap *map = priv->regmap;
+	unsigned int hs_mute = FIELD_PREP(MT6397_RG_AUDHSMUXINPUTSEL,
+					  MT6397_HS_MUX_MUTE);
+
+	regmap_set_bits(map, MT6397_AFUNC_AUD_CON2, MT6397_CCI_AUD_DAC_ANA_MUTE);
+	regmap_update_bits(map, MT6397_AUDBUF_CFG3, MT6397_HP_TRIM,
+			   priv->hp_trim);
+	if (first)
+		mt6391_dl_analog_on(priv);
+
+	regmap_update_bits(map, MT6397_ZCD_CON0, MT6397_RG_AUDZCDMUXSEL,
+			   FIELD_PREP(MT6397_RG_AUDZCDMUXSEL, MT6397_ZCD_MUX_HP));
+	regmap_set_bits(map, MT6397_ZCD_CON0, MT6397_RG_AUDZCDENABLE);
+	regmap_write(map, MT6397_AUDACCDEPOP_CFG0,
+		     FIELD_PREP(MT6397_RG_DEPOP_ISEL, 3));
+	regmap_write(map, MT6397_AUDBUF_CFG0, hs_mute);
+	regmap_write(map, MT6397_IBIASDIST_CFG0, MT6397_AUDBIASADJ);
+	/* Power up at the start gain, with the handset PGA at its minimum */
+	mt6391_hp_write_gain(priv, start[0], start[1]);
+	regmap_update_bits(map, MT6397_ZCD_CON3, MT6397_RG_AUDHSGAIN, 0xf);
+
+	/* Power up with the outputs shorted to VCM, then release them */
+	regmap_write(map, MT6397_AUDBUF_CFG1,
+		     MT6397_RG_HPOUT_SHORTVCM | MT6397_RG_HPOUTPUTSTBENH);
+	regmap_write(map, MT6397_AUDBUF_CFG2,
+		     MT6397_RG_HSOUT_SHORTVCM | MT6397_RG_HSOUTPUTSTBENH);
+	regmap_write(map, MT6397_AUDBUF_CFG0, hs_mute | MT6397_RG_AUDHSPWRUP);
+	regmap_write(map, MT6397_AUDBUF_CFG1,
+		     MT6397_RG_HPOUT_SHORTVCM | MT6397_RG_HPOUTPUTSTBENH |
+		     MT6397_RG_PRECHARGEBUF_EN);
+	usleep_range(200, 250);
+	regmap_write(map, MT6397_AUDBUF_CFG0,
+		     hs_mute | MT6397_RG_AUDHSPWRUP | MT6397_RG_AUDHPLPWRUP |
+		     MT6397_RG_AUDHPRPWRUP);
+	regmap_write(map, MT6397_AUDBUF_CFG1, MT6397_RG_HPOUTPUTSTBENH);
+	usleep_range(100, 150);
+	regmap_write(map, MT6397_AUDBUF_CFG2,
+		     FIELD_PREP(MT6397_RG_HPOUTSTB_RSEL, 2) |
+		     MT6397_RG_HSOUTPUTSTBENH);
+	usleep_range(100, 150);
+	if (first)
+		mt6391_dac_on(priv);
+
+	/* Headphone buffers on, handset buffer off, both fed by the DAC */
+	regmap_update_bits(map, MT6397_AUDBUF_CFG0,
+			   MT6397_RG_AUDHPRPWRUP | MT6397_RG_AUDHPLPWRUP |
+			   MT6397_RG_AUDHSPWRUP,
+			   MT6397_RG_AUDHPRPWRUP | MT6397_RG_AUDHPLPWRUP);
+	regmap_update_bits(map, MT6397_AUDBUF_CFG0, MT6397_RG_AUDHPRMUXINPUTSEL,
+			   FIELD_PREP(MT6397_RG_AUDHPRMUXINPUTSEL,
+				      MT6397_HP_MUX_AUDIO));
+	regmap_update_bits(map, MT6397_AUDBUF_CFG0, MT6397_RG_AUDHPLMUXINPUTSEL,
+			   FIELD_PREP(MT6397_RG_AUDHPLMUXINPUTSEL,
+				      MT6397_HP_MUX_AUDIO));
+	regmap_clear_bits(map, MT6397_AFUNC_AUD_CON2,
+			  MT6397_CCI_AUD_DAC_ANA_MUTE);
+
+	/* Only now that the output is connected, raise the gain */
+	mt6391_hp_ramp_gain(priv, start, priv->hp_gain);
+	priv->hp_on = true;
+
+	msleep(MT6391_AMP_SETTLE_MS);
+}
+
+static void mt6391_hp_amp_off(struct mt6391_priv *priv, bool last)
+{
+	unsigned int start[2] = {
+		mt6391_hp_start_gain(priv->hp_gain[0]),
+		mt6391_hp_start_gain(priv->hp_gain[1]),
+	};
+	struct regmap *map = priv->regmap;
+
+	priv->hp_on = false;
+	mt6391_hp_ramp_gain(priv, priv->hp_gain, start);
+
+	regmap_set_bits(map, MT6397_AFUNC_AUD_CON2, MT6397_CCI_AUD_DAC_ANA_MUTE);
+	regmap_clear_bits(map, MT6397_AUDBUF_CFG0,
+			  MT6397_RG_AUDHPRMUXINPUTSEL |
+			  MT6397_RG_AUDHPLMUXINPUTSEL |
+			  MT6397_RG_AUDHPRPWRUP | MT6397_RG_AUDHPLPWRUP |
+			  MT6397_RG_AUDHSPWRUP);
+	mt6391_hp_write_gain(priv, MT6391_HP_GAIN_MUTE, MT6391_HP_GAIN_MUTE);
+	if (last) {
+		regmap_write(map, MT6397_IBIASDIST_CFG0,
+			     MT6397_AUDBIASADJ | MT6397_RG_AUDIBIASPWRDN);
+		regmap_write(map, MT6397_AUDDAC_CON0, 0);
+		regmap_clear_bits(map, MT6397_AUDCLKGEN_CFG0,
+				  MT6397_RG_RSTB_DECODER);
+		mt6391_dl_analog_off(priv);
+	}
+	regmap_clear_bits(map, MT6397_AFUNC_AUD_CON2,
+			  MT6397_CCI_AUD_DAC_ANA_MUTE);
+}
+
+static int mt6391_aud_ck_event(struct snd_soc_dapm_widget *w,
+			       struct snd_kcontrol *kcontrol, int event)
+{
+	struct snd_soc_component *cmpnt = snd_soc_dapm_to_component(w->dapm);
+	struct mt6391_priv *priv = snd_soc_component_get_drvdata(cmpnt);
+
+	switch (event) {
+	case SND_SOC_DAPM_PRE_PMU:
+		regmap_set_bits(priv->regmap, MT6397_TOP_CKCON1,
+				MT6397_RG_CLKSQ_EN);
+		regmap_write(priv->regmap, MT6397_TOP_CKPDN_CLR,
+			     MT6397_RG_AUD_26M_PDN | MT6397_RG_AUD_13M_PDN);
+		break;
+	case SND_SOC_DAPM_POST_PMD:
+		regmap_clear_bits(priv->regmap, MT6397_TOP_CKCON1,
+				  MT6397_RG_CLKSQ_EN);
+		regmap_write(priv->regmap, MT6397_TOP_CKPDN_SET,
+			     MT6397_RG_AUD_26M_PDN | MT6397_RG_AUD_13M_PDN);
+		break;
+	}
+
+	return 0;
 }
 
 /*
- * Record the downlink rate, and push it straight to the SRC if the DAC is
- * already running. Both callers can arrive after the output amp has been
- * switched on: userspace applies DAC_Freq_Switch and Speaker_Amp_Switch in
- * whatever order its UCM profile lists them, and a stream can open at a rate
- * no control ever mentioned. An SRC left on a stale rate is silent rather than
- * merely mistuned, so the rate has to be applied here and not just recorded.
+ * Each amplifier enables zero-crossing detection on its own output; it is
+ * only switched off once the downlink is down, to avoid a pop.
  */
-static void mt6391_set_dac_rate(struct mt6391_priv *codec_data, uint32_t rate)
+static int mt6391_zcd_event(struct snd_soc_dapm_widget *w,
+			    struct snd_kcontrol *kcontrol, int event)
 {
-	mutex_lock(&codec_data->ctrl_mutex);
-	if (codec_data->sample_rate[MT6391_ADDA_DAC] != rate) {
-		codec_data->sample_rate[MT6391_ADDA_DAC] = rate;
-		if (mt6391_get_dl_status(codec_data))
-			mt6391_set_dl_rate(codec_data, rate);
-	}
-	mutex_unlock(&codec_data->ctrl_mutex);
-}
+	struct snd_soc_component *cmpnt = snd_soc_dapm_to_component(w->dapm);
+	struct mt6391_priv *priv = snd_soc_component_get_drvdata(cmpnt);
 
-static void mt6391_turn_on_dac(struct mt6391_priv *codec_data)
-{
-	uint32_t rate = codec_data->sample_rate[MT6391_ADDA_DAC];
+	if (event == SND_SOC_DAPM_POST_PMD)
+		regmap_clear_bits(priv->regmap, MT6397_ZCD_CON0,
+				  MT6397_RG_AUDZCDMUXSEL |
+				  MT6397_RG_AUDZCDENABLE);
 
-	pr_debug("%s dac_sample_rate = %d\n", __func__, rate);
-	mt6391_set_reg(codec_data, MT6397_AFE_PMIC_NEWIF_CFG0,
-		       (mt6391_get_dl_input_mode(rate) << 12),
-		       0xf000);
-	mt6391_set_reg(codec_data, MT6397_AFUNC_AUD_CON2, 0x0006, 0xffff);
-	mt6391_set_reg(codec_data, MT6397_AFUNC_AUD_CON0, 0xc3a1, 0xffff);
-	mt6391_set_reg(codec_data, MT6397_AFUNC_AUD_CON2, 0x0003, 0xffff);
-	mt6391_set_reg(codec_data, MT6397_AFUNC_AUD_CON2, 0x000b, 0xffff);
-	mt6391_set_reg(codec_data, MT6397_AFE_DL_SDM_CON1, 0x001e, 0xffff);
-	mt6391_set_reg(codec_data, MT6397_AFE_DL_SRC2_CON0_H,
-		       0x0300 | (mt6391_get_dl_input_mode(rate) << 12),
-		       0x0ffff);
-	mt6391_set_reg(codec_data, MT6397_AFE_UL_DL_CON0, 0x007f, 0xffff);
-	mt6391_set_reg(codec_data, MT6397_AFE_DL_SRC2_CON0_L, 0x1801, 0xffff);
-}
-
-static void mt6391_turn_off_dac(struct mt6391_priv *codec_data)
-{
-	pr_debug("%s\n", __func__);
-
-	mt6391_set_reg(codec_data, MT6397_AFE_DL_SRC2_CON0_L, 0x1800, 0xffff);
-	if (!mt6391_get_ul_status(codec_data))
-		mt6391_set_reg(codec_data, MT6397_AFE_UL_DL_CON0, 0x0000, 0xffff);
-}
-
-static void mt6391_spk_auto_trim_offset(struct mt6391_priv *codec_data)
-{
-	uint32_t wait_for_ready = 0;
-	uint32_t reg = 0;
-	uint32_t chip_version = 0;
-	int retry_count = 50;
-
-	mt6391_set_reg(codec_data, MT6397_AFUNC_AUD_CON2, 0x0080, 0x0080);
-	/* enable VA28 , VA 33 VBAT ref , set dc */
-	mt6391_set_reg(codec_data, MT6397_AUDLDO_CFG0, 0x0D92, 0xffff);
-	/* set ACC mode  enable NVREF */
-	mt6391_set_reg(codec_data, MT6397_AUDNVREGGLB_CFG0, 0x000C, 0xffff);
-	/* enable LDO ; fix me , separate for UL  DL LDO */
-	mt6391_set_reg(codec_data, MT6397_AUD_NCP0, 0xE000, 0xE000);
-	mt6391_set_reg(codec_data, MT6397_NCP_CLKDIV_CON0, 0x102B, 0xffff);	/* RG DEV ck on */
-	mt6391_set_reg(codec_data, MT6397_NCP_CLKDIV_CON1, 0x0000, 0xffff);	/* NCP on */
-	udelay(200);
-	/* ZCD mux selection as iv buffer*/
-	mt6391_set_reg(codec_data, MT6397_ZCD_CON0, 0x0300, 0x0700);
-	/* ZCD enable */
-	mt6391_set_reg(codec_data, MT6397_ZCD_CON0, 0x0001, 0x0001);
-	/* audio bias adjustment */
-	mt6391_set_reg(codec_data, MT6397_IBIASDIST_CFG0, 0x0552, 0xffff);
-	/* set DUDIV gain ,iv buffer gain */
-	mt6391_set_reg(codec_data, MT6397_ZCD_CON4, 0x0505, 0xffff);
-	mt6391_set_reg(codec_data, MT6397_AUD_IV_CFG0, 0x1111, 0xffff);	/* set IV buffer on */
-	udelay(100);
-	mt6391_set_reg(codec_data, MT6397_AUDCLKGEN_CFG0, 0x0001, 0x0001);	/* reset docoder */
-	mt6391_set_reg(codec_data, MT6397_AUDDAC_CON0, 0x000f, 0xffff);	/* power on DAC */
-	udelay(100);
-	mt6391_set_mux(codec_data, MT6391_DEV_OUT_SPEAKERR, MT6391_MUX_AUDIO);
-	mt6391_set_mux(codec_data, MT6391_DEV_OUT_SPEAKERL, MT6391_MUX_AUDIO);
-	mt6391_set_reg(codec_data, MT6397_AUDBUF_CFG0, 0x0000, 0x0007);	/* set Mux */
-	mt6391_set_reg(codec_data, MT6397_AFUNC_AUD_CON2, 0x0000, 0x0080);
-
-	/* disable the software register mode */
-	mt6391_set_reg(codec_data, MT6397_SPK_CON1, 0, 0x7f00);
-	/* disable the software register mode */
-	mt6391_set_reg(codec_data, MT6397_SPK_CON4, 0, 0x7f00);
-	/* Choose new mode for trim (E2 Trim) */
-	mt6391_set_reg(codec_data, MT6397_SPK_CON9, 0x0018, 0xffff);
-	mt6391_set_reg(codec_data, MT6397_SPK_CON0, 0x0008, 0xffff);	/* Enable auto trim */
-	mt6391_set_reg(codec_data, MT6397_SPK_CON3, 0x0008, 0xffff);	/* Enable auto trim R */
-	mt6391_set_reg(codec_data, MT6397_SPK_CON0, 0x3000, 0xf000);	/* set gain */
-	mt6391_set_reg(codec_data, MT6397_SPK_CON3, 0x3000, 0xf000);	/* set gain R */
-	mt6391_set_reg(codec_data, MT6397_SPK_CON9, 0x0100, 0x0f00);	/* set gain L */
-	mt6391_set_reg(codec_data, MT6397_SPK_CON5, (0x1 << 11), 0x7800);	/* set gain R */
-	/* Enable amplifier & auto trim */
-	mt6391_set_reg(codec_data, MT6397_SPK_CON0, 0x0001, 0x0001);
-	/* Enable amplifier & auto trim R */
-	mt6391_set_reg(codec_data, MT6397_SPK_CON3, 0x0001, 0x0001);
-
-	/* empirical data shows it usually takes 13ms to be ready */
-	usleep_range(15000, 16000);
-
-	do {
-		wait_for_ready = mt6391_get_reg(codec_data, MT6397_SPK_CON1);
-		wait_for_ready = ((wait_for_ready & 0x8000) >> 15);
-
-		if (wait_for_ready) {
-			wait_for_ready = mt6391_get_reg(codec_data, MT6397_SPK_CON4);
-			wait_for_ready = ((wait_for_ready & 0x8000) >> 15);
-			if (wait_for_ready)
-				break;
-		}
-
-		pr_debug("%s sleep\n", __func__);
-		udelay(100);
-	} while (retry_count--);
-
-	if (likely(wait_for_ready))
-		pr_debug("%s done retry_count = %d\n", __func__, retry_count);
-	else
-		pr_warn("%s fail\n", __func__);
-
-	mt6391_set_reg(codec_data, MT6397_SPK_CON9, 0x0, 0xffff);
-	mt6391_set_reg(codec_data, MT6397_SPK_CON5, 0, 0x7800);	/* set gain R */
-	mt6391_set_reg(codec_data, MT6397_SPK_CON0, 0x0000, 0x0001);
-	mt6391_set_reg(codec_data, MT6397_SPK_CON3, 0x0000, 0x0001);
-
-	/* get trim offset result */
-	pr_debug("%s GetSPKAutoTrimOffset\n", __func__);
-	mt6391_set_reg(codec_data, MT6397_TEST_CON0, 0x0805, 0xffff);
-	reg = mt6391_get_reg(codec_data, MT6397_TEST_OUT_L);
-	codec_data->ispkl_trim = ((reg >> 0) & 0xf);
-	mt6391_set_reg(codec_data, MT6397_TEST_CON0, 0x0806, 0xffff);
-	reg = mt6391_get_reg(codec_data, MT6397_TEST_OUT_L);
-	codec_data->ispkl_trim |= (((reg >> 0) & 0x1) << 4);
-	codec_data->spkl_polarity = ((reg >> 1) & 0x1);
-	mt6391_set_reg(codec_data, MT6397_TEST_CON0, 0x080E, 0xffff);
-	reg = mt6391_get_reg(codec_data, MT6397_TEST_OUT_L);
-	codec_data->ispkr_trim = ((reg >> 0) & 0xf);
-	mt6391_set_reg(codec_data, MT6397_TEST_CON0, 0x080F, 0xffff);
-	reg = mt6391_get_reg(codec_data, MT6397_TEST_OUT_L);
-	codec_data->ispkr_trim |= (((reg >> 0) & 0x1) << 4);
-	codec_data->spkr_polarity = ((reg >> 1) & 0x1);
-
-#if defined(USE_MT6397_REGMAP)
-	chip_version = mt6391_get_reg(codec_data, MT6397_CID);
-#elif defined(USE_PMIC_WRAP_DRIVER)
-	chip_version = upmu_get_cid();
-#endif
-
-	if (chip_version == PMIC6397_E1_CID_CODE) {
-		pr_debug("%s PMIC is MT6397 E1, set speaker R trim code to 0\n", __func__);
-		codec_data->ispkr_trim = 0;
-		codec_data->spkr_polarity = 0;
-	}
-
-	pr_debug("%s spkl_polarity = %d ispkl_trim = 0x%x\n",
-		 __func__, codec_data->spkl_polarity, codec_data->ispkl_trim);
-	pr_debug("%s spkr_polarity = %d ispkr_trim = 0x%x\n",
-		 __func__, codec_data->spkr_polarity, codec_data->ispkr_trim);
-
-	/* turn off speaker after trim */
-	mt6391_set_reg(codec_data, MT6397_AFUNC_AUD_CON2, 0x0080, 0x0080);
-	mt6391_set_reg(codec_data, MT6397_SPK_CON0, 0x0000, 0xffff);
-	mt6391_set_reg(codec_data, MT6397_SPK_CON3, 0x0000, 0xffff);
-	mt6391_set_reg(codec_data, MT6397_SPK_CON11, 0x0000, 0xffff);
-	mt6391_set_reg(codec_data, MT6397_ZCD_CON0, 0x0000, 0x0701);
-
-	/* enable LDO ; fix me , separate for UL  DL LDO */
-	mt6391_set_reg(codec_data, MT6397_AUDCLKGEN_CFG0, 0x0000, 0x0001);
-	mt6391_set_reg(codec_data, MT6397_AUDDAC_CON0, 0x0000, 0xffff);	/* RG DEV ck on */
-	mt6391_set_reg(codec_data, MT6397_AUD_IV_CFG0, 0x0000, 0xffff);	/* NCP on */
-	/* Audio headset power on */
-	mt6391_set_reg(codec_data, MT6397_IBIASDIST_CFG0, 0x1552, 0xffff);
-	/* mt6391_set_reg(codec_data, MT6397_AUDBUF_CFG1, 0x0000, 0x0100); */
-
-	mt6391_set_reg(codec_data, MT6397_AUDNVREGGLB_CFG0, 0x0006, 0xffff);
-	mt6391_set_reg(codec_data, MT6397_NCP_CLKDIV_CON1, 0x0001, 0xffff);	/* fix me */
-	mt6391_set_reg(codec_data, MT6397_AUD_NCP0, 0x0000, 0x6000);
-	mt6391_set_reg(codec_data, MT6397_AUDLDO_CFG0, 0x0192, 0xffff);
-	mt6391_set_reg(codec_data, MT6397_AFUNC_AUD_CON2, 0x0000, 0x0080);
-}
-
-static void mt6391_get_hp_trim_offset(struct mt6391_priv *codec_data)
-{
-	uint32_t reg1 = 0, reg2 = 0;
-	bool trim_enable = 0;
-
-	/* get to check if trim happen */
-	reg1 = mt6391_get_reg(codec_data, MT6397_TRIM_ADDRESS1);
-	reg2 = mt6391_get_reg(codec_data, MT6397_TRIM_ADDRESS2);
-	pr_debug("%s reg1 = 0x%x reg2 = 0x%x\n", __func__, reg1, reg2);
-
-	trim_enable = (reg1 >> 11) & 1;
-	if (trim_enable == 0) {
-		codec_data->hpl_trim = 2;
-		codec_data->hpl_fine_trim = 0;
-		codec_data->hpr_trim = 2;
-		codec_data->hpr_fine_trim = 0;
-		codec_data->iv_hpl_trim = 3;
-		codec_data->iv_hpl_fine_trim = 0;
-		codec_data->iv_hpr_trim = 3;
-		codec_data->iv_hpr_fine_trim = 0;
-	} else {
-		codec_data->hpl_trim = ((reg1 >> 3) & 0xf);
-		codec_data->hpr_trim = ((reg1 >> 7) & 0xf);
-		codec_data->hpl_fine_trim = ((reg1 >> 12) & 0x3);
-		codec_data->hpr_fine_trim = ((reg1 >> 14) & 0x3);
-		codec_data->iv_hpl_trim = ((reg2 >> 0) & 0xf);
-		codec_data->iv_hpr_trim = ((reg2 >> 4) & 0xf);
-		codec_data->iv_hpl_fine_trim = ((reg2 >> 8) & 0x3);
-		codec_data->iv_hpr_fine_trim = ((reg2 >> 10) & 0x3);
-	}
-
-	pr_debug("%s trim_enable = %d reg1 = 0x%x reg2 = 0x%x\n", __func__, trim_enable, reg1,
-		 reg2);
-	pr_debug("%s hpl_trim = 0x%x hpl_fine_trim = 0x%x hpr_trim = 0x%x hpr_fine_trim = 0x%x\n",
-		 __func__, codec_data->hpl_trim, codec_data->hpl_fine_trim, codec_data->hpr_trim,
-		 codec_data->hpr_fine_trim);
-	pr_debug("%s iv_hpl_trim = 0x%x iv_hpl_fine_trim = 0x%x\n", __func__,
-		 codec_data->iv_hpl_trim, codec_data->iv_hpl_fine_trim);
-	pr_debug("%s iv_hpr_trim = 0x%x iv_hpr_fine_trim = 0x%x\n", __func__,
-		 codec_data->iv_hpr_trim, codec_data->iv_hpr_fine_trim);
-}
-
-static void mt6391_set_hp_trim_offset(struct mt6391_priv *codec_data)
-{
-	uint32_t reg_value = 0;
-
-	pr_debug("%s", __func__);
-	reg_value |= 1 << 8;	/* enable trim function */
-	reg_value |= codec_data->hpr_fine_trim << 11;
-	reg_value |= codec_data->hpl_fine_trim << 9;
-	reg_value |= codec_data->hpr_trim << 4;
-	reg_value |= codec_data->hpl_trim;
-	mt6391_set_reg(codec_data, MT6397_AUDBUF_CFG3, reg_value, 0x1fff);
-}
-
-static void mt6391_set_spk_trim_offset(struct mt6391_priv *codec_data)
-{
-	uint32_t reg_value = 0;
-
-	reg_value |= 1 << 14;	/* enable trim function */
-	reg_value |= codec_data->spkl_polarity << 13;	/* polarity */
-	reg_value |= codec_data->ispkl_trim << 8;	/* polarity */
-	pr_debug("%s reg_value = 0x%x\n", __func__, reg_value);
-	mt6391_set_reg(codec_data, MT6397_SPK_CON1, reg_value, 0x7f00);
-	reg_value = 0;
-	reg_value |= 1 << 14;	/* enable trim function */
-	reg_value |= codec_data->spkr_polarity << 13;	/* polarity */
-	reg_value |= codec_data->ispkr_trim << 8;	/* polarity */
-	pr_debug("%s reg_value = 0x%x\n", __func__, reg_value);
-	mt6391_set_reg(codec_data, MT6397_SPK_CON4, reg_value, 0x7f00);
-}
-
-static void mt6391_set_iv_hp_trim_offset(struct mt6391_priv *codec_data)
-{
-	uint32_t reg_value = 0;
-
-	reg_value |= 1 << 8;	/* enable trim function */
-
-	if ((codec_data->hpr_fine_trim == 0) || (codec_data->hpl_fine_trim == 0))
-		codec_data->iv_hpr_fine_trim = 0;
-	else
-		codec_data->iv_hpr_fine_trim = 2;
-
-	reg_value |= codec_data->iv_hpr_fine_trim << 11;
-
-	if ((codec_data->hpr_fine_trim == 0) || (codec_data->hpl_fine_trim == 0))
-		codec_data->iv_hpl_fine_trim = 0;
-	else
-		codec_data->iv_hpl_fine_trim = 2;
-
-	reg_value |= codec_data->iv_hpl_fine_trim << 9;
-
-	reg_value |= codec_data->iv_hpr_trim << 4;
-	reg_value |= codec_data->iv_hpl_trim;
-	mt6391_set_reg(codec_data, MT6397_AUDBUF_CFG3, reg_value, 0x1fff);
-}
-
-static void mt6391_turn_on_headphone_amp(struct mt6391_priv *codec_data)
-{
-	int gain_l = codec_data->device_volume[MT6391_VOL_HPOUTL];
-	int gain_r = codec_data->device_volume[MT6391_VOL_HPOUTR];
-
-	pr_debug("%s\n", __func__);
-
-	if (codec_data->device_power[MT6391_DEV_OUT_HEADSETL]) {
-		pr_debug("%s turn on already\n", __func__);
-		return;
-	}
-
-	if (!mt6391_get_dl_status(codec_data))
-		mt6391_turn_on_dac(codec_data);
-
-	mt6391_set_reg(codec_data, MT6397_AFUNC_AUD_CON2, 0x0080, 0x0080);
-	mt6391_set_hp_trim_offset(codec_data);
-	/* enable VA28 , VA 33 VBAT ref , set dc */
-	mt6391_set_reg(codec_data, MT6397_AUDLDO_CFG0, 0x0D92, 0xffff);
-	/* set ACC mode      enable NVREF */
-	mt6391_set_reg(codec_data, MT6397_AUDNVREGGLB_CFG0, 0x000C, 0xffff);
-	/* enable LDO ; fix me , separate for UL  DL LDO */
-	mt6391_set_reg(codec_data, MT6397_AUD_NCP0, 0xE000, 0xE000);
-	/* RG DEV ck on */
-	mt6391_set_reg(codec_data, MT6397_NCP_CLKDIV_CON0, 0x102b, 0xffff);
-	/* NCP on */
-	mt6391_set_reg(codec_data, MT6397_NCP_CLKDIV_CON1, 0x0000, 0xffff);
-
-	udelay(200);
-
-	/* ZCD mux selection as headphone L & R*/
-	mt6391_set_reg(codec_data, MT6397_ZCD_CON0, 0x0100, 0x0700);
-	/* ZCD enable */
-	mt6391_set_reg(codec_data, MT6397_ZCD_CON0, 0x0001, 0x0001);
-	mt6391_set_reg(codec_data, MT6397_AUDACCDEPOP_CFG0, 0x0030, 0xffff);
-	mt6391_set_reg(codec_data, MT6397_AUDBUF_CFG0, 0x0008, 0xffff);
-	mt6391_set_reg(codec_data, MT6397_IBIASDIST_CFG0, 0x0552, 0xffff);
-	mt6391_set_reg(codec_data, MT6397_ZCD_CON2, 0xc0c, 0xf0f);
-	mt6391_set_reg(codec_data, MT6397_ZCD_CON3, 0xf, 0xf);
-	mt6391_set_reg(codec_data, MT6397_AUDBUF_CFG1, 0x0900, 0xffff);
-	mt6391_set_reg(codec_data, MT6397_AUDBUF_CFG2, 0x0082, 0xffff);
-
-	mt6391_set_reg(codec_data, MT6397_AUDBUF_CFG0, 0x0009, 0xffff);
-
-	mt6391_set_reg(codec_data, MT6397_AUDBUF_CFG1, 0x0940, 0xffff);
-	udelay(200);
-	mt6391_set_reg(codec_data, MT6397_AUDBUF_CFG0, 0x000F, 0xffff);
-
-	mt6391_set_reg(codec_data, MT6397_AUDBUF_CFG1, 0x0100, 0xffff);
-	udelay(100);
-	mt6391_set_reg(codec_data, MT6397_AUDBUF_CFG2, 0x0022, 0xffff);
-	mt6391_set_reg(codec_data, MT6397_ZCD_CON2, ((gain_r << 8) | gain_l), 0xf0f);
-	udelay(100);
-
-	mt6391_set_reg(codec_data, MT6397_AUDCLKGEN_CFG0, 0x0001, 0x0001);
-	mt6391_set_reg(codec_data, MT6397_AUDDAC_CON0, 0x000F, 0xffff);
-	udelay(100);
-
-	mt6391_set_reg(codec_data, MT6397_AUDBUF_CFG0, 0x0006, 0x0007);
-	mt6391_set_mux(codec_data, MT6391_DEV_OUT_HEADSETR, MT6391_MUX_AUDIO);
-	mt6391_set_mux(codec_data, MT6391_DEV_OUT_HEADSETL, MT6391_MUX_AUDIO);
-
-	mt6391_set_reg(codec_data, MT6397_AFUNC_AUD_CON2, 0x0000, 0x0080);
-
-	pr_debug("%s done\n", __func__);
-}
-
-static void mt6391_turn_off_headphone_amp(struct mt6391_priv *codec_data)
-{
-	pr_debug("%s\n", __func__);
-
-	if (codec_data->device_power[MT6391_DEV_OUT_HEADSETL]) {
-		pr_debug("%s still on\n", __func__);
-		return;
-	}
-
-	mt6391_set_reg(codec_data, MT6397_AFUNC_AUD_CON2, 0x0080, 0x0080);
-	mt6391_set_reg(codec_data, MT6397_ZCD_CON2, 0x0c0c, 0xffff);
-	mt6391_set_reg(codec_data, MT6397_AUDBUF_CFG0, 0x0000, 0x1fe7);
-	mt6391_set_reg(codec_data, MT6397_IBIASDIST_CFG0, 0x1552, 0xffff); /* RG DEV ck off; */
-	mt6391_set_reg(codec_data, MT6397_AUDDAC_CON0, 0x0000, 0xffff);	/* NCP off */
-	mt6391_set_reg(codec_data, MT6397_AUDCLKGEN_CFG0, 0x0000, 0x0001);
-
-	if (mt6391_get_ul_status(codec_data) == false)
-		mt6391_set_reg(codec_data, MT6397_AUDNVREGGLB_CFG0, 0x0006, 0xffff);
-
-	mt6391_set_reg(codec_data, MT6397_NCP_CLKDIV_CON1, 0x0001, 0xffff);
-	mt6391_set_reg(codec_data, MT6397_AUD_NCP0, 0x0000, 0x6000);
-
-	if (mt6391_get_ul_status(codec_data) == false)
-		mt6391_set_reg(codec_data, MT6397_AUDLDO_CFG0, 0x0192, 0xffff);
-
-	mt6391_set_reg(codec_data, MT6397_AFUNC_AUD_CON2, 0x0000, 0x0080);
-
-	if (mt6391_get_dl_status(codec_data) == false)
-		mt6391_turn_off_dac(codec_data);
-
-	/* Disable ZCD in the turn off sequence to avoid pop noise */
-	mt6391_set_reg(codec_data, MT6397_ZCD_CON0, 0x0000, 0x0701);
-
-	pr_debug("%s done\n", __func__);
-}
-
-static void mt6391_turn_on_voice_amp(struct mt6391_priv *codec_data)
-{
-	int gain = codec_data->device_volume[MT6391_VOL_HSOUTL];
-
-	if (codec_data->device_power[MT6391_DEV_OUT_EARPIECEL]) {
-		pr_debug("%s turn on already\n", __func__);
-		return;
-	}
-
-	if (!mt6391_get_dl_status(codec_data))
-		mt6391_turn_on_dac(codec_data);
-
-	mt6391_set_reg(codec_data, MT6397_AFUNC_AUD_CON2, 0x0080, 0x0080);
-	/* enable VA28 , VA 33 VBAT ref , set dc */
-	mt6391_set_reg(codec_data, MT6397_AUDLDO_CFG0, 0x0D92, 0xffff);
-	/* set ACC mode  enable NVREF */
-	mt6391_set_reg(codec_data, MT6397_AUDNVREGGLB_CFG0, 0x000C, 0xffff);
-	/* enable LDO ; separate for UL  DL LDO */
-	mt6391_set_reg(codec_data, MT6397_AUD_NCP0, 0xE000, 0xE000);
-	mt6391_set_reg(codec_data, MT6397_NCP_CLKDIV_CON0, 0x102B, 0xffff); /* RG DEV ck on */
-	mt6391_set_reg(codec_data, MT6397_NCP_CLKDIV_CON1, 0x0000, 0xffff); /* NCP on */
-	/* usleep(1 * 1000); */
-
-	/* ZCD mux selection as handset*/
-	mt6391_set_reg(codec_data, MT6397_ZCD_CON0, 0x0200, 0x0700);
-	/* ZCD enable */
-	mt6391_set_reg(codec_data, MT6397_ZCD_CON0, 0x0001, 0x0001);
-	/* select charge current l; fix me */
-	mt6391_set_reg(codec_data, MT6397_AUDACCDEPOP_CFG0, 0x0030, 0xffff);
-	/* set voice playback with headset */
-	mt6391_set_reg(codec_data, MT6397_AUDBUF_CFG0, 0x0008, 0xffff);
-	/* audio bias adjustment */
-	mt6391_set_reg(codec_data, MT6397_IBIASDIST_CFG0, 0x0552, 0xffff);
-
-	/* handset gain , minimum gain */
-	mt6391_set_reg(codec_data, MT6397_ZCD_CON3, 0xf, 0xf);
-	/* short HS to vcm and HS output stability enhance */
-	mt6391_set_reg(codec_data, MT6397_AUDBUF_CFG2, 0x00A2, 0xffff);
-	/* handset gain , minimum gain */
-	mt6391_set_reg(codec_data, MT6397_AUDBUF_CFG0, 0x0001, 0xffff);
-	/* short HS to vcm and HS output stability enhance */
-	mt6391_set_reg(codec_data, MT6397_AUDBUF_CFG2, 0x0022, 0xffff);
-
-	/* handset gain , normal gain */
-	mt6391_set_reg(codec_data, MT6397_ZCD_CON3, gain, 0xf);
-	mt6391_set_reg(codec_data, MT6397_AUDCLKGEN_CFG0, 0x0001, 0x0001); /* reset decoder */
-	/* power on audio DAC right channels */
-	mt6391_set_reg(codec_data, MT6397_AUDDAC_CON0, 0x0009, 0xffff);
-	/* usleep(1000); */
-	mt6391_set_reg(codec_data, MT6397_AFUNC_AUD_CON2, 0x0000, 0x0080);
-
-	mt6391_set_mux(codec_data, MT6391_DEV_OUT_EARPIECEL, MT6391_MUX_VOICE);
-	mt6391_set_reg(codec_data, MT6397_AUDBUF_CFG0, 0x0001, 0x0001);	/* mux selection */
-	/* usleep(1000); */
-}
-
-static void mt6391_turn_off_voice_amp(struct mt6391_priv *codec_data)
-{
-	if (codec_data->device_power[MT6391_DEV_OUT_EARPIECEL]) {
-		pr_debug("%s still on\n", __func__);
-		return;
-	}
-
-	mt6391_set_reg(codec_data, MT6397_AFUNC_AUD_CON2, 0x0080, 0x0080);
-	/* short HS to vcm and HS output stability enhance */
-	mt6391_set_reg(codec_data, MT6397_AUDBUF_CFG2, 0x0022, 0xffff);
-	mt6391_set_reg(codec_data, MT6397_AUDBUF_CFG0, 0x0880, 0xffff);
-	mt6391_set_reg(codec_data, MT6397_IBIASDIST_CFG0, 0x1552, 0xffff); /* RG DEV ck off */
-	mt6391_set_reg(codec_data, MT6397_AUDDAC_CON0, 0x0000, 0xffff);	/* NCP off */
-	/* Audio headset power off */
-	mt6391_set_reg(codec_data, MT6397_AUDCLKGEN_CFG0, 0x0000, 0x0001);
-	/* short HS to vcm and HS output stability EnhanceParasNum */
-	mt6391_set_reg(codec_data, MT6397_AUDBUF_CFG2, 0x0022, 0xffff);
-
-	if (mt6391_get_ul_status(codec_data) == false)
-		mt6391_set_reg(codec_data, MT6397_AUDNVREGGLB_CFG0, 0x0006, 0xffff);
-
-	mt6391_set_reg(codec_data, MT6397_NCP_CLKDIV_CON1, 0x0001, 0xffff);
-	mt6391_set_reg(codec_data, MT6397_AUD_NCP0, 0x0000, 0x6000);
-
-	if (mt6391_get_ul_status(codec_data) == false)
-		mt6391_set_reg(codec_data, MT6397_AUDLDO_CFG0, 0x0192, 0xffff);
-
-	mt6391_set_reg(codec_data, MT6397_AFUNC_AUD_CON2, 0x0000, 0x0080);
-
-	if (!mt6391_get_dl_status(codec_data))
-		mt6391_turn_off_dac(codec_data);
-
-	/* Disable ZCD in the turn off sequence to avoid pop noise */
-	mt6391_set_reg(codec_data, MT6397_ZCD_CON0, 0x0000, 0x0701);
-}
-
-static void mt6391_turn_on_speaker_amp(struct mt6391_priv *codec_data)
-{
-	int gain_l = codec_data->device_volume[MT6391_VOL_SPKL];
-	int gain_r = codec_data->device_volume[MT6391_VOL_SPKR];
-
-	pr_debug("%s\n", __func__);
-
-	if (codec_data->device_power[MT6391_DEV_OUT_SPEAKERL]) {
-		pr_debug("%s turn on already\n", __func__);
-		return;
-	}
-
-	if (mt6391_get_dl_status(codec_data) == false)
-		mt6391_turn_on_dac(codec_data);
-
-	/* here pmic analog control */
-	mt6391_control_top_clk(codec_data, 0x0604, true);	/* enable SPK related CLK */
-	mt6391_set_reg(codec_data, MT6397_AFUNC_AUD_CON2, 0x0080, 0x0080);
-	mt6391_set_spk_trim_offset(codec_data);
-	/* enable VA28 , VA 33 VBAT ref , set dc */
-	mt6391_set_reg(codec_data, MT6397_AUDLDO_CFG0, 0x0D92, 0xffff);
-	/* set ACC mode  enable NVREF */
-	mt6391_set_reg(codec_data, MT6397_AUDNVREGGLB_CFG0, 0x000C, 0xffff);
-	/* enable LDO ; fix me , separate for UL  DL LDO */
-	mt6391_set_reg(codec_data, MT6397_AUD_NCP0, 0xE000, 0xE000);
-	mt6391_set_reg(codec_data, MT6397_NCP_CLKDIV_CON0, 0x102B, 0xffff);	/* RG DEV ck on */
-	mt6391_set_reg(codec_data, MT6397_NCP_CLKDIV_CON1, 0x0000, 0xffff);	/* NCP on */
-	udelay(200);
-
-	/* ZCD mux selection as iv buffer*/
-	mt6391_set_reg(codec_data, MT6397_ZCD_CON0, 0x0300, 0x0700);
-	/* ZCD enable */
-	mt6391_set_reg(codec_data, MT6397_ZCD_CON0, 0x0001, 0x0001);
-	/* audio bias adjustment */
-	mt6391_set_reg(codec_data, MT6397_IBIASDIST_CFG0, 0x0552, 0xffff);
-	/* set DUDIV gain ,iv buffer gain */
-	mt6391_set_reg(codec_data, MT6397_ZCD_CON4, 0x0505, 0xffff);
-	mt6391_set_reg(codec_data, MT6397_AUD_IV_CFG0, 0x1111, 0xffff);	/* set IV buffer on */
-	udelay(100);
-	mt6391_set_reg(codec_data, MT6397_AUDCLKGEN_CFG0, 0x0001, 0x0001); /* reset docoder */
-	mt6391_set_reg(codec_data, MT6397_AUDDAC_CON0, 0x000f, 0xffff);	/* power on DAC */
-	udelay(100);
-
-	mt6391_set_mux(codec_data, MT6391_DEV_OUT_SPEAKERR, MT6391_MUX_AUDIO);
-	mt6391_set_mux(codec_data, MT6391_DEV_OUT_SPEAKERL, MT6391_MUX_AUDIO);
-	mt6391_set_reg(codec_data, MT6397_AUDBUF_CFG0, 0x0000, 0x0007);	/* set Mux */
-
-	mt6391_set_reg(codec_data, MT6397_AFUNC_AUD_CON2, 0x0000, 0x0080);
-
-	mt6391_set_reg(codec_data, MT6397_SPK_CON9, 0x0100, 0x0f00);	/* set gain L */
-	mt6391_set_reg(codec_data, MT6397_SPK_CON5, (0x1 << 11), 0x7800);	/* set gain R */
-
-	if (codec_data->speaker_channel_sel == MT6391_CHANNEL_SEL_STEREO) {
-		mt6391_set_reg(codec_data, MT6397_SPK_CON0,
-			       0x3001 | (codec_data->speaker_mode << 2),
-			       0xffff);
-		mt6391_set_reg(codec_data, MT6397_SPK_CON3,
-			       0x3001 | (codec_data->speaker_mode << 2),
-			       0xffff);
-		mt6391_set_reg(codec_data, MT6397_SPK_CON2, 0x0014, 0xffff);
-		mt6391_set_reg(codec_data, MT6397_SPK_CON5, 0x0014, 0x07ff);
-		/* SPK gain setting */
-		mt6391_set_reg(codec_data, MT6397_SPK_CON9, gain_l << 8, 0xf00);
-		mt6391_set_reg(codec_data, MT6397_SPK_CON5, gain_r << 11, 0x7800);
-	} else if (codec_data->speaker_channel_sel == MT6391_CHANNEL_SEL_MONO_LEFT) {
-		mt6391_set_reg(codec_data, MT6397_SPK_CON0,
-			       0x3001 | (codec_data->speaker_mode << 2),
-			       0xffff);
-		mt6391_set_reg(codec_data, MT6397_SPK_CON2, 0x0014, 0xffff);
-		/* SPK gain setting */
-		mt6391_set_reg(codec_data, MT6397_SPK_CON9, gain_l << 8, 0xf00);
-	} else if (codec_data->speaker_channel_sel == MT6391_CHANNEL_SEL_MONO_RIGHT) {
-		mt6391_set_reg(codec_data, MT6397_SPK_CON3,
-			       0x3001 | (codec_data->speaker_mode << 2),
-			       0xffff);
-		mt6391_set_reg(codec_data, MT6397_SPK_CON5, 0x0014, 0x07ff);
-		/* SPK gain setting */
-		mt6391_set_reg(codec_data, MT6397_SPK_CON5, gain_r << 11, 0x7800);
-	} else {
-		pr_err("%s unexpected condition\n", __func__);
-	}
-
-	/* spk output stage enabke and enable */
-	mt6391_set_reg(codec_data, MT6397_SPK_CON11, 0x0f00, 0xffff);
-	usleep_range(4000, 5000);
-
-	pr_debug("%s done\n", __func__);
-}
-
-static void mt6391_turn_off_speaker_amp(struct mt6391_priv *codec_data)
-{
-	pr_debug("%s\n", __func__);
-
-	if (codec_data->device_power[MT6391_DEV_OUT_SPEAKERL]) {
-		pr_debug("%s still on\n", __func__);
-		return;
-	}
-
-	mt6391_set_reg(codec_data, MT6397_AFUNC_AUD_CON2, 0x0080, 0x0080);
-	mt6391_set_reg(codec_data, MT6397_SPK_CON0, 0x0000, 0xffff);
-	mt6391_set_reg(codec_data, MT6397_SPK_CON3, 0x0000, 0xffff);
-	mt6391_set_reg(codec_data, MT6397_SPK_CON11, 0x0000, 0xffff);
-	/* enable LDO ; fix me , separate for UL  DL LDO */
-	mt6391_set_reg(codec_data, MT6397_AUDCLKGEN_CFG0, 0x0000, 0x0001);
-	mt6391_set_reg(codec_data, MT6397_AUDDAC_CON0, 0x0000, 0xffff);	/* RG DEV ck on */
-	mt6391_set_reg(codec_data, MT6397_AUD_IV_CFG0, 0x0000, 0xffff);	/* NCP on */
-	/* Audio headset power on */
-	mt6391_set_reg(codec_data, MT6397_IBIASDIST_CFG0, 0x1552, 0xffff);
-	/* mt6391_set_reg(codec_data, MT6397_AUDBUF_CFG1, 0x0000, 0x0100); */
-	if (mt6391_get_ul_status(codec_data) == false)
-		mt6391_set_reg(codec_data, MT6397_AUDNVREGGLB_CFG0, 0x0006, 0xffff);
-
-	mt6391_set_reg(codec_data, MT6397_NCP_CLKDIV_CON1, 0x0001, 0xffff);	/* fix me */
-	mt6391_set_reg(codec_data, MT6397_AUD_NCP0, 0x0000, 0x6000);
-	if (mt6391_get_ul_status(codec_data) == false)
-		mt6391_set_reg(codec_data, MT6397_AUDLDO_CFG0, 0x0192, 0xffff);
-
-	mt6391_set_reg(codec_data, MT6397_AFUNC_AUD_CON2, 0x0000, 0x0080);
-	mt6391_control_top_clk(codec_data, 0x0604, false);	/* disable SPK related CLK */
-	if (mt6391_get_dl_status(codec_data) == false)
-		mt6391_turn_off_dac(codec_data);
-
-	/* Disable ZCD in the turn off sequence to avoid pop noise */
-	mt6391_set_reg(codec_data, MT6397_ZCD_CON0, 0x0000, 0x0701);
-
-	pr_debug("%s done\n", __func__);
-}
-
-static void mt6391_turn_on_headset_speaker_amp(struct mt6391_priv *codec_data)
-{
-	int gain_hpl = codec_data->device_volume[MT6391_VOL_HPOUTL];
-	int gain_hpr = codec_data->device_volume[MT6391_VOL_HPOUTR];
-	int gain_spkl = codec_data->device_volume[MT6391_VOL_SPKL];
-	int gain_spkr = codec_data->device_volume[MT6391_VOL_SPKR];
-
-	pr_debug("%s\n", __func__);
-
-	if (codec_data->device_power[MT6391_DEV_OUT_SPEAKER_HEADSET_L]) {
-		pr_debug("%s turn on already\n", __func__);
-		return;
-	}
-
-	if (!mt6391_get_dl_status(codec_data))
-		mt6391_turn_on_dac(codec_data);
-
-	/* here pmic analog control */
-	mt6391_control_top_clk(codec_data, 0x0604, true);	/* enable SPK related CLK */
-	mt6391_set_reg(codec_data, MT6397_AFUNC_AUD_CON2, 0x0080, 0x0080);
-	mt6391_set_hp_trim_offset(codec_data);
-	mt6391_set_iv_hp_trim_offset(codec_data);
-	mt6391_set_spk_trim_offset(codec_data);
-
-	/* enable VA28 , VA 33 VBAT ref , set dc */
-	mt6391_set_reg(codec_data, MT6397_AUDLDO_CFG0, 0x0D92, 0xffff);
-	/* set ACC mode  enable NVREF */
-	mt6391_set_reg(codec_data, MT6397_AUDNVREGGLB_CFG0, 0x000C, 0xffff);
-	/* enable LDO ; fix me , separate for UL  DL LDO */
-	mt6391_set_reg(codec_data, MT6397_AUD_NCP0, 0xE000, 0xE000);
-	mt6391_set_reg(codec_data, MT6397_NCP_CLKDIV_CON0, 0x102B, 0xffff);	/* RG DEV ck on */
-	mt6391_set_reg(codec_data, MT6397_NCP_CLKDIV_CON1, 0x0000, 0xffff);	/* NCP on */
-	udelay(200);
-
-	/* ZCD mux selection as iv buffer*/
-	mt6391_set_reg(codec_data, MT6397_ZCD_CON0, 0x0300, 0x0700);
-	/* ZCD enable */
-	mt6391_set_reg(codec_data, MT6397_ZCD_CON0, 0x0001, 0x0001);
-	/* select charge current ; fix me */
-	mt6391_set_reg(codec_data, MT6397_AUDACCDEPOP_CFG0, 0x0030, 0xffff);
-	/* set voice playback with headset */
-	mt6391_set_reg(codec_data, MT6397_AUDBUF_CFG0, 0x0008, 0xffff);
-	/* audio bias adjustment */
-	mt6391_set_reg(codec_data, MT6397_IBIASDIST_CFG0, 0x0552, 0xffff);
-	mt6391_set_reg(codec_data, MT6397_ZCD_CON2, 0xc0c, 0xf0f);	/* HP PGA gain */
-	mt6391_set_reg(codec_data, MT6397_ZCD_CON3, 0xf, 0xf);	/* HS PGA gain */
-	mt6391_set_reg(codec_data, MT6397_AUDBUF_CFG1, 0x0900, 0xffff);	/* HP enhance */
-	mt6391_set_reg(codec_data, MT6397_AUDBUF_CFG2, 0x0082, 0xffff);	/* HS enahnce */
-	mt6391_set_reg(codec_data, MT6397_AUDBUF_CFG0, 0x0009, 0xffff);
-	mt6391_set_reg(codec_data, MT6397_AUDBUF_CFG1, 0x0940, 0xffff);	/* HP vcm short */
-	udelay(200);
-	mt6391_set_reg(codec_data, MT6397_AUDBUF_CFG0, 0x000F, 0xffff);	/* HP power on */
-
-	mt6391_set_reg(codec_data, MT6397_AUDBUF_CFG1, 0x0100, 0xffff);	/* HP vcm not short */
-	udelay(100);
-	mt6391_set_reg(codec_data, MT6397_AUDBUF_CFG2, 0x0022, 0xffff);	/* HS VCM not short */
-
-	/* HP PGA gain */
-	mt6391_set_reg(codec_data, MT6397_ZCD_CON2, ((gain_hpr << 8) | gain_hpl), 0xf0f);
-	udelay(100);
-	mt6391_set_reg(codec_data, MT6397_ZCD_CON4, 0x0505, 0xffff);	/* HP PGA gain */
-
-	mt6391_set_reg(codec_data, MT6397_AUD_IV_CFG0, 0x1111, 0xffff);	/* set IV buffer on */
-	udelay(100);
-	mt6391_set_reg(codec_data, MT6397_AUDCLKGEN_CFG0, 0x0001, 0x0001); /* reset docoder */
-	mt6391_set_reg(codec_data, MT6397_AUDDAC_CON0, 0x000F, 0xffff);	/* power on DAC */
-	udelay(100);
-	mt6391_set_mux(codec_data, MT6391_DEV_OUT_SPEAKERR, MT6391_MUX_AUDIO);
-	mt6391_set_mux(codec_data, MT6391_DEV_OUT_SPEAKERL, MT6391_MUX_AUDIO);
-	mt6391_set_reg(codec_data, MT6397_AUDBUF_CFG0, 0x1106, 0x1106);	/* set headhpone mux */
-
-	mt6391_set_reg(codec_data, MT6397_SPK_CON9, 1 << 13, 1 << 13);
-	mt6391_set_reg(codec_data, MT6397_SPK_CON9, 0x0100, 0x0f00);	/* set gain L */
-	mt6391_set_reg(codec_data, MT6397_SPK_CON5, (0x1 << 11), 0x7800);	/* set gain R */
-
-	/* speaker gain setting , trim enable , spk enable , class AB or D */
-	mt6391_set_reg(codec_data, MT6397_SPK_CON0,
-		       0x3001 | (codec_data->speaker_mode << 2),
-		       0xffff);
-	/* speaker gain setting , trim enable , spk enable , class AB or D */
-	mt6391_set_reg(codec_data, MT6397_SPK_CON3,
-		       0x3001 | (codec_data->speaker_mode << 2),
-		       0xffff);
-	/* speaker gain setting , trim enable , spk enable , class AB or D */
-	mt6391_set_reg(codec_data, MT6397_SPK_CON2, 0x0014, 0xffff);
-	mt6391_set_reg(codec_data, MT6397_SPK_CON5, 0x0014, 0x07ff);
-
-	/* SPK-L gain setting */
-	mt6391_set_reg(codec_data, MT6397_SPK_CON9, gain_spkl << 8, 0xf00);
-	/* SPK-R gain setting */
-	mt6391_set_reg(codec_data, MT6397_SPK_CON5, gain_spkr << 11, 0x7800);
-	/* spk output stage enabke and enableAudioClockPortDST */
-	mt6391_set_reg(codec_data, MT6397_SPK_CON11, 0x0f00, 0xffff);
-	mt6391_set_reg(codec_data, MT6397_AFUNC_AUD_CON2, 0x0000, 0x0080);
-	usleep_range(4000, 5000);
-	mt6391_set_reg(codec_data, MT6397_SPK_CON9, 0 << 13, 1 << 13);
-
-	pr_debug("%s done\n", __func__);
-}
-
-static void mt6391_turn_off_headset_speaker_amp(struct mt6391_priv *codec_data)
-{
-	pr_debug("%s\n", __func__);
-
-	if (codec_data->device_power[MT6391_DEV_OUT_SPEAKER_HEADSET_L]) {
-		pr_debug("%s still on\n", __func__);
-		return;
-	}
-
-	mt6391_set_reg(codec_data, MT6397_AFUNC_AUD_CON2, 0x0080, 0x0080);
-	mt6391_set_reg(codec_data, MT6397_SPK_CON0, 0x0000, 0xffff);
-	mt6391_set_reg(codec_data, MT6397_SPK_CON3, 0x0000, 0xffff);
-	mt6391_set_reg(codec_data, MT6397_SPK_CON11, 0x0000, 0xffff);
-	mt6391_set_reg(codec_data, MT6397_ZCD_CON2, 0x0C0C, 0x0f0f);
-
-	mt6391_set_reg(codec_data, MT6397_AUDBUF_CFG0, 0x0000, 0x0007);
-	mt6391_set_reg(codec_data, MT6397_AUDBUF_CFG0, 0x0000, 0x1fe0);
-	mt6391_set_reg(codec_data, MT6397_IBIASDIST_CFG0, 0x1552, 0xffff);
-	mt6391_set_reg(codec_data, MT6397_AUDDAC_CON0, 0x0000, 0xffff);
-	mt6391_set_reg(codec_data, MT6397_AUDCLKGEN_CFG0, 0x0000, 0x0001);
-	mt6391_set_reg(codec_data, MT6397_AUD_IV_CFG0, 0x0010, 0xffff);
-	mt6391_set_reg(codec_data, MT6397_AUDBUF_CFG1, 0x0000, 0x0100);
-	mt6391_set_reg(codec_data, MT6397_AUDBUF_CFG2, 0x0000, 0x0080);
-
-	if (!mt6391_get_ul_status(codec_data))
-		mt6391_set_reg(codec_data, MT6397_AUDNVREGGLB_CFG0, 0x0006, 0xffff);
-
-	mt6391_set_reg(codec_data, MT6397_NCP_CLKDIV_CON1, 0x0001, 0xffff);
-	mt6391_set_reg(codec_data, MT6397_AUD_NCP0, 0x0000, 0x6000);
-	if (!mt6391_get_ul_status(codec_data))
-		mt6391_set_reg(codec_data, MT6397_AUDLDO_CFG0, 0x0192, 0xffff);
-
-	mt6391_set_reg(codec_data, MT6397_AFUNC_AUD_CON2, 0x0000, 0x0080);
-	mt6391_control_top_clk(codec_data, 0x0604, false);	/* disable SPK related CLK */
-	if (!mt6391_get_dl_status(codec_data))
-		mt6391_turn_off_dac(codec_data);
-
-	/* Disable ZCD in the turn off sequence to avoid pop noise */
-	mt6391_set_reg(codec_data, MT6397_ZCD_CON0, 0x0000, 0x0701);
-
-	pr_debug("%s done\n", __func__);
-}
-
-static void mt6391_check_and_turn_off_all_amps(struct mt6391_priv *codec_data)
-{
-	if (codec_data->device_power[MT6391_DEV_OUT_EARPIECEL]) {
-		mt6391_turn_off_voice_amp(codec_data);
-		mt6391_ana_clk_off(codec_data);
-		codec_data->device_power[MT6391_DEV_OUT_EARPIECEL] = false;
-	}
-
-	if (codec_data->device_power[MT6391_DEV_OUT_SPEAKERL]) {
-		mt6391_turn_off_speaker_amp(codec_data);
-		mt6391_ana_clk_off(codec_data);
-		codec_data->device_power[MT6391_DEV_OUT_SPEAKERL] = false;
-	}
-
-	if (codec_data->device_power[MT6391_DEV_OUT_HEADSETL]) {
-		mt6391_turn_off_headphone_amp(codec_data);
-		mt6391_ana_clk_off(codec_data);
-		codec_data->device_power[MT6391_DEV_OUT_HEADSETL] = false;
-	}
-
-	if (codec_data->device_power[MT6391_DEV_OUT_SPEAKER_HEADSET_L]) {
-		mt6391_turn_off_headset_speaker_amp(codec_data);
-		mt6391_ana_clk_off(codec_data);
-		codec_data->device_power[MT6391_DEV_OUT_SPEAKER_HEADSET_L] = false;
-	}
-}
-
-static void mt6391_turn_on_dmic(struct mt6391_priv *codec_data)
-{
-	uint32_t rate = codec_data->sample_rate[MT6391_ADDA_ADC];
-	uint32_t warmup_time = codec_data->dmic_warmup_time_us;
-	/* pmic digital part */
-	mt6391_set_reg(codec_data, MT6397_AUDCLKGEN_CFG0, 0x0000, 0x0002);
-	mt6391_set_reg(codec_data, MT6397_AFE_UL_SRC_CON0_L, 0x0000, 0xffff);
-
-	mt6391_control_top_clk(codec_data, 0x0003, true);
-	mt6391_set_reg(codec_data, MT6397_ANA_AUDIO_TOP_CON0, 0x0000, 0xffff);
-	mt6391_set_reg(codec_data, MT6397_AFE_UL_SRC_CON0_H,
-		       0x00e0 | mt6391_get_ul_voice_mode(rate),
-		       0xffff);
-	mt6391_set_reg(codec_data, MT6397_AFE_UL_DL_CON0, 0x007f, 0xffff);
-	mt6391_set_reg(codec_data, MT6397_AFE_UL_SRC_CON0_L, 0x0023, 0xffff);
-
-	/* AudioMachineDevice */
-	mt6391_set_reg(codec_data, MT6397_AUDNVREGGLB_CFG0, 0x0000, 0x0002);
-	mt6391_set_reg(codec_data, MT6397_AUDDIGMI_CON0, 0x0181, 0xffff);
-
-	if (warmup_time > 0)
-		usleep_range(warmup_time, warmup_time + 1);
-}
-
-static void mt6391_turn_off_dmic(struct mt6391_priv *codec_data)
-{
-	/* AudioMachineDevice */
-	mt6391_set_reg(codec_data, MT6397_AUDDIGMI_CON0, 0x0080, 0xffff);
-	/* pmic digital part */
-	mt6391_set_reg(codec_data, MT6397_AFE_UL_SRC_CON0_H, 0x0000, 0xffff);
-	mt6391_set_reg(codec_data, MT6397_AFE_UL_SRC_CON0_L, 0x0000, 0xffff);
-	if (mt6391_get_dl_status(codec_data) == false) {
-		mt6391_set_reg(codec_data, MT6397_AUDNVREGGLB_CFG0, 0x0002, 0x0002);
-		mt6391_set_reg(codec_data, MT6397_AFE_UL_DL_CON0, 0x0000, 0xffff);
-	}
-}
-
-static void mt6391_turn_on_adc(struct mt6391_priv *codec_data, int adc_type)
-{
-	if (!mt6391_get_adc_status(codec_data)) {
-		uint32_t rate = codec_data->sample_rate[MT6391_ADDA_ADC];
-		uint32_t warmup_time = codec_data->adc_warmup_time_us;
-		/* pmic digital part */
-		mt6391_set_reg(codec_data, MT6397_AUDCLKGEN_CFG0, 0x0000, 0x0002);
-		mt6391_set_reg(codec_data, MT6397_AFE_UL_SRC_CON0_L, 0x0000, 0xffff);
-		mt6391_set_reg(codec_data, MT6397_AUDCLKGEN_CFG0, 0x0002, 0x0002);
-		mt6391_control_top_clk(codec_data, 0x0003, true);
-		mt6391_set_reg(codec_data, MT6397_ANA_AUDIO_TOP_CON0, 0x0000, 0xffff);
-		mt6391_set_reg(codec_data, MT6397_AFE_UL_SRC_CON0_H,
-			    0x0000 | mt6391_get_ul_voice_mode(rate), 0xffff);
-		mt6391_set_reg(codec_data, MT6397_AFE_UL_DL_CON0, 0x007f, 0xffff);
-		mt6391_set_reg(codec_data, MT6397_AFE_UL_SRC_CON0_L, 0x0001, 0xffff);
-
-		/* pmic analog part */
-		mt6391_set_reg(codec_data, MT6397_AUDNVREGGLB_CFG0, 0x000c, 0xffff);
-		mt6391_set_reg(codec_data, MT6397_AUDLDO_CFG0, 0x0D92, 0xffff);
-		mt6391_set_reg(codec_data, MT6397_AUD_NCP0, 0x9000, 0x9000);
-
-		mt6391_set_mux(codec_data, MT6391_DEV_IN_ADC1, MT6391_MUX_IN_PREAMP_1);
-		mt6391_set_mux(codec_data, MT6391_DEV_IN_ADC2, MT6391_MUX_IN_PREAMP_2);
-
-		/* open power */
-		mt6391_set_reg(codec_data, MT6397_AUDPREAMP_CON0, 0x0003, 0x0003);
-		mt6391_set_reg(codec_data, MT6397_AUDADC_CON0, 0x0093, 0xffff);
-		mt6391_set_reg(codec_data, MT6397_NCP_CLKDIV_CON0, 0x102B, 0x102B);
-		mt6391_set_reg(codec_data, MT6397_NCP_CLKDIV_CON1, 0x0000, 0xffff);
-		mt6391_set_reg(codec_data, MT6397_AUDDIGMI_CON0, 0x0180, 0x0180);
-
-		if (warmup_time > 0)
-			usleep_range(warmup_time, warmup_time + 1);
-	}
-}
-
-static void mt6391_turn_off_adc(struct mt6391_priv *codec_data, int adc_type)
-{
-	if (!mt6391_get_adc_status(codec_data)) {
-		/* pmic analog part */
-		mt6391_set_reg(codec_data, MT6397_AUDPREAMP_CON0, 0x0000, 0x0003);
-		mt6391_set_reg(codec_data, MT6397_AUDADC_CON0, 0x00B4, 0xffff);
-		mt6391_set_reg(codec_data, MT6397_AUDDIGMI_CON0, 0x0080, 0xffff);
-		mt6391_set_reg(codec_data, MT6397_AUD_NCP0, 0x0000, 0x1000);
-		mt6391_set_reg(codec_data, MT6397_AUDLSBUF_CON0, 0x0000, 0x0003);
-		if (mt6391_get_dl_status(codec_data) == false)
-			mt6391_set_reg(codec_data, MT6397_AUDNVREGGLB_CFG0, 0x0006, 0xffff);
-
-		if (mt6391_get_dl_status(codec_data) == false)
-			mt6391_set_reg(codec_data, MT6397_AUDLDO_CFG0, 0x0192, 0xffff);
-
-		mt6391_set_reg(codec_data, MT6397_AUDCLKGEN_CFG0, 0x0000, 0x0002);
-		/* pmic digital part */
-
-		mt6391_set_reg(codec_data, MT6397_AFE_UL_SRC_CON0_L, 0x0000, 0xffff);
-		if (!mt6391_get_dl_status(codec_data))
-			mt6391_set_reg(codec_data, MT6397_AFE_UL_DL_CON0, 0x0000, 0xffff);
-	}
-}
-
-
-/* snd kcontrol implementation */
-static int mt6391_audio_amp_get(struct snd_kcontrol *kcontrol,
-			struct snd_ctl_elem_value *ucontrol)
-{
-	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
-	struct mt6391_priv *codec_data = snd_soc_component_get_drvdata(component);
-
-	ucontrol->value.integer.value[0] =
-	    codec_data->device_power[MT6391_DEV_OUT_HEADSETL] ? 1 : 0;
 	return 0;
 }
 
-static int mt6391_audio_amp_set(struct snd_kcontrol *kcontrol,
-			struct snd_ctl_elem_value *ucontrol)
+static int mt6391_dl_src_event(struct snd_soc_dapm_widget *w,
+			       struct snd_kcontrol *kcontrol, int event)
 {
-	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
-	struct mt6391_priv *codec_data = snd_soc_component_get_drvdata(component);
+	struct snd_soc_component *cmpnt = snd_soc_dapm_to_component(w->dapm);
+	struct mt6391_priv *priv = snd_soc_component_get_drvdata(cmpnt);
+	struct regmap *map = priv->regmap;
 
-	mutex_lock(&codec_data->ctrl_mutex);
-
-	pr_debug("%s %ld\n ", __func__, ucontrol->value.integer.value[0]);
-
-	if (ucontrol->value.integer.value[0] &&
-	    !codec_data->device_power[MT6391_DEV_OUT_HEADSETL]) {
-		mt6391_check_and_turn_off_all_amps(codec_data);
-		mt6391_ana_clk_on(codec_data);
-		mt6391_turn_on_headphone_amp(codec_data);
-		codec_data->device_power[MT6391_DEV_OUT_HEADSETL] = true;
-	} else if (!ucontrol->value.integer.value[0] &&
-		   codec_data->device_power[MT6391_DEV_OUT_HEADSETL]) {
-		codec_data->device_power[MT6391_DEV_OUT_HEADSETL] = false;
-		mt6391_turn_off_headphone_amp(codec_data);
-		mt6391_ana_clk_off(codec_data);
+	switch (event) {
+	case SND_SOC_DAPM_PRE_PMU:
+		regmap_update_bits(map, MT6397_AFE_PMIC_NEWIF_CFG0,
+				   MT6397_NEWIF_DL_RATE,
+				   FIELD_PREP(MT6397_NEWIF_DL_RATE,
+					      priv->dl_rate_mode));
+		/* SDM FIFO clock, scrambler, SDM, then the FIFO */
+		regmap_write(map, MT6397_AFUNC_AUD_CON2, 0x0006);
+		regmap_write(map, MT6397_AFUNC_AUD_CON0, 0xc3a1);
+		regmap_write(map, MT6397_AFUNC_AUD_CON2, 0x0003);
+		regmap_write(map, MT6397_AFUNC_AUD_CON2, 0x000b);
+		regmap_write(map, MT6397_AFE_DL_SDM_CON1, 0x001e);
+		regmap_write(map, MT6397_AFE_DL_SRC2_CON0_H,
+			     FIELD_PREP(MT6397_DL_2_INPUT_MODE,
+					priv->dl_rate_mode) | 0x0300);
+		regmap_write(map, MT6397_AFE_UL_DL_CON0, 0x007f);
+		regmap_write(map, MT6397_AFE_DL_SRC2_CON0_L,
+			     0x1800 | MT6397_DL_2_SRC_ON);
+		priv->dl_src_on = true;
+		break;
+	case SND_SOC_DAPM_POST_PMD:
+		priv->dl_src_on = false;
+		regmap_write(map, MT6397_AFE_DL_SRC2_CON0_L, 0x1800);
+		regmap_write(map, MT6397_AFE_UL_DL_CON0, 0);
+		break;
 	}
 
-	mutex_unlock(&codec_data->ctrl_mutex);
 	return 0;
 }
 
-static int mt6391_voice_amp_get(struct snd_kcontrol *kcontrol,
-			struct snd_ctl_elem_value *ucontrol)
+static int mt6391_spk_ck_event(struct snd_soc_dapm_widget *w,
+			       struct snd_kcontrol *kcontrol, int event)
 {
-	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
-	struct mt6391_priv *codec_data = snd_soc_component_get_drvdata(component);
+	struct snd_soc_component *cmpnt = snd_soc_dapm_to_component(w->dapm);
+	struct mt6391_priv *priv = snd_soc_component_get_drvdata(cmpnt);
+	unsigned int mask = MT6397_RG_SPK_CK_PDN | MT6397_RG_SPK_PWM_DIV_PDN |
+			    MT6397_RG_SPK_DIV_PDN;
 
-	ucontrol->value.integer.value[0] =
-	    codec_data->device_power[MT6391_DEV_OUT_EARPIECEL] ? 1 : 0;
-	return 0;
-}
-
-static int mt6391_voice_amp_set(struct snd_kcontrol *kcontrol,
-			struct snd_ctl_elem_value *ucontrol)
-{
-	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
-	struct mt6391_priv *codec_data = snd_soc_component_get_drvdata(component);
-
-	mutex_lock(&codec_data->ctrl_mutex);
-
-	pr_debug("%s %ld\n ", __func__, ucontrol->value.integer.value[0]);
-
-	if (ucontrol->value.integer.value[0] &&
-	    !codec_data->device_power[MT6391_DEV_OUT_EARPIECEL]) {
-		mt6391_check_and_turn_off_all_amps(codec_data);
-		mt6391_ana_clk_on(codec_data);
-		mt6391_turn_on_voice_amp(codec_data);
-		codec_data->device_power[MT6391_DEV_OUT_EARPIECEL] = true;
-	} else if (!ucontrol->value.integer.value[0] &&
-		   codec_data->device_power[MT6391_DEV_OUT_EARPIECEL]) {
-		codec_data->device_power[MT6391_DEV_OUT_EARPIECEL] = false;
-		mt6391_turn_off_voice_amp(codec_data);
-		mt6391_ana_clk_off(codec_data);
+	switch (event) {
+	case SND_SOC_DAPM_PRE_PMU:
+		regmap_write(priv->regmap, MT6397_TOP_CKPDN_CLR, mask);
+		break;
+	case SND_SOC_DAPM_POST_PMD:
+		regmap_write(priv->regmap, MT6397_TOP_CKPDN_SET, mask);
+		break;
 	}
 
-	mutex_unlock(&codec_data->ctrl_mutex);
 	return 0;
 }
 
-static int mt6391_speaker_amp_get(struct snd_kcontrol *kcontrol,
-			struct snd_ctl_elem_value *ucontrol)
+static int mt6391_spk_amp_event(struct snd_soc_dapm_widget *w,
+				struct snd_kcontrol *kcontrol, int event)
 {
-	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
-	struct mt6391_priv *codec_data = snd_soc_component_get_drvdata(component);
+	struct snd_soc_component *cmpnt = snd_soc_dapm_to_component(w->dapm);
+	struct mt6391_priv *priv = snd_soc_component_get_drvdata(cmpnt);
 
-	ucontrol->value.integer.value[0] =
-	    codec_data->device_power[MT6391_DEV_OUT_SPEAKERL] ? 1 : 0;
-	return 0;
-}
-
-static int mt6391_speaker_amp_set(struct snd_kcontrol *kcontrol,
-			struct snd_ctl_elem_value *ucontrol)
-{
-	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
-	struct mt6391_priv *codec_data = snd_soc_component_get_drvdata(component);
-
-	mutex_lock(&codec_data->ctrl_mutex);
-
-	pr_debug("%s %ld\n ", __func__, ucontrol->value.integer.value[0]);
-
-	if (ucontrol->value.integer.value[0] &&
-	    !codec_data->device_power[MT6391_DEV_OUT_SPEAKERL]) {
-		mt6391_check_and_turn_off_all_amps(codec_data);
-		mt6391_ana_clk_on(codec_data);
-		mt6391_turn_on_speaker_amp(codec_data);
-		codec_data->device_power[MT6391_DEV_OUT_SPEAKERL] = true;
-	} else if (!ucontrol->value.integer.value[0] &&
-		   codec_data->device_power[MT6391_DEV_OUT_SPEAKERL]) {
-		codec_data->device_power[MT6391_DEV_OUT_SPEAKERL] = false;
-		mt6391_turn_off_speaker_amp(codec_data);
-		mt6391_ana_clk_off(codec_data);
+	switch (event) {
+	case SND_SOC_DAPM_POST_PMU:
+		mt6391_spk_amp_on(priv, priv->dl_users++ == 0);
+		break;
+	case SND_SOC_DAPM_PRE_PMD:
+		mt6391_spk_amp_off(priv, --priv->dl_users == 0);
+		break;
 	}
 
-	mutex_unlock(&codec_data->ctrl_mutex);
 	return 0;
 }
 
-static int mt6391_headset_speaker_amp_get(struct snd_kcontrol *kcontrol,
-			struct snd_ctl_elem_value *ucontrol)
+static int mt6391_hp_amp_event(struct snd_soc_dapm_widget *w,
+			       struct snd_kcontrol *kcontrol, int event)
 {
-	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
-	struct mt6391_priv *codec_data = snd_soc_component_get_drvdata(component);
+	struct snd_soc_component *cmpnt = snd_soc_dapm_to_component(w->dapm);
+	struct mt6391_priv *priv = snd_soc_component_get_drvdata(cmpnt);
 
-	ucontrol->value.integer.value[0] =
-	    codec_data->device_power[MT6391_DEV_OUT_SPEAKER_HEADSET_L] ? 1 : 0;
-	return 0;
-}
-
-static int mt6391_headset_speaker_amp_set(struct snd_kcontrol *kcontrol,
-			struct snd_ctl_elem_value *ucontrol)
-{
-	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
-	struct mt6391_priv *codec_data = snd_soc_component_get_drvdata(component);
-
-	mutex_lock(&codec_data->ctrl_mutex);
-
-	pr_debug("%s %ld\n ", __func__, ucontrol->value.integer.value[0]);
-
-	if (ucontrol->value.integer.value[0] &&
-	    !codec_data->device_power[MT6391_DEV_OUT_SPEAKER_HEADSET_L]) {
-		mt6391_check_and_turn_off_all_amps(codec_data);
-		mt6391_ana_clk_on(codec_data);
-		mt6391_turn_on_headset_speaker_amp(codec_data);
-		codec_data->device_power[MT6391_DEV_OUT_SPEAKER_HEADSET_L] = true;
-	} else if (!ucontrol->value.integer.value[0] &&
-		   codec_data->device_power[MT6391_DEV_OUT_SPEAKER_HEADSET_L]) {
-		codec_data->device_power[MT6391_DEV_OUT_SPEAKER_HEADSET_L] = false;
-		mt6391_turn_off_headset_speaker_amp(codec_data);
-		mt6391_ana_clk_off(codec_data);
+	switch (event) {
+	case SND_SOC_DAPM_POST_PMU:
+		mt6391_hp_amp_on(priv, priv->dl_users++ == 0);
+		break;
+	case SND_SOC_DAPM_PRE_PMD:
+		mt6391_hp_amp_off(priv, --priv->dl_users == 0);
+		break;
 	}
 
-	mutex_unlock(&codec_data->ctrl_mutex);
 	return 0;
 }
 
-static int mt6391_headset_pgal_get(struct snd_kcontrol *kcontrol,
-			struct snd_ctl_elem_value *ucontrol)
+static int mt6391_spk_volume_get(struct snd_kcontrol *kcontrol,
+				 struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
-	struct mt6391_priv *codec_data = snd_soc_component_get_drvdata(component);
+	struct snd_soc_component *cmpnt = snd_kcontrol_chip(kcontrol);
+	struct mt6391_priv *priv = snd_soc_component_get_drvdata(cmpnt);
 
-	ucontrol->value.integer.value[0] = codec_data->device_volume[MT6391_VOL_HPOUTL];
+	ucontrol->value.integer.value[0] = priv->spk_gain[0];
+	ucontrol->value.integer.value[1] = priv->spk_gain[1];
+
 	return 0;
 }
 
-static int mt6391_headset_pgal_set(struct snd_kcontrol *kcontrol,
-			struct snd_ctl_elem_value *ucontrol)
+static int mt6391_spk_volume_put(struct snd_kcontrol *kcontrol,
+				 struct snd_ctl_elem_value *ucontrol)
 {
-	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
-	struct soc_enum *e = (struct soc_enum *)kcontrol->private_value;
-	struct mt6391_priv *codec_data = snd_soc_component_get_drvdata(component);
-	int index = 0;
+	struct snd_soc_component *cmpnt = snd_kcontrol_chip(kcontrol);
+	struct mt6391_priv *priv = snd_soc_component_get_drvdata(cmpnt);
+	long l = ucontrol->value.integer.value[0];
+	long r = ucontrol->value.integer.value[1];
 
-	pr_debug("%s\n", __func__);
-	if (ucontrol->value.enumerated.item[0] > e->items) {
-		pr_err("%s out of bound\n", __func__);
+	if (l < 0 || l > 15 || r < 0 || r > 15)
 		return -EINVAL;
-	}
-	index = ucontrol->value.integer.value[0];
-	mt6391_set_reg(codec_data, MT6397_ZCD_CON2, index, 0x0000000F);
-	codec_data->device_volume[MT6391_VOL_HPOUTL] = index;
-	return 0;
-}
-
-static int mt6391_headset_pgar_get(struct snd_kcontrol *kcontrol,
-			struct snd_ctl_elem_value *ucontrol)
-{
-	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
-	struct mt6391_priv *codec_data = snd_soc_component_get_drvdata(component);
-
-	ucontrol->value.integer.value[0] = codec_data->device_volume[MT6391_VOL_HPOUTR];
-	return 0;
-}
-
-static int mt6391_headset_pgar_set(struct snd_kcontrol *kcontrol,
-			struct snd_ctl_elem_value *ucontrol)
-{
-	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
-	struct soc_enum *e = (struct soc_enum *)kcontrol->private_value;
-	struct mt6391_priv *codec_data = snd_soc_component_get_drvdata(component);
-	int index = 0;
-
-	pr_debug("%s\n", __func__);
-
-	if (ucontrol->value.enumerated.item[0] > e->items) {
-		pr_err("%s out of bound\n", __func__);
-		return -EINVAL;
-	}
-	index = ucontrol->value.integer.value[0];
-	mt6391_set_reg(codec_data, MT6397_ZCD_CON2, index << 8, 0x000000F00);
-	codec_data->device_volume[MT6391_VOL_HPOUTR] = index;
-	return 0;
-}
-
-static int mt6391_handset_pga_get(struct snd_kcontrol *kcontrol,
-			struct snd_ctl_elem_value *ucontrol)
-{
-	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
-	struct mt6391_priv *codec_data = snd_soc_component_get_drvdata(component);
-
-	ucontrol->value.integer.value[0] = codec_data->device_volume[MT6391_VOL_HSOUTL];
-	return 0;
-}
-
-static int mt6391_handset_pga_set(struct snd_kcontrol *kcontrol,
-			struct snd_ctl_elem_value *ucontrol)
-{
-	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
-	struct soc_enum *e = (struct soc_enum *)kcontrol->private_value;
-	struct mt6391_priv *codec_data = snd_soc_component_get_drvdata(component);
-	int index = 0;
-
-	pr_debug("%s %ld\n", __func__, ucontrol->value.integer.value[0]);
-
-	if (ucontrol->value.enumerated.item[0] > e->items) {
-		pr_err("%s out of bound\n", __func__);
-		return -EINVAL;
-	}
-	index = ucontrol->value.integer.value[0];
-	mt6391_set_reg(codec_data, MT6397_ZCD_CON3, index, 0xF);
-	codec_data->device_volume[MT6391_VOL_HSOUTL] = index;
-	return 0;
-}
-
-static int mt6391_speaker_pgal_get(struct snd_kcontrol *kcontrol,
-			struct snd_ctl_elem_value *ucontrol)
-{
-	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
-	struct mt6391_priv *codec_data = snd_soc_component_get_drvdata(component);
-
-	ucontrol->value.integer.value[0] = codec_data->device_volume[MT6391_VOL_SPKL];
-	return 0;
-}
-
-static int mt6391_speaker_pgal_set(struct snd_kcontrol *kcontrol,
-			struct snd_ctl_elem_value *ucontrol)
-{
-	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
-	struct soc_enum *e = (struct soc_enum *)kcontrol->private_value;
-	struct mt6391_priv *codec_data = snd_soc_component_get_drvdata(component);
-	int index = 0;
-
-	pr_debug("%s\n", __func__);
-
-	if (ucontrol->value.enumerated.item[0] > e->items) {
-		pr_err("%s out of bound\n", __func__);
-		return -EINVAL;
-	}
-	index = ucontrol->value.integer.value[0];
-	mt6391_set_reg(codec_data, MT6397_SPK_CON9, index << 8, 0x00000f00);
-	codec_data->device_volume[MT6391_VOL_SPKL] = index;
-	return 0;
-}
-
-static int mt6391_speaker_pgar_get(struct snd_kcontrol *kcontrol,
-			struct snd_ctl_elem_value *ucontrol)
-{
-	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
-	struct mt6391_priv *codec_data = snd_soc_component_get_drvdata(component);
-
-	ucontrol->value.integer.value[0] = codec_data->device_volume[MT6391_VOL_SPKR];
-	return 0;
-}
-
-static int mt6391_speaker_pgar_set(struct snd_kcontrol *kcontrol,
-			struct snd_ctl_elem_value *ucontrol)
-{
-	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
-	struct soc_enum *e = (struct soc_enum *)kcontrol->private_value;
-	struct mt6391_priv *codec_data = snd_soc_component_get_drvdata(component);
-	int index = 0;
-
-	pr_debug("%s\n", __func__);
-	if (ucontrol->value.enumerated.item[0] > e->items) {
-		pr_err("%s out of bound\n", __func__);
-		return -EINVAL;
-	}
-	index = ucontrol->value.integer.value[0];
-	mt6391_set_reg(codec_data, MT6397_SPK_CON5, index << 11, 0x00007800);
-	codec_data->device_volume[MT6391_VOL_SPKR] = index;
-	return 0;
-}
-
-static int mt6391_speaker_channel_set(struct snd_kcontrol *kcontrol,
-			struct snd_ctl_elem_value *ucontrol)
-{
-	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
-	struct mt6391_priv *codec_data = snd_soc_component_get_drvdata(component);
-
-	pr_debug("%s\n", __func__);
-	codec_data->speaker_channel_sel = ucontrol->value.integer.value[0];
-	return 0;
-}
-
-static int mt6391_speaker_channel_get(struct snd_kcontrol *kcontrol,
-			struct snd_ctl_elem_value *ucontrol)
-{
-	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
-	struct mt6391_priv *codec_data = snd_soc_component_get_drvdata(component);
-
-	pr_debug("%s = %d\n", __func__, codec_data->speaker_channel_sel);
-	ucontrol->value.integer.value[0] = codec_data->speaker_channel_sel;
-	return 0;
-}
-
-static int mt6391_speaker_oc_flag_get(struct snd_kcontrol *kcontrol,
-			struct snd_ctl_elem_value *ucontrol)
-{
-	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
-	struct mt6391_priv *codec_data = snd_soc_component_get_drvdata(component);
-	uint32_t reg_value = mt6391_get_reg(codec_data, MT6397_SPK_CON6);
-
-	if (codec_data->speaker_mode == MT6391_CLASS_AB)
-		ucontrol->value.integer.value[0] = (reg_value & 0xA000) ? 1 : 0;
-	else
-		ucontrol->value.integer.value[0] = (reg_value & 0x5000) ? 1 : 0;
-
-	return 0;
-}
-
-static int mt6391_speaker_oc_flag_set(struct snd_kcontrol *kcontrol,
-			struct snd_ctl_elem_value *ucontrol)
-{
-	return 0;
-}
-
-static int mt6391_dac_newif_sck_get(struct snd_kcontrol *kcontrol,
-			struct snd_ctl_elem_value *ucontrol)
-{
-	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
-	struct mt6391_priv *codec_data = snd_soc_component_get_drvdata(component);
-	uint32_t reg_value = mt6391_get_reg(codec_data, MT6397_AFE_PMIC_NEWIF_CFG2);
-
-	ucontrol->value.integer.value[0] = (reg_value & 0x8000) ? 1 : 0;
-	return 0;
-}
-
-static int mt6391_dac_newif_sck_set(struct snd_kcontrol *kcontrol,
-			struct snd_ctl_elem_value *ucontrol)
-{
-	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
-	struct mt6391_priv *codec_data = snd_soc_component_get_drvdata(component);
-
-	if (ucontrol->value.integer.value[0] == 0)
-		mt6391_set_reg(codec_data, MT6397_AFE_PMIC_NEWIF_CFG2, 0 << 15, 1 << 15);
-	else if (ucontrol->value.integer.value[0] == 1)
-		mt6391_set_reg(codec_data, MT6397_AFE_PMIC_NEWIF_CFG2, 1 << 15, 1 << 15);
-
-	return 0;
-}
-
-static int mt6391_dmic_get(struct snd_kcontrol *kcontrol,
-			struct snd_ctl_elem_value *ucontrol)
-{
-	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
-	struct mt6391_priv *codec_data = snd_soc_component_get_drvdata(component);
-
-	ucontrol->value.integer.value[0] =
-	    codec_data->device_power[MT6391_DEV_IN_DIGITAL_MIC] ? 1 : 0;
-	return 0;
-}
-
-static int mt6391_dmic_set(struct snd_kcontrol *kcontrol,
-			struct snd_ctl_elem_value *ucontrol)
-{
-	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
-	struct mt6391_priv *codec_data = snd_soc_component_get_drvdata(component);
-
-	pr_debug("%s\n", __func__);
-	if (ucontrol->value.integer.value[0] &&
-	    !codec_data->device_power[MT6391_DEV_IN_DIGITAL_MIC]) {
-		mt6391_ana_clk_on(codec_data);
-		mt6391_turn_on_dmic(codec_data);
-		codec_data->device_power[MT6391_DEV_IN_DIGITAL_MIC] = true;
-	} else if (!ucontrol->value.integer.value[0] &&
-		   codec_data->device_power[MT6391_DEV_IN_DIGITAL_MIC]) {
-		codec_data->device_power[MT6391_DEV_IN_DIGITAL_MIC] = false;
-		mt6391_turn_off_dmic(codec_data);
-		mt6391_ana_clk_off(codec_data);
-	}
-	return 0;
-}
-
-static int mt6391_adc1_get(struct snd_kcontrol *kcontrol,
-			struct snd_ctl_elem_value *ucontrol)
-{
-	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
-	struct mt6391_priv *codec_data = snd_soc_component_get_drvdata(component);
-
-	ucontrol->value.integer.value[0] =
-	    codec_data->device_power[MT6391_DEV_IN_ADC1] ? 1 : 0;
-	return 0;
-}
-
-static int mt6391_adc1_set(struct snd_kcontrol *kcontrol,
-			struct snd_ctl_elem_value *ucontrol)
-{
-	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
-	struct mt6391_priv *codec_data = snd_soc_component_get_drvdata(component);
-
-	pr_debug("%s\n", __func__);
-	if (ucontrol->value.integer.value[0]
-	    && !codec_data->device_power[MT6391_DEV_IN_ADC1]) {
-		mt6391_ana_clk_on(codec_data);
-		mt6391_turn_on_adc(codec_data, MT6391_DEV_IN_ADC1);
-		codec_data->device_power[MT6391_DEV_IN_ADC1] = true;
-	} else if (!ucontrol->value.integer.value[0] &&
-		   codec_data->device_power[MT6391_DEV_IN_ADC1]) {
-		codec_data->device_power[MT6391_DEV_IN_ADC1] = false;
-		mt6391_turn_off_adc(codec_data, MT6391_DEV_IN_ADC1);
-		mt6391_ana_clk_off(codec_data);
-	}
-	return 0;
-}
-
-static int mt6391_adc2_get(struct snd_kcontrol *kcontrol,
-			struct snd_ctl_elem_value *ucontrol)
-{
-	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
-	struct mt6391_priv *codec_data = snd_soc_component_get_drvdata(component);
-
-	ucontrol->value.integer.value[0] =
-	    codec_data->device_power[MT6391_DEV_IN_ADC2] ? 1 : 0;
-	return 0;
-}
-
-static int mt6391_adc2_set(struct snd_kcontrol *kcontrol,
-			struct snd_ctl_elem_value *ucontrol)
-{
-	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
-	struct mt6391_priv *codec_data = snd_soc_component_get_drvdata(component);
-
-	pr_debug("%s\n", __func__);
-	if (ucontrol->value.integer.value[0]
-	    && !codec_data->device_power[MT6391_DEV_IN_ADC2]) {
-		mt6391_ana_clk_on(codec_data);
-		mt6391_turn_on_adc(codec_data, MT6391_DEV_IN_ADC2);
-		codec_data->device_power[MT6391_DEV_IN_ADC2] = true;
-	} else if (!ucontrol->value.integer.value[0] &&
-		   codec_data->device_power[MT6391_DEV_IN_ADC2]) {
-		codec_data->device_power[MT6391_DEV_IN_ADC2] = false;
-		mt6391_turn_off_adc(codec_data, MT6391_DEV_IN_ADC2);
-		mt6391_ana_clk_off(codec_data);
-	}
-	return 0;
-}
-
-static int mt6391_preamp1_mux_get(struct snd_kcontrol *kcontrol,
-			struct snd_ctl_elem_value *ucontrol)
-{
-	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
-	struct mt6391_priv *codec_data = snd_soc_component_get_drvdata(component);
-
-	ucontrol->value.integer.value[0] = codec_data->device_mux[MT6391_MUX_IN_PREAMP_1];
-	return 0;
-}
-
-static int mt6391_preamp1_mux_set(struct snd_kcontrol *kcontrol,
-			struct snd_ctl_elem_value *ucontrol)
-{
-	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
-	struct soc_enum *e = (struct soc_enum *)kcontrol->private_value;
-	struct mt6391_priv *codec_data = snd_soc_component_get_drvdata(component);
-
-	pr_debug("%s\n", __func__);
-
-	if (ucontrol->value.enumerated.item[0] > e->items) {
-		pr_err("%s out of bound\n", __func__);
-		return -EINVAL;
-	}
-
-	if (ucontrol->value.integer.value[0] == 1)
-		mt6391_set_mux(codec_data, MT6391_DEV_IN_PREAMP_L, MT6391_MUX_IN_MIC1);
-	else if (ucontrol->value.integer.value[0] == 2)
-		mt6391_set_mux(codec_data, MT6391_DEV_IN_PREAMP_L, MT6391_MUX_IN_MIC2);
-	else if (ucontrol->value.integer.value[0] == 3)
-		mt6391_set_mux(codec_data, MT6391_DEV_IN_PREAMP_L, MT6391_MUX_IN_MIC3);
-	else if (ucontrol->value.integer.value[0] != 0)
-		pr_warn("%s unexpected value %ld", __func__, ucontrol->value.integer.value[0]);
-
-	pr_debug("%s done\n", __func__);
-	codec_data->device_mux[MT6391_MUX_IN_PREAMP_1] = ucontrol->value.integer.value[0];
-	return 0;
-}
-
-static int mt6391_preamp2_mux_get(struct snd_kcontrol *kcontrol,
-			struct snd_ctl_elem_value *ucontrol)
-{
-	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
-	struct mt6391_priv *codec_data = snd_soc_component_get_drvdata(component);
-
-	ucontrol->value.integer.value[0] = codec_data->device_mux[MT6391_MUX_IN_PREAMP_2];
-	return 0;
-}
-
-static int mt6391_preamp2_mux_set(struct snd_kcontrol *kcontrol,
-			struct snd_ctl_elem_value *ucontrol)
-{
-	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
-	struct soc_enum *e = (struct soc_enum *)kcontrol->private_value;
-	struct mt6391_priv *codec_data = snd_soc_component_get_drvdata(component);
-
-	pr_debug("%s\n", __func__);
-
-	if (ucontrol->value.enumerated.item[0] > e->items) {
-		pr_err("%s out of bound\n", __func__);
-		return -EINVAL;
-	}
-
-	if (ucontrol->value.integer.value[0] == 1)
-		mt6391_set_mux(codec_data, MT6391_DEV_IN_PREAMP_R, MT6391_MUX_IN_MIC1);
-	else if (ucontrol->value.integer.value[0] == 2)
-		mt6391_set_mux(codec_data, MT6391_DEV_IN_PREAMP_R, MT6391_MUX_IN_MIC2);
-	else if (ucontrol->value.integer.value[0] == 3)
-		mt6391_set_mux(codec_data, MT6391_DEV_IN_PREAMP_R, MT6391_MUX_IN_MIC3);
-	else if (ucontrol->value.integer.value[0] != 0)
-		pr_warn("%s unexpected value %ld", __func__, ucontrol->value.integer.value[0]);
-
-	pr_debug("%s done\n", __func__);
-	codec_data->device_mux[MT6391_MUX_IN_PREAMP_2] = ucontrol->value.integer.value[0];
-	return 0;
-}
-
-static int mt6391_preamp1_gain_get(struct snd_kcontrol *kcontrol,
-			struct snd_ctl_elem_value *ucontrol)
-{
-	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
-	struct mt6391_priv *codec_data = snd_soc_component_get_drvdata(component);
-
-	ucontrol->value.integer.value[0] =
-	    codec_data->device_volume[MT6391_VOL_MICAMPL];
-	return 0;
-}
-
-static int mt6391_preamp1_gain_set(struct snd_kcontrol *kcontrol,
-			struct snd_ctl_elem_value *ucontrol)
-{
-	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
-	struct soc_enum *e = (struct soc_enum *)kcontrol->private_value;
-	struct mt6391_priv *codec_data = snd_soc_component_get_drvdata(component);
-	int index = 0;
-
-	pr_debug("%s\n", __func__);
-	if (ucontrol->value.enumerated.item[0] > e->items) {
-		pr_err("%s out of bound\n", __func__);
-		return -EINVAL;
-	}
-	index = ucontrol->value.integer.value[0];
-	mt6391_set_reg(codec_data, MT6397_AUDPREAMPGAIN_CON0, index << 0, 0x00000007);
-	codec_data->device_volume[MT6391_VOL_MICAMPL] = index;
-	return 0;
-}
-
-static int mt6391_preamp2_gain_get(struct snd_kcontrol *kcontrol,
-			struct snd_ctl_elem_value *ucontrol)
-{
-	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
-	struct mt6391_priv *codec_data = snd_soc_component_get_drvdata(component);
-
-	ucontrol->value.integer.value[0] =
-	    codec_data->device_volume[MT6391_VOL_MICAMPR];
-	return 0;
-}
-
-static int mt6391_preamp2_gain_set(struct snd_kcontrol *kcontrol,
-			struct snd_ctl_elem_value *ucontrol)
-{
-	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
-	struct soc_enum *e = (struct soc_enum *)kcontrol->private_value;
-	struct mt6391_priv *codec_data = snd_soc_component_get_drvdata(component);
-	int index = 0;
-
-	pr_debug("%s\n", __func__);
-
-	if (ucontrol->value.enumerated.item[0] > e->items) {
-		pr_err("%s out of bound\n", __func__);
-		return -EINVAL;
-	}
-	index = ucontrol->value.integer.value[0];
-	mt6391_set_reg(codec_data, MT6397_AUDPREAMPGAIN_CON0, index << 4, 0x00000070);
-	codec_data->device_volume[MT6391_VOL_MICAMPR] = index;
-	return 0;
-}
-
-static int mt6391_loopback_get(struct snd_kcontrol *kcontrol,
-			struct snd_ctl_elem_value *ucontrol)
-{
-	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
-	struct mt6391_priv *codec_data = snd_soc_component_get_drvdata(component);
-
-	ucontrol->value.integer.value[0] = codec_data->codec_loopback_type;
-	return 0;
-}
-
-static int mt6391_loopback_set(struct snd_kcontrol *kcontrol,
-			struct snd_ctl_elem_value *ucontrol)
-{
-	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
-	struct mt6391_priv *codec_data = snd_soc_component_get_drvdata(component);
-	uint32_t previous_type = codec_data->codec_loopback_type;
-	long set_value = ucontrol->value.integer.value[0];
-
-	pr_debug("%s %ld\n", __func__, set_value);
-
-	if (previous_type == set_value) {
-		pr_debug("%s dummy operation for %u", __func__, codec_data->codec_loopback_type);
+	if (l == priv->spk_gain[0] && r == priv->spk_gain[1])
 		return 0;
-	}
 
-	if (previous_type != CODEC_LOOPBACK_NONE) {
-		/* disable uplink */
-		if (previous_type == CODEC_LOOPBACK_AMIC_TO_SPK ||
-		    previous_type == CODEC_LOOPBACK_AMIC_TO_HP ||
-		    previous_type == CODEC_LOOPBACK_HEADSET_MIC_TO_SPK ||
-		    previous_type == CODEC_LOOPBACK_HEADSET_MIC_TO_HP) {
-			if (codec_data->device_power[MT6391_DEV_IN_ADC1]) {
-				codec_data->device_power[MT6391_DEV_IN_ADC1] = false;
-				mt6391_turn_off_adc(codec_data, MT6391_DEV_IN_ADC1);
-			}
+	priv->spk_gain[0] = l;
+	priv->spk_gain[1] = r;
+	regmap_update_bits(priv->regmap, MT6397_SPK_CON9, MT6397_RG_SPKPGA_GAINL,
+			   FIELD_PREP(MT6397_RG_SPKPGA_GAINL, l));
+	regmap_update_bits(priv->regmap, MT6397_SPK_CON5, MT6397_RG_SPKPGA_GAINR,
+			   FIELD_PREP(MT6397_RG_SPKPGA_GAINR, r));
 
-			if (codec_data->device_power[MT6391_DEV_IN_ADC2]) {
-				codec_data->device_power[MT6391_DEV_IN_ADC2] = false;
-				mt6391_turn_off_adc(codec_data, MT6391_DEV_IN_ADC2);
-			}
-			codec_data->device_mux[MT6391_MUX_IN_PREAMP_1] = 0;
-			codec_data->device_mux[MT6391_MUX_IN_PREAMP_2] = 0;
-		} else if (previous_type == CODEC_LOOPBACK_DMIC_TO_SPK ||
-			   previous_type == CODEC_LOOPBACK_DMIC_TO_HP) {
-			if (codec_data->device_power[MT6391_DEV_IN_DIGITAL_MIC]) {
-				codec_data->device_power[MT6391_DEV_IN_DIGITAL_MIC] = false;
-				mt6391_turn_off_dmic(codec_data);
-			}
-		}
-		/* disable downlink */
-		if (previous_type == CODEC_LOOPBACK_AMIC_TO_SPK ||
-		    previous_type == CODEC_LOOPBACK_HEADSET_MIC_TO_SPK ||
-		    previous_type == CODEC_LOOPBACK_DMIC_TO_SPK) {
-			if (codec_data->device_power[MT6391_DEV_OUT_SPEAKERL]) {
-				codec_data->device_power[MT6391_DEV_OUT_SPEAKERL] = false;
-				mt6391_turn_off_speaker_amp(codec_data);
-			}
-			mt6391_ana_clk_off(codec_data);
-		} else if (previous_type == CODEC_LOOPBACK_AMIC_TO_HP ||
-			   previous_type == CODEC_LOOPBACK_DMIC_TO_HP ||
-			   previous_type == CODEC_LOOPBACK_HEADSET_MIC_TO_HP) {
-			if (codec_data->device_power[MT6391_DEV_OUT_HEADSETL]) {
-				codec_data->device_power[MT6391_DEV_OUT_HEADSETL] = false;
-				mt6391_turn_off_headphone_amp(codec_data);
-			}
-			mt6391_ana_clk_off(codec_data);
-		}
-	}
-
-	/* enable uplink */
-	if (set_value == CODEC_LOOPBACK_AMIC_TO_SPK ||
-	    set_value == CODEC_LOOPBACK_AMIC_TO_HP ||
-	    set_value == CODEC_LOOPBACK_HEADSET_MIC_TO_SPK ||
-	    set_value == CODEC_LOOPBACK_HEADSET_MIC_TO_HP ||
-	    set_value == CODEC_LOOPBACK_AMIC_TO_EXTDAC ||
-	    set_value == CODEC_LOOPBACK_HEADSET_MIC_TO_EXTDAC) {
-		mt6391_ana_clk_on(codec_data);
-		codec_data->sample_rate[MT6391_ADDA_ADC] = 48000;
-
-		if (!codec_data->device_power[MT6391_DEV_IN_ADC1]) {
-			mt6391_turn_on_adc(codec_data, MT6391_DEV_IN_ADC1);
-			codec_data->device_power[MT6391_DEV_IN_ADC1] = true;
-		}
-
-		if (!codec_data->device_power[MT6391_DEV_IN_ADC2]) {
-			mt6391_turn_on_adc(codec_data, MT6391_DEV_IN_ADC2);
-			codec_data->device_power[MT6391_DEV_IN_ADC2] = true;
-		}
-		/* mux selection */
-		if (set_value == CODEC_LOOPBACK_HEADSET_MIC_TO_SPK ||
-		    set_value == CODEC_LOOPBACK_HEADSET_MIC_TO_HP ||
-		    set_value == CODEC_LOOPBACK_HEADSET_MIC_TO_EXTDAC) {
-			mt6391_set_mux(codec_data, MT6391_DEV_IN_PREAMP_L, MT6391_MUX_IN_MIC2);
-			mt6391_set_mux(codec_data, MT6391_DEV_IN_PREAMP_R, MT6391_MUX_IN_MIC2);
-			codec_data->device_mux[MT6391_MUX_IN_PREAMP_1] = 2;
-			codec_data->device_mux[MT6391_MUX_IN_PREAMP_2] = 2;
-		} else {
-			mt6391_set_mux(codec_data, MT6391_DEV_IN_PREAMP_L, MT6391_MUX_IN_MIC1);
-			mt6391_set_mux(codec_data, MT6391_DEV_IN_PREAMP_R, MT6391_MUX_IN_MIC3);
-			codec_data->device_mux[MT6391_MUX_IN_PREAMP_1] = 1;
-			codec_data->device_mux[MT6391_MUX_IN_PREAMP_2] = 3;
-		}
-	} else if (set_value == CODEC_LOOPBACK_DMIC_TO_SPK ||
-		   set_value == CODEC_LOOPBACK_DMIC_TO_HP) {
-		mt6391_ana_clk_on(codec_data);
-		codec_data->sample_rate[MT6391_ADDA_ADC] = 32000;
-
-		if (!codec_data->device_power[MT6391_DEV_IN_DIGITAL_MIC]) {
-			mt6391_turn_on_dmic(codec_data);
-			codec_data->device_power[MT6391_DEV_IN_DIGITAL_MIC] = true;
-		}
-	}
-
-	/* enable downlink */
-	if (set_value == CODEC_LOOPBACK_AMIC_TO_SPK ||
-	    set_value == CODEC_LOOPBACK_HEADSET_MIC_TO_SPK ||
-	    set_value == CODEC_LOOPBACK_DMIC_TO_SPK) {
-		codec_data->sample_rate[MT6391_ADDA_DAC] =
-				(set_value == CODEC_LOOPBACK_DMIC_TO_SPK) ? 32000 : 48000;
-		if (!codec_data->device_power[MT6391_DEV_OUT_SPEAKERL]) {
-			mt6391_turn_on_speaker_amp(codec_data);
-			codec_data->device_power[MT6391_DEV_OUT_SPEAKERL] = true;
-		}
-	} else if (set_value == CODEC_LOOPBACK_AMIC_TO_HP ||
-		   set_value == CODEC_LOOPBACK_DMIC_TO_HP ||
-		   set_value == CODEC_LOOPBACK_HEADSET_MIC_TO_HP) {
-		codec_data->sample_rate[MT6391_ADDA_DAC] =
-				(set_value == CODEC_LOOPBACK_DMIC_TO_HP) ? 32000 : 48000;
-		if (!codec_data->device_power[MT6391_DEV_OUT_HEADSETL]) {
-			mt6391_turn_on_headphone_amp(codec_data);
-			codec_data->device_power[MT6391_DEV_OUT_HEADSETL] = true;
-		}
-	}
-
-	codec_data->codec_loopback_type = set_value;
-	return 0;
+	return 1;
 }
 
-static int mt6391_dac_sgen_get(struct snd_kcontrol *kcontrol,
-			struct snd_ctl_elem_value *ucontrol)
+static long mt6391_hp_gain_to_ctl(unsigned int reg)
 {
-	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
-	struct mt6391_priv *codec_data = snd_soc_component_get_drvdata(component);
-
-	ucontrol->value.integer.value[0] = codec_data->dac_sgen_switch;
-	return 0;
-}
-
-static int mt6391_dac_sgen_set(struct snd_kcontrol *kcontrol,
-			struct snd_ctl_elem_value *ucontrol)
-{
-	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
-	struct mt6391_priv *codec_data = snd_soc_component_get_drvdata(component);
-
-	if (codec_data->dac_sgen_switch == ucontrol->value.integer.value[0]) {
-		pr_debug("%s dummy operation for %u", __func__, codec_data->dac_sgen_switch);
+	if (reg > MT6391_HP_GAIN_LOW)
 		return 0;
+
+	return MT6391_HP_GAIN_MAX - reg;
+}
+
+static int mt6391_hp_volume_get(struct snd_kcontrol *kcontrol,
+				struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_soc_component *cmpnt = snd_kcontrol_chip(kcontrol);
+	struct mt6391_priv *priv = snd_soc_component_get_drvdata(cmpnt);
+
+	ucontrol->value.integer.value[0] = mt6391_hp_gain_to_ctl(priv->hp_gain[0]);
+	ucontrol->value.integer.value[1] = mt6391_hp_gain_to_ctl(priv->hp_gain[1]);
+
+	return 0;
+}
+
+static int mt6391_hp_volume_put(struct snd_kcontrol *kcontrol,
+				struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_soc_component *cmpnt = snd_kcontrol_chip(kcontrol);
+	struct mt6391_priv *priv = snd_soc_component_get_drvdata(cmpnt);
+	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(cmpnt);
+	unsigned int gain[2];
+	int i, ret = 0;
+
+	for (i = 0; i < 2; i++) {
+		long val = ucontrol->value.integer.value[i];
+
+		if (val < 0 || val > MT6391_HP_GAIN_MAX)
+			return -EINVAL;
+		gain[i] = val ? MT6391_HP_GAIN_MAX - val : MT6391_HP_GAIN_MUTE;
 	}
 
-	if (ucontrol->value.integer.value[0]) {
-		mt6391_set_reg(codec_data, MT6397_ANA_AFE_TOP_CON0, 0x1, 0x1);
-		/* mt6391_set_reg(codec_data, MT6397_AFE_SGEN_CFG0, 0x80, 0x80); */
-		mt6391_set_reg(codec_data, MT6397_AFE_SGEN_CFG0, 0x4480, 0xff80);
-		mt6391_set_reg(codec_data, MT6397_AFE_SGEN_CFG1, 0x0101, 0xffff);
-	} else {
-		mt6391_set_reg(codec_data, MT6397_ANA_AFE_TOP_CON0, 0x0, 0x1);
-		mt6391_set_reg(codec_data, MT6397_AFE_SGEN_CFG0, 0x0, 0x80);
+	/* Serialise with the amplifier's events, which ramp the gain too */
+	snd_soc_dapm_mutex_lock(dapm);
+	if (gain[0] != priv->hp_gain[0] || gain[1] != priv->hp_gain[1]) {
+		if (priv->hp_on)
+			mt6391_hp_ramp_gain(priv, priv->hp_gain, gain);
+		priv->hp_gain[0] = gain[0];
+		priv->hp_gain[1] = gain[1];
+		ret = 1;
 	}
-
-	codec_data->dac_sgen_switch = ucontrol->value.integer.value[0];
-	return 0;
-}
-
-static int mt6391_adc_sgen_get(struct snd_kcontrol *kcontrol,
-			struct snd_ctl_elem_value *ucontrol)
-{
-	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
-	struct mt6391_priv *codec_data = snd_soc_component_get_drvdata(component);
-
-	ucontrol->value.integer.value[0] = codec_data->adc_sgen_switch;
-	return 0;
-}
-
-static int mt6391_adc_sgen_set(struct snd_kcontrol *kcontrol,
-			struct snd_ctl_elem_value *ucontrol)
-{
-	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
-	struct mt6391_priv *codec_data = snd_soc_component_get_drvdata(component);
-
-	if (codec_data->adc_sgen_switch == ucontrol->value.integer.value[0]) {
-		pr_debug("%s dummy operation for %u", __func__, codec_data->adc_sgen_switch);
-		return 0;
-	}
-
-	if (ucontrol->value.integer.value[0]) {
-		mt6391_set_reg(codec_data, MT6397_ANA_AFE_TOP_CON0, 0x2, 0x2);
-		mt6391_set_reg(codec_data, MT6397_AFE_SGEN_CFG0, 0x80, 0x80);
-		mt6391_set_reg(codec_data, MT6397_AFE_SGEN_CFG1, 0x0101, 0xffff);
-	} else {
-		mt6391_set_reg(codec_data, MT6397_ANA_AFE_TOP_CON0, 0x0, 0x2);
-		mt6391_set_reg(codec_data, MT6397_AFE_SGEN_CFG0, 0x0, 0x80);
-	}
-
-	codec_data->adc_sgen_switch = ucontrol->value.integer.value[0];
-	return 0;
-}
-
-static int mt6391_dac_freq_get(struct snd_kcontrol *kcontrol,
-			struct snd_ctl_elem_value *ucontrol)
-{
-	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
-	struct mt6391_priv *codec_data = snd_soc_component_get_drvdata(component);
-
-	if (codec_data->sample_rate[MT6391_ADDA_DAC] == 48000)
-		ucontrol->value.integer.value[0] = DAC_FREQ_48000;
-	else if (codec_data->sample_rate[MT6391_ADDA_DAC] == 44100)
-		ucontrol->value.integer.value[0] = DAC_FREQ_44100;
-	else if (codec_data->sample_rate[MT6391_ADDA_DAC] == 32000)
-		ucontrol->value.integer.value[0] = DAC_FREQ_32000;
-	else if (codec_data->sample_rate[MT6391_ADDA_DAC] == 24000)
-		ucontrol->value.integer.value[0] = DAC_FREQ_24000;
-	else if (codec_data->sample_rate[MT6391_ADDA_DAC] == 22050)
-		ucontrol->value.integer.value[0] = DAC_FREQ_22050;
-	else if (codec_data->sample_rate[MT6391_ADDA_DAC] == 16000)
-		ucontrol->value.integer.value[0] = DAC_FREQ_16000;
-	else if (codec_data->sample_rate[MT6391_ADDA_DAC] == 12000)
-		ucontrol->value.integer.value[0] = DAC_FREQ_12000;
-	else if (codec_data->sample_rate[MT6391_ADDA_DAC] == 11025)
-		ucontrol->value.integer.value[0] = DAC_FREQ_11025;
-	else if (codec_data->sample_rate[MT6391_ADDA_DAC] == 8000)
-		ucontrol->value.integer.value[0] = DAC_FREQ_8000;
-	else
-		ucontrol->value.integer.value[0] = DAC_FREQ_48000;
-	return 0;
-}
-
-static int mt6391_dac_freq_set(struct snd_kcontrol *kcontrol,
-			struct snd_ctl_elem_value *ucontrol)
-{
-	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
-	struct mt6391_priv *codec_data = snd_soc_component_get_drvdata(component);
-	uint32_t rate = 0;
-
-	if (ucontrol->value.integer.value[0] == DAC_FREQ_48000)
-		rate = 48000;
-	else if (ucontrol->value.integer.value[0] == DAC_FREQ_44100)
-		rate = 44100;
-	else if (ucontrol->value.integer.value[0] == DAC_FREQ_32000)
-		rate = 32000;
-	else if (ucontrol->value.integer.value[0] == DAC_FREQ_24000)
-		rate = 24000;
-	else if (ucontrol->value.integer.value[0] == DAC_FREQ_22050)
-		rate = 22050;
-	else if (ucontrol->value.integer.value[0] == DAC_FREQ_16000)
-		rate = 16000;
-	else if (ucontrol->value.integer.value[0] == DAC_FREQ_12000)
-		rate = 12000;
-	else if (ucontrol->value.integer.value[0] == DAC_FREQ_11025)
-		rate = 11025;
-	else if (ucontrol->value.integer.value[0] == DAC_FREQ_8000)
-		rate = 8000;
-
-	if (rate)
-		mt6391_set_dac_rate(codec_data, rate);
-
-	return 0;
-}
-
-static int mt6391_adc_freq_get(struct snd_kcontrol *kcontrol,
-			struct snd_ctl_elem_value *ucontrol)
-{
-	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
-	struct mt6391_priv *codec_data = snd_soc_component_get_drvdata(component);
-
-	if (codec_data->sample_rate[MT6391_ADDA_ADC] == 48000)
-		ucontrol->value.integer.value[0] = ADC_FREQ_48000;
-	else if (codec_data->sample_rate[MT6391_ADDA_ADC] == 32000)
-		ucontrol->value.integer.value[0] = ADC_FREQ_32000;
-	else if (codec_data->sample_rate[MT6391_ADDA_ADC] == 16000)
-		ucontrol->value.integer.value[0] = ADC_FREQ_16000;
-	else if (codec_data->sample_rate[MT6391_ADDA_ADC] == 8000)
-		ucontrol->value.integer.value[0] = ADC_FREQ_8000;
-	else
-		ucontrol->value.integer.value[0] = ADC_FREQ_48000;
-	return 0;
-}
-
-static int mt6391_adc_freq_set(struct snd_kcontrol *kcontrol,
-			struct snd_ctl_elem_value *ucontrol)
-{
-	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
-	struct mt6391_priv *codec_data = snd_soc_component_get_drvdata(component);
-
-	if (ucontrol->value.integer.value[0] == ADC_FREQ_48000)
-		codec_data->sample_rate[MT6391_ADDA_ADC] = 48000;
-	else if (ucontrol->value.integer.value[0] == ADC_FREQ_32000)
-		codec_data->sample_rate[MT6391_ADDA_ADC] = 32000;
-	else if (ucontrol->value.integer.value[0] == ADC_FREQ_16000)
-		codec_data->sample_rate[MT6391_ADDA_ADC] = 16000;
-	else if (ucontrol->value.integer.value[0] == ADC_FREQ_8000)
-		codec_data->sample_rate[MT6391_ADDA_ADC] = 8000;
-
-	return 0;
-}
-
-
-/* snd kcontrol function definition */
-static const char *const mt6391_amp_func[] = { "Off", "On" };
-
-static const char *const mt6391_headset_gain[] = {
-	"8Db", "7Db", "6Db", "5Db", "4Db", "3Db", "2Db", "1Db", "0Db", "-1Db",
-	"-2Db", "-3Db",	"-4Db", "RES1", "RES2", "-40Db"
-};
-
-static const char *const mt6391_handset_gain[] = {
-	"8Db", "7Db", "6Db", "5Db", "4Db", "3Db", "2Db", "1Db", "0Db", "-1Db",
-	"-2Db", "-3Db",	"-4Db", "RES1", "RES2", "-40Db"
-};
-
-static const char *const mt6391_speaker_gain[] = {
-	"Mute", "0Db", "4Db", "5Db", "6Db", "7Db", "8Db", "9Db", "10Db",
-	"11Db", "12Db", "13Db", "14Db", "15Db", "16Db", "17Db"
-};
-
-static const char *const mt6391_speaker_select_func[] = { "Stereo", "MonoLeft", "MonoRight" };
-
-static const char *const mt6391_speaker_oc_func[] = { "NoOverCurrent", "OverCurrent" };
-
-static const char *const mt6391_dac_newif_sck_func[] = { "NotInverse", "Inverse" };
-
-static const char *const mt6391_dmic_func[] = { "Off", "On" };
-
-static const char *const mt6391_adc_func[] = { "Off", "On" };
-
-static const char *const mt6391_preamp_mux_func[] = { "OPEN", "AIN1", "AIN2", "AIN3" };
-
-static const char *const mt6391_preamp_gain[] = { "2Db", "8Db", "14Db", "20Db", "26Db", "32Db" };
-
-static const char *const mt6391_codec_loopback_func[] = {
-	ENUM_TO_STR(CODEC_LOOPBACK_NONE),
-	ENUM_TO_STR(CODEC_LOOPBACK_AMIC_TO_SPK),
-	ENUM_TO_STR(CODEC_LOOPBACK_AMIC_TO_HP),
-	ENUM_TO_STR(CODEC_LOOPBACK_DMIC_TO_SPK),
-	ENUM_TO_STR(CODEC_LOOPBACK_DMIC_TO_HP),
-	ENUM_TO_STR(CODEC_LOOPBACK_HEADSET_MIC_TO_SPK),
-	ENUM_TO_STR(CODEC_LOOPBACK_HEADSET_MIC_TO_HP),
-	ENUM_TO_STR(CODEC_LOOPBACK_AMIC_TO_EXTDAC),
-	ENUM_TO_STR(CODEC_LOOPBACK_HEADSET_MIC_TO_EXTDAC),
-};
-
-static const char *const mt6391_sgen_func[] = { "Off", "On" };
-
-static const char *const mt6391_dac_freq_func[] = {
-	ENUM_TO_STR(DAC_FREQ_8000),
-	ENUM_TO_STR(DAC_FREQ_11025),
-	ENUM_TO_STR(DAC_FREQ_12000),
-	ENUM_TO_STR(DAC_FREQ_16000),
-	ENUM_TO_STR(DAC_FREQ_22050),
-	ENUM_TO_STR(DAC_FREQ_24000),
-	ENUM_TO_STR(DAC_FREQ_32000),
-	ENUM_TO_STR(DAC_FREQ_44100),
-	ENUM_TO_STR(DAC_FREQ_48000),
-};
-
-static const char *const mt6391_adc_freq_func[] = {
-	ENUM_TO_STR(ADC_FREQ_8000),
-	ENUM_TO_STR(ADC_FREQ_16000),
-	ENUM_TO_STR(ADC_FREQ_32000),
-	ENUM_TO_STR(ADC_FREQ_48000),
-};
-
-/* soc_enum list */
-static const struct soc_enum mt6391_soc_enums[] = {
-	/* downlink */
-	[ENUM_AUDIO_AMP] = SOC_ENUM_SINGLE_EXT(ARRAY_SIZE(mt6391_amp_func),
-				mt6391_amp_func),
-	[ENUM_VOICE_AMP] = SOC_ENUM_SINGLE_EXT(ARRAY_SIZE(mt6391_amp_func),
-				mt6391_amp_func),
-	[ENUM_SPK_AMP] = SOC_ENUM_SINGLE_EXT(ARRAY_SIZE(mt6391_amp_func),
-				mt6391_amp_func),
-	[ENUM_HS_SPK_AMP] = SOC_ENUM_SINGLE_EXT(ARRAY_SIZE(mt6391_amp_func),
-				mt6391_amp_func),
-	[ENUM_HEADSETL_GAIN] = SOC_ENUM_SINGLE_EXT(ARRAY_SIZE(mt6391_headset_gain),
-				mt6391_headset_gain),
-	[ENUM_HEADSETR_GAIN] = SOC_ENUM_SINGLE_EXT(ARRAY_SIZE(mt6391_headset_gain),
-				mt6391_headset_gain),
-	[ENUM_HANDSET_GAIN] = SOC_ENUM_SINGLE_EXT(ARRAY_SIZE(mt6391_handset_gain),
-				mt6391_handset_gain),
-	[ENUM_SPKL_GAIN] = SOC_ENUM_SINGLE_EXT(ARRAY_SIZE(mt6391_speaker_gain),
-				mt6391_speaker_gain),
-	[ENUM_SPKR_GAIN] = SOC_ENUM_SINGLE_EXT(ARRAY_SIZE(mt6391_speaker_gain),
-				mt6391_speaker_gain),
-	[ENUM_SPK_SEL] = SOC_ENUM_SINGLE_EXT(ARRAY_SIZE(mt6391_speaker_select_func),
-				mt6391_speaker_select_func),
-	[ENUM_SPK_OC_FLAG] = SOC_ENUM_SINGLE_EXT(ARRAY_SIZE(mt6391_speaker_oc_func),
-				mt6391_speaker_oc_func),
-	[ENUM_DAC_SCK] = SOC_ENUM_SINGLE_EXT(ARRAY_SIZE(mt6391_dac_newif_sck_func),
-				mt6391_dac_newif_sck_func),
-	/* uplink */
-	[ENUM_DMIC_SWITCH] = SOC_ENUM_SINGLE_EXT(ARRAY_SIZE(mt6391_dmic_func),
-				mt6391_dmic_func),
-	[ENUM_ADC1_SWITCH] = SOC_ENUM_SINGLE_EXT(ARRAY_SIZE(mt6391_adc_func),
-				mt6391_adc_func),
-	[ENUM_ADC2_SWITCH] = SOC_ENUM_SINGLE_EXT(ARRAY_SIZE(mt6391_adc_func),
-				mt6391_adc_func),
-	[ENUM_PREAMP1_MUX] = SOC_ENUM_SINGLE_EXT(ARRAY_SIZE(mt6391_preamp_mux_func),
-				mt6391_preamp_mux_func),
-	[ENUM_PREAMP2_MUX] = SOC_ENUM_SINGLE_EXT(ARRAY_SIZE(mt6391_preamp_mux_func),
-				mt6391_preamp_mux_func),
-	[ENUM_PREAMP1_GAIN] = SOC_ENUM_SINGLE_EXT(ARRAY_SIZE(mt6391_preamp_gain),
-				mt6391_preamp_gain),
-	[ENUM_PREAMP2_GAIN] = SOC_ENUM_SINGLE_EXT(ARRAY_SIZE(mt6391_preamp_gain),
-				mt6391_preamp_gain),
-	/* factory */
-	[ENUM_LOOPBACK_SEL] = SOC_ENUM_SINGLE_EXT(ARRAY_SIZE(mt6391_codec_loopback_func),
-				mt6391_codec_loopback_func),
-	[ENUM_DAC_SGEN] = SOC_ENUM_SINGLE_EXT(ARRAY_SIZE(mt6391_sgen_func),
-				mt6391_sgen_func),
-	[ENUM_ADC_SGEN] = SOC_ENUM_SINGLE_EXT(ARRAY_SIZE(mt6391_sgen_func),
-				mt6391_sgen_func),
-	[ENUM_DAC_FREQ] = SOC_ENUM_SINGLE_EXT(ARRAY_SIZE(mt6391_dac_freq_func),
-				mt6391_dac_freq_func),
-	[ENUM_ADC_FREQ] = SOC_ENUM_SINGLE_EXT(ARRAY_SIZE(mt6391_adc_freq_func),
-				mt6391_adc_freq_func),
-};
-
-static const struct snd_kcontrol_new mt6391_dl_codec_controls[] = {
-	SOC_ENUM_EXT("Audio_Amp_Switch", mt6391_soc_enums[ENUM_AUDIO_AMP],
-		mt6391_audio_amp_get, mt6391_audio_amp_set),
-	SOC_ENUM_EXT("Voice_Amp_Switch", mt6391_soc_enums[ENUM_VOICE_AMP],
-		mt6391_voice_amp_get, mt6391_voice_amp_set),
-	SOC_ENUM_EXT("Speaker_Amp_Switch", mt6391_soc_enums[ENUM_SPK_AMP],
-		mt6391_speaker_amp_get, mt6391_speaker_amp_set),
-	SOC_ENUM_EXT("Headset_Speaker_Amp_Switch", mt6391_soc_enums[ENUM_HS_SPK_AMP],
-		mt6391_headset_speaker_amp_get, mt6391_headset_speaker_amp_set),
-	SOC_ENUM_EXT("Headset_PGAL_GAIN", mt6391_soc_enums[ENUM_HEADSETL_GAIN],
-		mt6391_headset_pgal_get, mt6391_headset_pgal_set),
-	SOC_ENUM_EXT("Headset_PGAR_GAIN", mt6391_soc_enums[ENUM_HEADSETR_GAIN],
-		mt6391_headset_pgar_get, mt6391_headset_pgar_set),
-	SOC_ENUM_EXT("Hanset_PGA_GAIN", mt6391_soc_enums[ENUM_HANDSET_GAIN],
-		mt6391_handset_pga_get, mt6391_handset_pga_set),
-	SOC_ENUM_EXT("Speaker_PGAL_GAIN", mt6391_soc_enums[ENUM_SPKL_GAIN],
-		mt6391_speaker_pgal_get, mt6391_speaker_pgal_set),
-	SOC_ENUM_EXT("Speaker_PGAR_GAIN", mt6391_soc_enums[ENUM_SPKR_GAIN],
-		mt6391_speaker_pgar_get, mt6391_speaker_pgar_set),
-	SOC_ENUM_EXT("Speaker_Channel_Select", mt6391_soc_enums[ENUM_SPK_SEL],
-		mt6391_speaker_channel_get, mt6391_speaker_channel_set),
-	SOC_ENUM_EXT("Speaker_OC_Flag", mt6391_soc_enums[ENUM_SPK_OC_FLAG],
-		mt6391_speaker_oc_flag_get, mt6391_speaker_oc_flag_set),
-	SOC_ENUM_EXT("DAC_Newif_Sck_Switch", mt6391_soc_enums[ENUM_DAC_SCK],
-		mt6391_dac_newif_sck_get, mt6391_dac_newif_sck_set),
-};
-
-static const struct snd_kcontrol_new mt6391_ul_codec_controls[] = {
-	SOC_ENUM_EXT("Audio_Digital_Mic_Switch", mt6391_soc_enums[ENUM_DMIC_SWITCH],
-		mt6391_dmic_get, mt6391_dmic_set),
-	SOC_ENUM_EXT("Audio_ADC_1_Switch", mt6391_soc_enums[ENUM_ADC1_SWITCH],
-		mt6391_adc1_get, mt6391_adc1_set),
-	SOC_ENUM_EXT("Audio_ADC_2_Switch", mt6391_soc_enums[ENUM_ADC2_SWITCH],
-		mt6391_adc2_get, mt6391_adc2_set),
-	SOC_ENUM_EXT("Audio_Preamp1_Switch", mt6391_soc_enums[ENUM_PREAMP1_MUX],
-		mt6391_preamp1_mux_get, mt6391_preamp1_mux_set),
-	SOC_ENUM_EXT("Audio_Preamp2_Switch", mt6391_soc_enums[ENUM_PREAMP2_MUX],
-		mt6391_preamp2_mux_get, mt6391_preamp2_mux_set),
-	SOC_ENUM_EXT("Audio_PGA1_Setting", mt6391_soc_enums[ENUM_PREAMP1_GAIN],
-		mt6391_preamp1_gain_get, mt6391_preamp1_gain_set),
-	SOC_ENUM_EXT("Audio_PGA2_Setting", mt6391_soc_enums[ENUM_PREAMP2_GAIN],
-		mt6391_preamp2_gain_get, mt6391_preamp2_gain_set),
-};
-
-static const struct snd_kcontrol_new mt6391_factory_controls[] = {
-	SOC_ENUM_EXT("Codec_Loopback_Select", mt6391_soc_enums[ENUM_LOOPBACK_SEL],
-		     mt6391_loopback_get, mt6391_loopback_set),
-	SOC_ENUM_EXT("DAC_SGen_Switch", mt6391_soc_enums[ENUM_DAC_SGEN],
-		     mt6391_dac_sgen_get, mt6391_dac_sgen_set),
-	SOC_ENUM_EXT("ADC_SGen_Switch", mt6391_soc_enums[ENUM_ADC_SGEN],
-		     mt6391_adc_sgen_get, mt6391_adc_sgen_set),
-	SOC_ENUM_EXT("DAC_Freq_Switch", mt6391_soc_enums[ENUM_DAC_FREQ],
-		     mt6391_dac_freq_get, mt6391_dac_freq_set),
-	SOC_ENUM_EXT("ADC_Freq_Switch", mt6391_soc_enums[ENUM_ADC_FREQ],
-		     mt6391_adc_freq_get, mt6391_adc_freq_set),
-};
-
-#ifdef CONFIG_DEBUG_FS
-struct mt6391_reg_attr {
-	uint32_t offset;
-	char *name;
-};
-
-#define DUMP_REG_ENTRY(reg) {reg, #reg}
-
-static const struct mt6391_reg_attr dump_reg_list[] = {
-	DUMP_REG_ENTRY(MT6397_AFE_UL_DL_CON0),
-	DUMP_REG_ENTRY(MT6397_AFE_DL_SRC2_CON0_H),
-	DUMP_REG_ENTRY(MT6397_AFE_DL_SRC2_CON0_L),
-	DUMP_REG_ENTRY(MT6397_AFE_DL_SDM_CON0),
-	DUMP_REG_ENTRY(MT6397_AFE_DL_SDM_CON1),
-	DUMP_REG_ENTRY(MT6397_AFE_UL_SRC_CON0_H),
-	DUMP_REG_ENTRY(MT6397_AFE_UL_SRC_CON0_L),
-	DUMP_REG_ENTRY(MT6397_AFE_UL_SRC_CON1_H),
-	DUMP_REG_ENTRY(MT6397_AFE_UL_SRC_CON1_L),
-	DUMP_REG_ENTRY(MT6397_ANA_AFE_TOP_CON0),
-	DUMP_REG_ENTRY(MT6397_AFUNC_AUD_CON0),
-	DUMP_REG_ENTRY(MT6397_AFUNC_AUD_CON1),
-	DUMP_REG_ENTRY(MT6397_AFUNC_AUD_CON2),
-	DUMP_REG_ENTRY(MT6397_AFUNC_AUD_CON3),
-	DUMP_REG_ENTRY(MT6397_AFUNC_AUD_CON4),
-	DUMP_REG_ENTRY(MT6397_AFUNC_AUD_MON0),
-	DUMP_REG_ENTRY(MT6397_AFUNC_AUD_MON1),
-	DUMP_REG_ENTRY(MT6397_AUDRC_TUNE_MON0),
-	DUMP_REG_ENTRY(MT6397_AFE_UP8X_FIFO_CFG0),
-	DUMP_REG_ENTRY(MT6397_AFE_UP8X_FIFO_LOG_MON0),
-	DUMP_REG_ENTRY(MT6397_AFE_UP8X_FIFO_LOG_MON1),
-	DUMP_REG_ENTRY(MT6397_AFE_DL_DC_COMP_CFG0),
-	DUMP_REG_ENTRY(MT6397_AFE_DL_DC_COMP_CFG1),
-	DUMP_REG_ENTRY(MT6397_AFE_DL_DC_COMP_CFG2),
-	DUMP_REG_ENTRY(MT6397_AFE_PMIC_NEWIF_CFG0),
-	DUMP_REG_ENTRY(MT6397_AFE_PMIC_NEWIF_CFG1),
-	DUMP_REG_ENTRY(MT6397_AFE_PMIC_NEWIF_CFG2),
-	DUMP_REG_ENTRY(MT6397_AFE_PMIC_NEWIF_CFG3),
-	DUMP_REG_ENTRY(MT6397_AFE_SGEN_CFG0),
-	DUMP_REG_ENTRY(MT6397_AFE_SGEN_CFG1),
-	DUMP_REG_ENTRY(MT6397_TOP_CKPDN),
-	DUMP_REG_ENTRY(MT6397_TOP_CKPDN2),
-	DUMP_REG_ENTRY(MT6397_TOP_CKCON1),
-	DUMP_REG_ENTRY(MT6397_TOP_CKCON3),
-	DUMP_REG_ENTRY(MT6397_SPK_CON0),
-	DUMP_REG_ENTRY(MT6397_SPK_CON1),
-	DUMP_REG_ENTRY(MT6397_SPK_CON2),
-	DUMP_REG_ENTRY(MT6397_SPK_CON3),
-	DUMP_REG_ENTRY(MT6397_SPK_CON4),
-	DUMP_REG_ENTRY(MT6397_SPK_CON5),
-	DUMP_REG_ENTRY(MT6397_SPK_CON6),
-	DUMP_REG_ENTRY(MT6397_SPK_CON7),
-	DUMP_REG_ENTRY(MT6397_SPK_CON8),
-	DUMP_REG_ENTRY(MT6397_SPK_CON9),
-	DUMP_REG_ENTRY(MT6397_SPK_CON10),
-	DUMP_REG_ENTRY(MT6397_SPK_CON11),
-	DUMP_REG_ENTRY(MT6397_AUDDAC_CON0),
-	DUMP_REG_ENTRY(MT6397_AUDBUF_CFG0),
-	DUMP_REG_ENTRY(MT6397_AUDBUF_CFG1),
-	DUMP_REG_ENTRY(MT6397_AUDBUF_CFG2),
-	DUMP_REG_ENTRY(MT6397_AUDBUF_CFG3),
-	DUMP_REG_ENTRY(MT6397_AUDBUF_CFG4),
-	DUMP_REG_ENTRY(MT6397_IBIASDIST_CFG0),
-	DUMP_REG_ENTRY(MT6397_AUDACCDEPOP_CFG0),
-	DUMP_REG_ENTRY(MT6397_AUD_IV_CFG0),
-	DUMP_REG_ENTRY(MT6397_AUDCLKGEN_CFG0),
-	DUMP_REG_ENTRY(MT6397_AUDLDO_CFG0),
-	DUMP_REG_ENTRY(MT6397_AUDLDO_CFG1),
-	DUMP_REG_ENTRY(MT6397_AUDNVREGGLB_CFG0),
-	DUMP_REG_ENTRY(MT6397_AUD_NCP0),
-	DUMP_REG_ENTRY(MT6397_AUDPREAMP_CON0),
-	DUMP_REG_ENTRY(MT6397_AUDADC_CON0),
-	DUMP_REG_ENTRY(MT6397_AUDADC_CON1),
-	DUMP_REG_ENTRY(MT6397_AUDADC_CON2),
-	DUMP_REG_ENTRY(MT6397_AUDADC_CON3),
-	DUMP_REG_ENTRY(MT6397_AUDADC_CON4),
-	DUMP_REG_ENTRY(MT6397_AUDADC_CON5),
-	DUMP_REG_ENTRY(MT6397_AUDADC_CON6),
-	DUMP_REG_ENTRY(MT6397_AUDDIGMI_CON0),
-	DUMP_REG_ENTRY(MT6397_AUDLSBUF_CON0),
-	DUMP_REG_ENTRY(MT6397_AUDLSBUF_CON1),
-	DUMP_REG_ENTRY(MT6397_AUDENCSPARE_CON0),
-	DUMP_REG_ENTRY(MT6397_AUDENCCLKSQ_CON0),
-	DUMP_REG_ENTRY(MT6397_AUDPREAMPGAIN_CON0),
-	DUMP_REG_ENTRY(MT6397_ZCD_CON0),
-	DUMP_REG_ENTRY(MT6397_ZCD_CON1),
-	DUMP_REG_ENTRY(MT6397_ZCD_CON2),
-	DUMP_REG_ENTRY(MT6397_ZCD_CON3),
-	DUMP_REG_ENTRY(MT6397_ZCD_CON4),
-	DUMP_REG_ENTRY(MT6397_ZCD_CON5),
-	DUMP_REG_ENTRY(MT6397_NCP_CLKDIV_CON0),
-	DUMP_REG_ENTRY(MT6397_NCP_CLKDIV_CON1),
-};
-
-
-static ssize_t mt6391_debug_read(struct file *file, char __user *user_buf,
-				size_t count, loff_t *pos)
-{
-	struct mt6391_priv *codec_data = file->private_data;
-	ssize_t ret, i;
-	char *buf;
-	int n = 0;
-
-	if (*pos < 0 || !count)
-		return -EINVAL;
-
-	buf = kmalloc(count, GFP_KERNEL);
-	if (!buf)
-		return -ENOMEM;
-
-	for (i = 0; i < ARRAY_SIZE(dump_reg_list); i++) {
-		n += scnprintf(buf + n, count - n, "%s = 0x%x\n",
-			dump_reg_list[i].name,
-			mt6391_get_reg(codec_data, dump_reg_list[i].offset));
-	}
-
-	ret = simple_read_from_buffer(user_buf, count, pos, buf, n);
-
-	kfree(buf);
+	snd_soc_dapm_mutex_unlock(dapm);
 
 	return ret;
 }
 
-static const struct file_operations mt6391_debug_ops = {
-	.open = simple_open,
-	.read = mt6391_debug_read,
-	.llseek = default_llseek,
-};
-#endif
-
-static int mt6391_codec_startup(struct snd_pcm_substream *substream,
-			struct snd_soc_dai *codec_dai)
+static int mt6391_sgen_get(struct snd_kcontrol *kcontrol,
+			   struct snd_ctl_elem_value *ucontrol)
 {
-	if (substream->stream == SNDRV_PCM_STREAM_CAPTURE)
-		pr_debug("%s SNDRV_PCM_STREAM_CAPTURE\n", __func__);
-	else if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK)
-		pr_debug("%s SNDRV_PCM_STREAM_PLAYBACK\n", __func__);
+	struct snd_soc_component *cmpnt = snd_kcontrol_chip(kcontrol);
+	struct mt6391_priv *priv = snd_soc_component_get_drvdata(cmpnt);
+
+	ucontrol->value.enumerated.item[0] = priv->sgen;
 
 	return 0;
 }
 
-static int mt6391_codec_prepare(struct snd_pcm_substream *substream,
-			struct snd_soc_dai *codec_dai)
+static int mt6391_sgen_put(struct snd_kcontrol *kcontrol,
+			   struct snd_ctl_elem_value *ucontrol)
 {
-	struct mt6391_priv *codec_data = snd_soc_component_get_drvdata(codec_dai->component);
-	struct snd_pcm_runtime *runtime = substream->runtime;
+	struct snd_soc_component *cmpnt = snd_kcontrol_chip(kcontrol);
+	struct mt6391_priv *priv = snd_soc_component_get_drvdata(cmpnt);
+	bool sgen = ucontrol->value.enumerated.item[0];
 
-	if (substream->stream == SNDRV_PCM_STREAM_CAPTURE) {
-		pr_debug("%s capture rate = %d\n", __func__, runtime->rate);
-		codec_data->sample_rate[MT6391_ADDA_ADC] = runtime->rate;
-	} else if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
-		pr_debug("%s playback rate = %d\n", __func__, runtime->rate);
-		mt6391_set_dac_rate(codec_data, runtime->rate);
+	if (ucontrol->value.enumerated.item[0] > 1)
+		return -EINVAL;
+	if (sgen == priv->sgen)
+		return 0;
+
+	if (sgen) {
+		regmap_set_bits(priv->regmap, MT6397_ANA_AFE_TOP_CON0,
+				MT6397_DL_SINE_ON);
+		regmap_update_bits(priv->regmap, MT6397_AFE_SGEN_CFG0,
+				   0xff80, 0x4400 | MT6397_SGEN_DAC_EN);
+		regmap_write(priv->regmap, MT6397_AFE_SGEN_CFG1, 0x0101);
+	} else {
+		regmap_clear_bits(priv->regmap, MT6397_ANA_AFE_TOP_CON0,
+				  MT6397_DL_SINE_ON);
+		regmap_clear_bits(priv->regmap, MT6397_AFE_SGEN_CFG0,
+				  MT6397_SGEN_DAC_EN);
 	}
-	return 0;
+	priv->sgen = sgen;
+
+	return 1;
 }
 
-static int mt6391_codec_trigger(struct snd_pcm_substream *substream, int command,
-				struct snd_soc_dai *codec_dai)
-{
-	switch (command) {
-	case SNDRV_PCM_TRIGGER_START:
-	case SNDRV_PCM_TRIGGER_RESUME:
-	case SNDRV_PCM_TRIGGER_STOP:
-	case SNDRV_PCM_TRIGGER_SUSPEND:
-		break;
-	}
+/* Register 0 mutes the speaker, 1 is 0 dB, and 2-15 are +4 dB to +17 dB */
+static const DECLARE_TLV_DB_RANGE(mt6391_spk_tlv,
+	0, 1, TLV_DB_SCALE_ITEM(-400, 400, 1),
+	2, 15, TLV_DB_SCALE_ITEM(400, 100, 0)
+);
 
-	pr_debug("%s command = %d\n ", __func__, command);
-	return 0;
-}
+static const DECLARE_TLV_DB_RANGE(mt6391_hp_tlv,
+	0, 0, TLV_DB_SCALE_ITEM(-4000, 0, 0),
+	1, 13, TLV_DB_SCALE_ITEM(-400, 100, 0)
+);
 
-static const struct snd_soc_dai_ops mt6391_aif1_dai_ops = {
-	.startup = mt6391_codec_startup,
-	.prepare = mt6391_codec_prepare,
-	.trigger = mt6391_codec_trigger,
+static const char * const mt6391_dac_source_text[] = { "Normal", "Sine" };
+
+static SOC_ENUM_SINGLE_EXT_DECL(mt6391_dac_source_enum, mt6391_dac_source_text);
+
+static const struct snd_kcontrol_new mt6391_snd_controls[] = {
+	SOC_DOUBLE_EXT_TLV("Speaker Volume", SND_SOC_NOPM, 0, 1, 15, 0,
+			   mt6391_spk_volume_get, mt6391_spk_volume_put,
+			   mt6391_spk_tlv),
+	SOC_DOUBLE_EXT_TLV("Headphone Volume", SND_SOC_NOPM, 0, 1,
+			   MT6391_HP_GAIN_MAX, 0,
+			   mt6391_hp_volume_get, mt6391_hp_volume_put,
+			   mt6391_hp_tlv),
+	/* The sine generator replaces the stream on a running downlink */
+	SOC_ENUM_EXT("DAC Source", mt6391_dac_source_enum,
+		     mt6391_sgen_get, mt6391_sgen_put),
 };
 
-static struct snd_soc_dai_driver mt6391_codec_dai_drvs[] = {
-	{
-	 .name = "mt6397-codec-aif1",
-	 .ops = &mt6391_aif1_dai_ops,
-	 .playback = {
-		      .stream_name = "AIF1 Playback",
-		      .channels_min = 1,
-		      .channels_max = 2,
-		      .rates = SNDRV_PCM_RATE_8000_48000,
-		      .formats = SNDRV_PCM_FMTBIT_S16_LE,
-		      },
-	 .capture = {
-		     .stream_name = "AIF1 Capture",
-		     .channels_min = 1,
-		     .channels_max = 2,
-		     .rates = SNDRV_PCM_RATE_8000_48000,
-		     .formats = SNDRV_PCM_FMTBIT_S16_LE,
-		     },
-	 },
-};
-
-/*
- * The vendor driver has no DAPM; the analog paths are driven by the
- * enum controls above, as Android did. These minimal widgets exist so
- * that DPCM has complete codec-side paths to endpoints.
- */
 static const struct snd_soc_dapm_widget mt6391_dapm_widgets[] = {
+	SND_SOC_DAPM_SUPPLY_S("AUD_CK", SUPPLY_SEQ_AUD_CK, SND_SOC_NOPM, 0, 0,
+			      mt6391_aud_ck_event,
+			      SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMD),
+	SND_SOC_DAPM_SUPPLY_S("ZCD", SUPPLY_SEQ_ZCD, SND_SOC_NOPM, 0, 0,
+			      mt6391_zcd_event, SND_SOC_DAPM_POST_PMD),
+	SND_SOC_DAPM_SUPPLY_S("DL_SRC", SUPPLY_SEQ_DL_SRC, SND_SOC_NOPM, 0, 0,
+			      mt6391_dl_src_event,
+			      SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMD),
+	SND_SOC_DAPM_SUPPLY_S("SPK_CK", SUPPLY_SEQ_SPK_CK, SND_SOC_NOPM, 0, 0,
+			      mt6391_spk_ck_event,
+			      SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMD),
+
 	SND_SOC_DAPM_AIF_IN("AIF RX", "AIF1 Playback", 0, SND_SOC_NOPM, 0, 0),
-	SND_SOC_DAPM_AIF_OUT("AIF TX", "AIF1 Capture", 0, SND_SOC_NOPM, 0, 0),
-	SND_SOC_DAPM_OUTPUT("Speaker"),
-	SND_SOC_DAPM_OUTPUT("Headphone"),
-	SND_SOC_DAPM_INPUT("Mic"),
+	SND_SOC_DAPM_DAC("DAC", NULL, SND_SOC_NOPM, 0, 0),
+
+	SND_SOC_DAPM_OUT_DRV_E("Speaker Amp", SND_SOC_NOPM, 0, 0, NULL, 0,
+			       mt6391_spk_amp_event,
+			       SND_SOC_DAPM_POST_PMU | SND_SOC_DAPM_PRE_PMD),
+	SND_SOC_DAPM_OUT_DRV_E("Headphone Amp", SND_SOC_NOPM, 0, 0, NULL, 0,
+			       mt6391_hp_amp_event,
+			       SND_SOC_DAPM_POST_PMU | SND_SOC_DAPM_PRE_PMD),
+
+	SND_SOC_DAPM_OUTPUT("SPKL"),
+	SND_SOC_DAPM_OUTPUT("SPKR"),
+	SND_SOC_DAPM_OUTPUT("HPL"),
+	SND_SOC_DAPM_OUTPUT("HPR"),
 };
 
 static const struct snd_soc_dapm_route mt6391_dapm_routes[] = {
-	{"Speaker", NULL, "AIF RX"},
-	{"Headphone", NULL, "AIF RX"},
-	{"AIF TX", NULL, "Mic"},
+	{ "DAC", NULL, "AIF RX" },
+	{ "DAC", NULL, "AUD_CK" },
+	{ "DAC", NULL, "DL_SRC" },
+
+	{ "Speaker Amp", NULL, "DAC" },
+	{ "Speaker Amp", NULL, "ZCD" },
+	{ "Speaker Amp", NULL, "SPK_CK" },
+	{ "SPKL", NULL, "Speaker Amp" },
+	{ "SPKR", NULL, "Speaker Amp" },
+
+	{ "Headphone Amp", NULL, "DAC" },
+	{ "Headphone Amp", NULL, "ZCD" },
+	{ "HPL", NULL, "Headphone Amp" },
+	{ "HPR", NULL, "Headphone Amp" },
 };
 
-static void mt6391_codec_init_reg(struct mt6391_priv *codec_data)
+static int mt6391_dai_hw_params(struct snd_pcm_substream *substream,
+				struct snd_pcm_hw_params *params,
+				struct snd_soc_dai *dai)
 {
-	pr_debug("%s\n", __func__);
+	struct snd_soc_component *cmpnt = dai->component;
+	struct mt6391_priv *priv = snd_soc_component_get_drvdata(cmpnt);
+	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(cmpnt);
+	int mode = mt6391_dl_rate_mode(params_rate(params));
 
-	mt6391_set_reg(codec_data, MT6397_AFUNC_AUD_CON2, 0x0080, 0x0080);
-	mt6391_set_reg(codec_data, MT6397_ZCD_CON2, 0x0c0c, 0xffff);
-	mt6391_set_reg(codec_data, MT6397_AUDBUF_CFG0, 0x0000, 0x1fe7);
-	mt6391_set_reg(codec_data, MT6397_IBIASDIST_CFG0, 0x1552, 0xffff);	/* RG DEV ck off; */
-	mt6391_set_reg(codec_data, MT6397_AUDDAC_CON0, 0x0000, 0xffff);	/* NCP off */
-	mt6391_set_reg(codec_data, MT6397_AUDCLKGEN_CFG0, 0x0000, 0x0001);
-	mt6391_set_reg(codec_data, MT6397_AUDNVREGGLB_CFG0, 0x0006, 0xffff);	/* need check */
-	mt6391_set_reg(codec_data, MT6397_NCP_CLKDIV_CON1, 0x0001, 0xffff);	/* fix me */
-	mt6391_set_reg(codec_data, MT6397_AUD_NCP0, 0x0000, 0x6000);
-	mt6391_set_reg(codec_data, MT6397_AUDLDO_CFG0, 0x0192, 0xffff);
-	mt6391_set_reg(codec_data, MT6397_AFUNC_AUD_CON2, 0x0000, 0x0080);
-	/* ZCD set as default value */
-	mt6391_set_reg(codec_data, MT6397_ZCD_CON0, 0x0000, 0xffff);
-	/* sck inverse */
-	mt6391_set_reg(codec_data, MT6397_AFE_PMIC_NEWIF_CFG2, 1 << 15, 1 << 15);
-	/* default preamp mux */
-	mt6391_set_mux(codec_data, MT6391_DEV_IN_PREAMP_L, MT6391_MUX_IN_MIC1);
-	mt6391_set_mux(codec_data, MT6391_DEV_IN_PREAMP_R, MT6391_MUX_IN_MIC2);
-}
+	if (mode < 0)
+		return mode;
 
-static int mt6391_codec_probe(struct snd_soc_component *component)
-{
-	struct mt6391_priv *codec_data = snd_soc_component_get_drvdata(component);
-	struct mt6397_chip *mt6397 = dev_get_drvdata(component->dev->parent);
-
-	codec_data->component = component;
-	snd_soc_component_init_regmap(component, mt6397->regmap);
-
-#if defined(USE_MT6397_REGMAP)
-	mt6391_set_reg(codec_data, MT6397_TOP_CKCON1, 0x0010, 0x0010);
-#elif defined(USE_PMIC_WRAP_DRIVER)
-	upmu_set_rg_clksq_en(1);
-#endif
-
-	mt6391_control_top_clk(codec_data, 0x0607, true);
-
-	mt6391_codec_init_reg(codec_data);
-	mt6391_get_hp_trim_offset(codec_data);
-	mt6391_spk_auto_trim_offset(codec_data);
-
-#if defined(USE_MT6397_REGMAP)
-	mt6391_set_reg(codec_data, MT6397_TOP_CKCON1, 0x0000, 0x0010);
-#elif defined(USE_PMIC_WRAP_DRIVER)
-	upmu_set_rg_clksq_en(0);
-#endif
-
-	mt6391_control_top_clk(codec_data, 0x0607, false);
-
-	snd_soc_add_component_controls(component, mt6391_dl_codec_controls,
-				ARRAY_SIZE(mt6391_dl_codec_controls));
-	snd_soc_add_component_controls(component, mt6391_ul_codec_controls,
-				ARRAY_SIZE(mt6391_ul_codec_controls));
-	snd_soc_add_component_controls(component, mt6391_factory_controls,
-				ARRAY_SIZE(mt6391_factory_controls));
-
-#ifdef CONFIG_DEBUG_FS
-	codec_data->debugfs = debugfs_create_file("mt6391reg", S_IFREG | 0444,
-					NULL, codec_data, &mt6391_debug_ops);
-#endif
-
+	/*
+	 * A downlink still powered from the previous stream would otherwise
+	 * keep its rate, and the SRC is silent at the wrong one.
+	 */
+	snd_soc_dapm_mutex_lock(dapm);
+	priv->dl_rate_mode = mode;
+	if (priv->dl_src_on)
+		mt6391_set_dl_rate(priv);
+	snd_soc_dapm_mutex_unlock(dapm);
 
 	return 0;
 }
 
-static void mt6391_codec_remove(struct snd_soc_component *component)
-{
-#ifdef CONFIG_DEBUG_FS
-	struct mt6391_priv *codec_data = snd_soc_component_get_drvdata(component);
+static const struct snd_soc_dai_ops mt6391_dai_ops = {
+	.hw_params = mt6391_dai_hw_params,
+};
 
-	debugfs_remove(codec_data->debugfs);
-#endif
+static struct snd_soc_dai_driver mt6391_dai_driver[] = {
+	{
+		.name = "mt6397-codec-aif1",
+		.playback = {
+			.stream_name = "AIF1 Playback",
+			.channels_min = 1,
+			.channels_max = 2,
+			.rates = SNDRV_PCM_RATE_8000_48000,
+			.formats = SNDRV_PCM_FMTBIT_S16_LE,
+		},
+		.ops = &mt6391_dai_ops,
+	},
+};
+
+static void mt6391_read_hp_trim(struct mt6391_priv *priv)
+{
+	unsigned int fuse, l = 2, r = 2, l_fine = 0, r_fine = 0;
+
+	regmap_read(priv->regmap, MT6397_EFUSE_DOUT_192_207, &fuse);
+	if (fuse & MT6397_EFUSE_HP_TRIM_EN) {
+		l = FIELD_GET(MT6397_EFUSE_HPL_TRIM, fuse);
+		r = FIELD_GET(MT6397_EFUSE_HPR_TRIM, fuse);
+		l_fine = FIELD_GET(MT6397_EFUSE_HPL_FINE_TRIM, fuse);
+		r_fine = FIELD_GET(MT6397_EFUSE_HPR_FINE_TRIM, fuse);
+	}
+
+	priv->hp_trim = MT6397_RG_AUDHPTRIM_EN |
+			FIELD_PREP(MT6397_RG_AUDHPLTRIM, l) |
+			FIELD_PREP(MT6397_RG_AUDHPRTRIM, r) |
+			FIELD_PREP(MT6397_RG_AUDHPLFINETRIM, l_fine) |
+			FIELD_PREP(MT6397_RG_AUDHPRFINETRIM, r_fine);
 }
 
-static int mt6391_codec_suspend(struct snd_soc_component *component)
+static unsigned int mt6391_read_spk_trim(struct mt6391_priv *priv,
+					 unsigned int sel, unsigned int sel_pol)
 {
-	struct mt6391_priv *codec_data = snd_soc_component_get_drvdata(component);
+	unsigned int val, trim;
 
-	mt6391_suspend_clk_off(codec_data);
+	regmap_write(priv->regmap, MT6397_TEST_CON0, sel);
+	regmap_read(priv->regmap, MT6397_TEST_OUT_L, &val);
+	trim = val & 0xf;
+	regmap_write(priv->regmap, MT6397_TEST_CON0, sel_pol);
+	regmap_read(priv->regmap, MT6397_TEST_OUT_L, &val);
+	trim |= (val & BIT(0)) << 4;
+
+	return MT6397_SPK_OFFSET_MODE |
+	       FIELD_PREP(MT6397_SPK_LEAD_SW, !!(val & BIT(1))) |
+	       FIELD_PREP(MT6397_SPK_OFFSET_SW, trim);
+}
+
+/*
+ * Run the speaker amplifiers' DC offset calibration once, and keep the
+ * result to program on every power-up.
+ */
+static void mt6391_spk_auto_trim(struct mt6391_priv *priv)
+{
+	struct regmap *map = priv->regmap;
+	unsigned int val;
+	int ret;
+
+	regmap_set_bits(map, MT6397_AFUNC_AUD_CON2, MT6397_CCI_AUD_DAC_ANA_MUTE);
+	mt6391_dl_analog_on(priv);
+	mt6391_iv_buffer_on(priv);
+	mt6391_dac_on(priv);
+	regmap_clear_bits(map, MT6397_AFUNC_AUD_CON2,
+			  MT6397_CCI_AUD_DAC_ANA_MUTE);
+
+	regmap_clear_bits(map, MT6397_SPK_CON1, MT6397_SPK_TRIM);
+	regmap_clear_bits(map, MT6397_SPK_CON4, MT6397_SPK_TRIM);
+	regmap_write(map, MT6397_SPK_CON9, 0x0018);
+	regmap_write(map, MT6397_SPK_CON0, MT6397_SPK_TRIM_EN);
+	regmap_write(map, MT6397_SPK_CON3, MT6397_SPK_TRIM_EN);
+	regmap_update_bits(map, MT6397_SPK_CON0, MT6397_RG_SPK_GAIN,
+			   FIELD_PREP(MT6397_RG_SPK_GAIN, 3));
+	regmap_update_bits(map, MT6397_SPK_CON3, MT6397_RG_SPK_GAIN,
+			   FIELD_PREP(MT6397_RG_SPK_GAIN, 3));
+	regmap_update_bits(map, MT6397_SPK_CON9, MT6397_RG_SPKPGA_GAINL,
+			   FIELD_PREP(MT6397_RG_SPKPGA_GAINL, 1));
+	regmap_update_bits(map, MT6397_SPK_CON5, MT6397_RG_SPKPGA_GAINR,
+			   FIELD_PREP(MT6397_RG_SPKPGA_GAINR, 1));
+	regmap_set_bits(map, MT6397_SPK_CON0, MT6397_SPK_EN);
+	regmap_set_bits(map, MT6397_SPK_CON3, MT6397_SPK_EN);
+
+	/* MediaTek measured the calibration as taking about 13 ms */
+	usleep_range(15000, 16000);
+	ret = regmap_read_poll_timeout(map, MT6397_SPK_CON1, val,
+				       val & MT6397_SPK_TRIM_DONE, 100, 5000);
+	if (!ret)
+		ret = regmap_read_poll_timeout(map, MT6397_SPK_CON4, val,
+					       val & MT6397_SPK_TRIM_DONE,
+					       100, 5000);
+	if (ret)
+		dev_warn(priv->dev, "speaker offset trim did not complete\n");
+
+	regmap_write(map, MT6397_SPK_CON9, 0);
+	regmap_clear_bits(map, MT6397_SPK_CON5, MT6397_RG_SPKPGA_GAINR);
+	regmap_clear_bits(map, MT6397_SPK_CON0, MT6397_SPK_EN);
+	regmap_clear_bits(map, MT6397_SPK_CON3, MT6397_SPK_EN);
+
+	priv->spk_trim[0] = mt6391_read_spk_trim(priv, MT6397_TEST_SPKL_TRIM,
+						 MT6397_TEST_SPKL_TRIM_POL);
+	priv->spk_trim[1] = mt6391_read_spk_trim(priv, MT6397_TEST_SPKR_TRIM,
+						 MT6397_TEST_SPKR_TRIM_POL);
+
+	/* The first revision's right channel calibration is not usable */
+	regmap_read(map, MT6397_CID, &val);
+	if (val == MT6397_CID_E1)
+		priv->spk_trim[1] = MT6397_SPK_OFFSET_MODE;
+
+	regmap_set_bits(map, MT6397_AFUNC_AUD_CON2, MT6397_CCI_AUD_DAC_ANA_MUTE);
+	regmap_write(map, MT6397_SPK_CON0, 0);
+	regmap_write(map, MT6397_SPK_CON3, 0);
+	regmap_write(map, MT6397_SPK_CON11, 0);
+	regmap_clear_bits(map, MT6397_ZCD_CON0,
+			  MT6397_RG_AUDZCDMUXSEL | MT6397_RG_AUDZCDENABLE);
+	regmap_clear_bits(map, MT6397_AUDCLKGEN_CFG0, MT6397_RG_RSTB_DECODER);
+	regmap_write(map, MT6397_AUDDAC_CON0, 0);
+	regmap_write(map, MT6397_AUD_IV_CFG0, 0);
+	regmap_write(map, MT6397_IBIASDIST_CFG0,
+		     MT6397_AUDBIASADJ | MT6397_RG_AUDIBIASPWRDN);
+	mt6391_dl_analog_off(priv);
+	regmap_clear_bits(map, MT6397_AFUNC_AUD_CON2,
+			  MT6397_CCI_AUD_DAC_ANA_MUTE);
+}
+
+static void mt6391_init_reg(struct mt6391_priv *priv)
+{
+	struct regmap *map = priv->regmap;
+
+	regmap_set_bits(map, MT6397_AFUNC_AUD_CON2, MT6397_CCI_AUD_DAC_ANA_MUTE);
+	mt6391_hp_write_gain(priv, MT6391_HP_GAIN_MUTE, MT6391_HP_GAIN_MUTE);
+	regmap_clear_bits(map, MT6397_AUDBUF_CFG0,
+			  MT6397_RG_AUDHPRMUXINPUTSEL |
+			  MT6397_RG_AUDHPLMUXINPUTSEL |
+			  MT6397_RG_AUDHPRPWRUP | MT6397_RG_AUDHPLPWRUP |
+			  MT6397_RG_AUDHSPWRUP);
+	regmap_write(map, MT6397_IBIASDIST_CFG0,
+		     MT6397_AUDBIASADJ | MT6397_RG_AUDIBIASPWRDN);
+	regmap_write(map, MT6397_AUDDAC_CON0, 0);
+	regmap_clear_bits(map, MT6397_AUDCLKGEN_CFG0, MT6397_RG_RSTB_DECODER);
+	mt6391_dl_analog_off(priv);
+	regmap_clear_bits(map, MT6397_AFUNC_AUD_CON2,
+			  MT6397_CCI_AUD_DAC_ANA_MUTE);
+	regmap_write(map, MT6397_ZCD_CON0, 0);
+	regmap_set_bits(map, MT6397_AFE_PMIC_NEWIF_CFG2, MT6397_NEWIF_SCK_INV);
+}
+
+static void mt6391_accdet_clear_irq(struct mt6391_priv *priv)
+{
+	unsigned int val;
+
+	regmap_set_bits(priv->regmap, MT6397_ACCDET_CON11,
+			MT6397_ACCDET_IRQ_CLR);
+	regmap_read_poll_timeout(priv->regmap, MT6397_ACCDET_CON11, val,
+				 !(val & MT6397_ACCDET_IRQ), 100, 2000);
+	regmap_clear_bits(priv->regmap, MT6397_ACCDET_CON11,
+			  MT6397_ACCDET_IRQ_CLR);
+}
+
+static unsigned int mt6391_accdet_ab(struct mt6391_priv *priv)
+{
+	unsigned int val;
+
+	regmap_read(priv->regmap, MT6397_ACCDET_CON13, &val);
+	return FIELD_GET(MT6397_ACCDET_MEM_IN, val);
+}
+
+static void mt6391_jack_work(struct work_struct *work)
+{
+	struct mt6391_priv *priv = container_of(to_delayed_work(work),
+						struct mt6391_priv, jack_work);
+	int type, btn = 0;
+
+	switch (mt6391_accdet_ab(priv)) {
+	case MT6391_ACCDET_AB_OPEN:
+		type = 0;
+		break;
+	case MT6391_ACCDET_AB_HEADSET:
+		type = SND_JACK_HEADSET;
+		break;
+	case MT6391_ACCDET_AB_GROUND:
+		if (priv->jack_type == SND_JACK_HEADSET) {
+			type = SND_JACK_HEADSET;
+			btn = SND_JACK_BTN_0;
+		} else {
+			type = SND_JACK_HEADPHONE;
+		}
+		break;
+	default:
+		return;
+	}
+
+	WRITE_ONCE(priv->jack_type, type);
+	snd_soc_jack_report(priv->jack, type | btn,
+			    SND_JACK_HEADSET | SND_JACK_BTN_0);
+}
+
+static irqreturn_t mt6391_accdet_irq(int irq, void *data)
+{
+	struct mt6391_priv *priv = data;
+	unsigned long delay = 0;
+
+	mt6391_accdet_clear_irq(priv);
+
+	if (!READ_ONCE(priv->jack_type) &&
+	    mt6391_accdet_ab(priv) != MT6391_ACCDET_AB_OPEN)
+		delay = msecs_to_jiffies(MT6391_ACCDET_SETTLE_MS);
+	mod_delayed_work(system_power_efficient_wq, &priv->jack_work, delay);
+
+	return IRQ_HANDLED;
+}
+
+static void mt6391_accdet_enable(struct mt6391_priv *priv)
+{
+	struct regmap *map = priv->regmap;
+
+	regmap_write(map, MT6397_TOP_CKPDN_CLR, MT6397_RG_ACCDET_CK_PDN);
+	regmap_write(map, MT6397_TOP_RST_CON_SET, MT6397_RG_ACCDET_RST);
+	regmap_write(map, MT6397_TOP_RST_CON_CLR, MT6397_RG_ACCDET_RST);
+
+	regmap_write(map, MT6397_ACCDET_CON0, MT6391_ACCDET_RSV_2V8);
+	regmap_write(map, MT6397_ACCDET_CON3, MT6391_ACCDET_PWM_WIDTH - 1);
+	regmap_write(map, MT6397_ACCDET_CON4, MT6391_ACCDET_PWM_WIDTH - 1);
+	regmap_write(map, MT6397_ACCDET_CON5, MT6397_ACCDET_FALL_DELAY |
+		     FIELD_PREP(MT6397_ACCDET_RISE_DELAY,
+				MT6391_ACCDET_RISE_DELAY));
+	regmap_write(map, MT6397_ACCDET_CON6, MT6391_ACCDET_DEBOUNCE);
+	regmap_write(map, MT6397_ACCDET_CON7, MT6391_ACCDET_DEBOUNCE);
+	regmap_write(map, MT6397_ACCDET_CON9, MT6391_ACCDET_DEBOUNCE_OPEN);
+	regmap_write(map, MT6397_ACCDET_CON2,
+		     MT6397_ACCDET_CMP_EN | MT6397_ACCDET_VTH_EN |
+		     MT6397_ACCDET_MBIAS_EN | MT6397_ACCDET_CMP_PWM_IDLE |
+		     MT6397_ACCDET_VTH_PWM_IDLE | MT6397_ACCDET_MBIAS_PWM_IDLE);
+	regmap_write(map, MT6397_ACCDET_CON1, MT6397_ACCDET_EN);
+
+	/* An empty jack stays at the reset state and raises no interrupt */
+	priv->jack_type = 0;
+	enable_irq(priv->accdet_irq);
+	mod_delayed_work(system_power_efficient_wq, &priv->jack_work,
+			 msecs_to_jiffies(MT6391_ACCDET_SETTLE_MS));
+}
+
+static void mt6391_accdet_disable(struct mt6391_priv *priv)
+{
+	disable_irq(priv->accdet_irq);
+	cancel_delayed_work_sync(&priv->jack_work);
+
+	regmap_write(priv->regmap, MT6397_ACCDET_CON1, 0);
+	regmap_write(priv->regmap, MT6397_ACCDET_CON2, 0);
+	mt6391_accdet_clear_irq(priv);
+	regmap_write(priv->regmap, MT6397_TOP_CKPDN_SET,
+		     MT6397_RG_ACCDET_CK_PDN);
+}
+
+static int mt6391_set_jack(struct snd_soc_component *cmpnt,
+			   struct snd_soc_jack *jack, void *data)
+{
+	struct mt6391_priv *priv = snd_soc_component_get_drvdata(cmpnt);
+
+	if (priv->jack)
+		mt6391_accdet_disable(priv);
+
+	priv->jack = jack;
+	if (jack)
+		mt6391_accdet_enable(priv);
+
 	return 0;
 }
 
-static int mt6391_codec_resume(struct snd_soc_component *component)
+static int mt6391_codec_probe(struct snd_soc_component *cmpnt)
 {
-	struct mt6391_priv *codec_data = snd_soc_component_get_drvdata(component);
+	struct mt6391_priv *priv = snd_soc_component_get_drvdata(cmpnt);
+	unsigned int clks = MT6397_RG_AUD_26M_PDN | MT6397_RG_AUD_13M_PDN |
+			    MT6397_RG_SPK_CK_PDN | MT6397_RG_SPK_PWM_DIV_PDN |
+			    MT6397_RG_SPK_DIV_PDN;
 
-	mt6391_suspend_clk_on(codec_data);
+	snd_soc_component_init_regmap(cmpnt, priv->regmap);
+
+	regmap_set_bits(priv->regmap, MT6397_TOP_CKCON1, MT6397_RG_CLKSQ_EN);
+	regmap_write(priv->regmap, MT6397_TOP_CKPDN_CLR, clks);
+
+	mt6391_init_reg(priv);
+	mt6391_read_hp_trim(priv);
+	mt6391_spk_auto_trim(priv);
+
+	regmap_clear_bits(priv->regmap, MT6397_TOP_CKCON1, MT6397_RG_CLKSQ_EN);
+	regmap_write(priv->regmap, MT6397_TOP_CKPDN_SET, clks);
+
+	return 0;
+}
+
+static void mt6391_codec_remove(struct snd_soc_component *cmpnt)
+{
+	mt6391_set_jack(cmpnt, NULL, NULL);
+}
+
+/* The bias is off in suspend; resume classifies the jack again */
+static int mt6391_codec_suspend(struct snd_soc_component *cmpnt)
+{
+	struct mt6391_priv *priv = snd_soc_component_get_drvdata(cmpnt);
+
+	if (priv->jack)
+		mt6391_accdet_disable(priv);
+
+	return 0;
+}
+
+static int mt6391_codec_resume(struct snd_soc_component *cmpnt)
+{
+	struct mt6391_priv *priv = snd_soc_component_get_drvdata(cmpnt);
+
+	if (priv->jack)
+		mt6391_accdet_enable(priv);
+
 	return 0;
 }
 
@@ -2866,6 +1085,9 @@ static const struct snd_soc_component_driver mt6391_component_driver = {
 	.remove = mt6391_codec_remove,
 	.suspend = mt6391_codec_suspend,
 	.resume = mt6391_codec_resume,
+	.set_jack = mt6391_set_jack,
+	.controls = mt6391_snd_controls,
+	.num_controls = ARRAY_SIZE(mt6391_snd_controls),
 	.dapm_widgets = mt6391_dapm_widgets,
 	.num_dapm_widgets = ARRAY_SIZE(mt6391_dapm_widgets),
 	.dapm_routes = mt6391_dapm_routes,
@@ -2873,69 +1095,55 @@ static const struct snd_soc_component_driver mt6391_component_driver = {
 	.endianness = 1,
 };
 
-static int mt6391_dev_probe(struct platform_device *pdev)
+static int mt6391_platform_probe(struct platform_device *pdev)
 {
-	struct device *dev = &pdev->dev;
-	struct mt6391_priv *codec_data;
+	struct mt6397_chip *mt6397 = dev_get_drvdata(pdev->dev.parent);
+	struct mt6391_priv *priv;
 	int ret;
 
-	pr_debug("%s dev name %s\n", __func__, dev_name(dev));
-
-	codec_data = devm_kzalloc(dev, sizeof(struct mt6391_priv), GFP_KERNEL);
-	if (unlikely(!codec_data)) {
-		pr_err("%s failed to allocate private data\n", __func__);
+	priv = devm_kzalloc(&pdev->dev, sizeof(*priv), GFP_KERNEL);
+	if (!priv)
 		return -ENOMEM;
-	}
 
-	mutex_init(&codec_data->ctrl_mutex);
-	mutex_init(&codec_data->clk_mutex);
+	priv->dev = &pdev->dev;
+	priv->regmap = mt6397->regmap;
+	priv->dl_rate_mode = mt6391_dl_rate_mode(48000);
+	priv->hp_gain[0] = MT6391_HP_GAIN_MUTE;
+	priv->hp_gain[1] = MT6391_HP_GAIN_MUTE;
+	INIT_DELAYED_WORK(&priv->jack_work, mt6391_jack_work);
+	platform_set_drvdata(pdev, priv);
 
-	codec_data->sample_rate[MT6391_ADDA_DAC] = 44100;
-	codec_data->sample_rate[MT6391_ADDA_ADC] = 32000;
+	priv->accdet_irq = platform_get_irq_byname(pdev, "accdet");
+	if (priv->accdet_irq < 0)
+		return priv->accdet_irq;
 
-	ret = of_property_read_u32(dev->of_node, "mediatek,speaker-mode",
-				&codec_data->speaker_mode);
-	if (ret) {
-		dev_dbg(dev, "no mediatek,speaker-mode, defaulting to Class-D\n");
-		codec_data->speaker_mode = MT6391_CLASS_D;
-	} else if (codec_data->speaker_mode != MT6391_CLASS_D &&
-		codec_data->speaker_mode != MT6391_CLASS_AB) {
-		codec_data->speaker_mode = MT6391_CLASS_D;
-	}
-
-	ret = of_property_read_u32(dev->of_node, "mediatek,adc-warmup-time-us",
-			&codec_data->adc_warmup_time_us);
+	ret = devm_request_threaded_irq(&pdev->dev, priv->accdet_irq, NULL,
+					mt6391_accdet_irq,
+					IRQF_ONESHOT | IRQF_NO_AUTOEN,
+					"mt6391-accdet", priv);
 	if (ret)
-		codec_data->adc_warmup_time_us = 0;
+		return ret;
 
-	ret = of_property_read_u32(dev->of_node, "mediatek,dmic-warmup-time-us",
-			&codec_data->dmic_warmup_time_us);
-	if (ret)
-		codec_data->dmic_warmup_time_us = 0;
-
-	dev_set_drvdata(dev, codec_data);
-
-	return devm_snd_soc_register_component(dev, &mt6391_component_driver,
-			mt6391_codec_dai_drvs, ARRAY_SIZE(mt6391_codec_dai_drvs));
+	return devm_snd_soc_register_component(&pdev->dev,
+					       &mt6391_component_driver,
+					       mt6391_dai_driver,
+					       ARRAY_SIZE(mt6391_dai_driver));
 }
 
-static const struct of_device_id mt6391_codec_dt_match[] = {
-	{.compatible = "mediatek," MT6397_CODEC_NAME,},
-	{}
+static const struct of_device_id mt6391_of_match[] = {
+	{ .compatible = "mediatek,mt6397-codec" },
+	{ /* sentinel */ }
 };
+MODULE_DEVICE_TABLE(of, mt6391_of_match);
 
-MODULE_DEVICE_TABLE(of, mt6391_codec_dt_match);
-
-static struct platform_driver mt6391_codec_device_driver = {
+static struct platform_driver mt6391_platform_driver = {
 	.driver = {
-		   .name = MT6397_CODEC_NAME,
-		   .of_match_table = mt6391_codec_dt_match,
-		   },
-	.probe = mt6391_dev_probe,
+		.name = "mt6397-codec",
+		.of_match_table = mt6391_of_match,
+	},
+	.probe = mt6391_platform_probe,
 };
+module_platform_driver(mt6391_platform_driver);
 
-module_platform_driver(mt6391_codec_device_driver);
-
-/* Module information */
-MODULE_DESCRIPTION("MT6391 codec driver");
+MODULE_DESCRIPTION("MediaTek MT6391 PMIC audio codec driver");
 MODULE_LICENSE("GPL");
