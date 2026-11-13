@@ -90,7 +90,6 @@ struct mt6391_priv {
 	bool hp_on;
 	unsigned int spk_trim[2];
 	unsigned int hp_trim;
-	bool sgen;
 	struct snd_soc_jack *jack;
 	struct delayed_work jack_work;
 	int jack_type;
@@ -424,8 +423,9 @@ static int mt6391_aud_ck_event(struct snd_soc_dapm_widget *w,
 }
 
 /*
- * Each amplifier enables zero-crossing detection on its own output; it is
- * only switched off once the downlink is down, to avoid a pop.
+ * Each amplifier points the one zero-crossing detector at its own output as
+ * it powers up, so with both on it serves the last one. It is only switched
+ * off once the downlink is down, to avoid a pop.
  */
 static int mt6391_zcd_event(struct snd_soc_dapm_widget *w,
 			    struct snd_kcontrol *kcontrol, int event)
@@ -454,7 +454,11 @@ static int mt6391_dl_src_event(struct snd_soc_dapm_widget *w,
 				   MT6397_NEWIF_DL_RATE,
 				   FIELD_PREP(MT6397_NEWIF_DL_RATE,
 					      priv->dl_rate_mode));
-		/* SDM FIFO clock, scrambler, SDM, then the FIFO */
+		/*
+		 * SDM FIFO clock, scrambler, SDM, then the FIFO, and the
+		 * downlink source: MediaTek's values, whose fields are not
+		 * documented.
+		 */
 		regmap_write(map, MT6397_AFUNC_AUD_CON2, 0x0006);
 		regmap_write(map, MT6397_AFUNC_AUD_CON0, 0xc3a1);
 		regmap_write(map, MT6397_AFUNC_AUD_CON2, 0x0003);
@@ -551,22 +555,30 @@ static int mt6391_spk_volume_put(struct snd_kcontrol *kcontrol,
 {
 	struct snd_soc_component *cmpnt = snd_kcontrol_chip(kcontrol);
 	struct mt6391_priv *priv = snd_soc_component_get_drvdata(cmpnt);
+	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(cmpnt);
 	long l = ucontrol->value.integer.value[0];
 	long r = ucontrol->value.integer.value[1];
+	int ret = 0;
 
 	if (l < 0 || l > 15 || r < 0 || r > 15)
 		return -EINVAL;
-	if (l == priv->spk_gain[0] && r == priv->spk_gain[1])
-		return 0;
 
-	priv->spk_gain[0] = l;
-	priv->spk_gain[1] = r;
-	regmap_update_bits(priv->regmap, MT6397_SPK_CON9, MT6397_RG_SPKPGA_GAINL,
-			   FIELD_PREP(MT6397_RG_SPKPGA_GAINL, l));
-	regmap_update_bits(priv->regmap, MT6397_SPK_CON5, MT6397_RG_SPKPGA_GAINR,
-			   FIELD_PREP(MT6397_RG_SPKPGA_GAINR, r));
+	/* The amplifier's events read the gain too */
+	snd_soc_dapm_mutex_lock(dapm);
+	if (l != priv->spk_gain[0] || r != priv->spk_gain[1]) {
+		priv->spk_gain[0] = l;
+		priv->spk_gain[1] = r;
+		regmap_update_bits(priv->regmap, MT6397_SPK_CON9,
+				   MT6397_RG_SPKPGA_GAINL,
+				   FIELD_PREP(MT6397_RG_SPKPGA_GAINL, l));
+		regmap_update_bits(priv->regmap, MT6397_SPK_CON5,
+				   MT6397_RG_SPKPGA_GAINR,
+				   FIELD_PREP(MT6397_RG_SPKPGA_GAINR, r));
+		ret = 1;
+	}
+	snd_soc_dapm_mutex_unlock(dapm);
 
-	return 1;
+	return ret;
 }
 
 static long mt6391_hp_gain_to_ctl(unsigned int reg)
@@ -620,46 +632,6 @@ static int mt6391_hp_volume_put(struct snd_kcontrol *kcontrol,
 	return ret;
 }
 
-static int mt6391_sgen_get(struct snd_kcontrol *kcontrol,
-			   struct snd_ctl_elem_value *ucontrol)
-{
-	struct snd_soc_component *cmpnt = snd_kcontrol_chip(kcontrol);
-	struct mt6391_priv *priv = snd_soc_component_get_drvdata(cmpnt);
-
-	ucontrol->value.enumerated.item[0] = priv->sgen;
-
-	return 0;
-}
-
-static int mt6391_sgen_put(struct snd_kcontrol *kcontrol,
-			   struct snd_ctl_elem_value *ucontrol)
-{
-	struct snd_soc_component *cmpnt = snd_kcontrol_chip(kcontrol);
-	struct mt6391_priv *priv = snd_soc_component_get_drvdata(cmpnt);
-	bool sgen = ucontrol->value.enumerated.item[0];
-
-	if (ucontrol->value.enumerated.item[0] > 1)
-		return -EINVAL;
-	if (sgen == priv->sgen)
-		return 0;
-
-	if (sgen) {
-		regmap_set_bits(priv->regmap, MT6397_ANA_AFE_TOP_CON0,
-				MT6397_DL_SINE_ON);
-		regmap_update_bits(priv->regmap, MT6397_AFE_SGEN_CFG0,
-				   0xff80, 0x4400 | MT6397_SGEN_DAC_EN);
-		regmap_write(priv->regmap, MT6397_AFE_SGEN_CFG1, 0x0101);
-	} else {
-		regmap_clear_bits(priv->regmap, MT6397_ANA_AFE_TOP_CON0,
-				  MT6397_DL_SINE_ON);
-		regmap_clear_bits(priv->regmap, MT6397_AFE_SGEN_CFG0,
-				  MT6397_SGEN_DAC_EN);
-	}
-	priv->sgen = sgen;
-
-	return 1;
-}
-
 /* Register 0 mutes the speaker, 1 is 0 dB, and 2-15 are +4 dB to +17 dB */
 static const DECLARE_TLV_DB_RANGE(mt6391_spk_tlv,
 	0, 1, TLV_DB_SCALE_ITEM(-400, 400, 1),
@@ -671,10 +643,6 @@ static const DECLARE_TLV_DB_RANGE(mt6391_hp_tlv,
 	1, 13, TLV_DB_SCALE_ITEM(-400, 100, 0)
 );
 
-static const char * const mt6391_dac_source_text[] = { "Normal", "Sine" };
-
-static SOC_ENUM_SINGLE_EXT_DECL(mt6391_dac_source_enum, mt6391_dac_source_text);
-
 static const struct snd_kcontrol_new mt6391_snd_controls[] = {
 	SOC_DOUBLE_EXT_TLV("Speaker Volume", SND_SOC_NOPM, 0, 1, 15, 0,
 			   mt6391_spk_volume_get, mt6391_spk_volume_put,
@@ -683,9 +651,6 @@ static const struct snd_kcontrol_new mt6391_snd_controls[] = {
 			   MT6391_HP_GAIN_MAX, 0,
 			   mt6391_hp_volume_get, mt6391_hp_volume_put,
 			   mt6391_hp_tlv),
-	/* The sine generator replaces the stream on a running downlink */
-	SOC_ENUM_EXT("DAC Source", mt6391_dac_source_enum,
-		     mt6391_sgen_get, mt6391_sgen_put),
 };
 
 static const struct snd_soc_dapm_widget mt6391_dapm_widgets[] = {
@@ -1022,6 +987,9 @@ static int mt6391_set_jack(struct snd_soc_component *cmpnt,
 {
 	struct mt6391_priv *priv = snd_soc_component_get_drvdata(cmpnt);
 
+	if (!priv->accdet_irq)
+		return 0;
+
 	if (priv->jack)
 		mt6391_accdet_disable(priv);
 
@@ -1101,7 +1069,7 @@ static int mt6391_platform_probe(struct platform_device *pdev)
 	struct mt6391_priv *priv;
 	int ret;
 
-	priv = devm_kzalloc(&pdev->dev, sizeof(*priv), GFP_KERNEL);
+	priv = devm_kzalloc_obj(&pdev->dev, *priv);
 	if (!priv)
 		return -ENOMEM;
 
@@ -1113,16 +1081,20 @@ static int mt6391_platform_probe(struct platform_device *pdev)
 	INIT_DELAYED_WORK(&priv->jack_work, mt6391_jack_work);
 	platform_set_drvdata(pdev, priv);
 
-	priv->accdet_irq = platform_get_irq_byname(pdev, "accdet");
-	if (priv->accdet_irq < 0)
-		return priv->accdet_irq;
-
-	ret = devm_request_threaded_irq(&pdev->dev, priv->accdet_irq, NULL,
-					mt6391_accdet_irq,
-					IRQF_ONESHOT | IRQF_NO_AUTOEN,
-					"mt6391-accdet", priv);
-	if (ret)
+	ret = platform_get_irq_byname_optional(pdev, "accdet");
+	if (ret > 0) {
+		priv->accdet_irq = ret;
+		ret = devm_request_threaded_irq(&pdev->dev, priv->accdet_irq,
+						NULL, mt6391_accdet_irq,
+						IRQF_ONESHOT | IRQF_NO_AUTOEN,
+						"mt6391-accdet", priv);
+		if (ret)
+			return ret;
+	} else if (ret == -ENXIO) {
+		dev_info(&pdev->dev, "no ACCDET interrupt, no jack detection\n");
+	} else {
 		return ret;
+	}
 
 	return devm_snd_soc_register_component(&pdev->dev,
 					       &mt6391_component_driver,
