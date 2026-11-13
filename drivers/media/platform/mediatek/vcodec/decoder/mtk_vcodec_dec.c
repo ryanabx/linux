@@ -405,6 +405,13 @@ static int vidioc_vdec_g_selection(struct file *file, void *priv,
 
 	switch (s->target) {
 	case V4L2_SEL_TGT_COMPOSE_DEFAULT:
+		/*
+		 * The visible rectangle (dev-decoder.rst), which for H.264 is
+		 * the stream's cropping rectangle and not the picture size the
+		 * firmware reports, which is a whole number of macroblocks.
+		 */
+		if (!vdec_if_get_param(ctx, GET_PARAM_CROP_INFO, &s->r))
+			break;
 		s->r.left = 0;
 		s->r.top = 0;
 		s->r.width = ctx->picinfo.pic_w;
