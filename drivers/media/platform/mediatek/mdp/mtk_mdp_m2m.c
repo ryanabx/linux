@@ -38,9 +38,10 @@ struct mtk_mdp_pix_limit {
 	u16 target_rot_en_h;
 };
 
+/* MT21C is laid out in tiles of 16x32 pixels */
 static struct mtk_mdp_pix_align mtk_mdp_size_align = {
 	.org_w			= 16,
-	.org_h			= 16,
+	.org_h			= 32,
 	.target_w		= 2,
 	.target_h		= 2,
 };
@@ -229,6 +230,15 @@ static const struct mtk_mdp_fmt *mtk_mdp_try_fmt_mplane(struct mtk_mdp_ctx *ctx,
 	 */
 	org_w = pix_mp->width;
 	org_h = pix_mp->height;
+
+	/*
+	 * A tiled source covers whole tiles: round up, so that the picture
+	 * is not cut, and leave the visible part to the crop rectangle.
+	 */
+	if (fmt->align && V4L2_TYPE_IS_OUTPUT(f->type)) {
+		pix_mp->width = ALIGN(pix_mp->width, align_w);
+		pix_mp->height = ALIGN(pix_mp->height, align_h);
+	}
 
 	mtk_mdp_bound_align_image(&pix_mp->width, min_w, max_w, align_w,
 				  &pix_mp->height, min_h, max_h, align_h);
