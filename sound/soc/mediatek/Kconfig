@@ -133,7 +133,7 @@ config SND_SOC_MT8173_MAX98090
 
 config SND_SOC_MT8173_MT6391
 	tristate "ASoC Audio driver for MT8173 with MT6391 PMIC codec"
-	depends on SND_SOC_MT8173 && I2C
+	depends on SND_SOC_MT8173 && I2C && MFD_MT6397
 	select SND_SOC_MT6391
 	select SND_SOC_RT5514
 	help

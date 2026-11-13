@@ -1,16 +1,15 @@
 // SPDX-License-Identifier: GPL-2.0
-/*
- * mt8173-mt6391.c  --  MT8173 machine driver for boards using the
- * MT6391 PMIC codec (the audio block of the MT6397 PMIC), such as
- * the Amazon Fire HD 10 2017 (suez).
- *
- * Modeled on mt8173-max98090.c. The codec is reached over the SoC's
- * internal ADDA/PMIC interface, so there is no I2S format or sysclk
- * to configure here.
- */
+//
+// mt8173-mt6391.c  --  MT8173 machine driver for boards using the MT6391
+// PMIC codec (the audio block of the MT6397 PMIC)
+//
+// The codec is reached over the SoC's internal ADDA interface, so there is
+// no I2S format or system clock to configure for it.
 
+#include <linux/input.h>
 #include <linux/module.h>
 #include <linux/of.h>
+#include <sound/jack.h>
 #include <sound/soc.h>
 
 #include "../../codecs/rt5514.h"
@@ -42,15 +41,51 @@ SND_SOC_DAILINK_DEFS(rt5514_codec,
 	DAILINK_COMP_ARRAY(COMP_CODEC(NULL, "rt5514-aif1")),
 	DAILINK_COMP_ARRAY(COMP_EMPTY()));
 
-/*
- * The internal microphone is an analog part on the RT5514's AMICL input; the
- * RT5514 digitises it and hands it to the SoC over I2S, where the AFE carries
- * it on I17/I18 (I03/I04, the other source offered for "I2S Capture", is the
- * SoC's internal ADC, to which nothing is connected on these boards).
- *
- * The RT5514 takes its system clock straight from the I2S MCLK, which the AFE
- * drives at 256fs for every rate, so no PLL is involved.
- */
+static struct snd_soc_jack mt8173_mt6391_jack;
+
+static struct snd_soc_jack_pin mt8173_mt6391_jack_pins[] = {
+	{
+		.pin = "Headphone",
+		.mask = SND_JACK_HEADPHONE,
+	},
+};
+
+static const struct snd_soc_dapm_widget mt8173_mt6391_widgets[] = {
+	SND_SOC_DAPM_SPK("Speaker", NULL),
+	SND_SOC_DAPM_HP("Headphone", NULL),
+};
+
+static const struct snd_soc_dapm_route mt8173_mt6391_routes[] = {
+	{ "Speaker", NULL, "SPKL" },
+	{ "Speaker", NULL, "SPKR" },
+	{ "Headphone", NULL, "HPL" },
+	{ "Headphone", NULL, "HPR" },
+};
+
+static const struct snd_kcontrol_new mt8173_mt6391_controls[] = {
+	SOC_DAPM_PIN_SWITCH("Speaker"),
+	SOC_DAPM_PIN_SWITCH("Headphone"),
+};
+
+static int mt8173_mt6391_init(struct snd_soc_pcm_runtime *rtd)
+{
+	struct snd_soc_component *codec = snd_soc_rtd_to_codec(rtd, 0)->component;
+	struct snd_soc_jack *jack = &mt8173_mt6391_jack;
+	int ret;
+
+	ret = snd_soc_card_jack_new_pins(rtd->card, "Headset Jack",
+					 SND_JACK_HEADSET | SND_JACK_BTN_0,
+					 jack, mt8173_mt6391_jack_pins,
+					 ARRAY_SIZE(mt8173_mt6391_jack_pins));
+	if (ret)
+		return ret;
+
+	snd_jack_set_key(jack->jack, SND_JACK_BTN_0, KEY_PLAYPAUSE);
+
+	return snd_soc_component_set_jack(codec, jack, NULL);
+}
+
+/* The RT5514 runs from the I2S MCLK, which the AFE drives at 256fs */
 static int mt8173_rt5514_hw_params(struct snd_pcm_substream *substream,
 				   struct snd_pcm_hw_params *params)
 {
@@ -73,13 +108,8 @@ static const struct snd_soc_ops mt8173_rt5514_ops = {
 };
 
 /*
- * "Int Mic" gives the microphone a name to route from, following the idiom in
- * mt8173-rt5650-rt5514.c. Only the left input is populated, so capture is
- * mono.
- *
- * These live in the link's .init rather than on the card so they are only
- * registered when the RT5514 link is, since a board without one has no AMICL
- * widget to route to and card registration would fail.
+ * The microphone is on the RT5514's AMICL input. Added from the link's init,
+ * so that a board without an RT5514 has no route to a missing widget.
  */
 static const struct snd_soc_dapm_widget mt8173_rt5514_widgets[] = {
 	SND_SOC_DAPM_MIC("Int Mic", NULL),
@@ -125,12 +155,11 @@ static struct snd_soc_dai_link mt8173_mt6391_dais[] = {
 	[DAI_LINK_CODEC] = {
 		.name = "Primary Codec",
 		.no_pcm = 1,
+		.init = mt8173_mt6391_init,
+		.playback_only = 1,
 		SND_SOC_DAILINK_REG(codec),
 	},
-	/*
-	 * Kept LAST so probe can simply shorten num_links when the board has
-	 * no RT5514 -- see mt8173_mt6391_dev_probe().
-	 */
+	/* Last, so that a board without an RT5514 can drop it */
 	[DAI_LINK_RT5514] = {
 		.name = "RT5514 Codec",
 		.no_pcm = 1,
@@ -149,6 +178,12 @@ static struct snd_soc_card mt8173_mt6391_card = {
 	.owner = THIS_MODULE,
 	.dai_link = mt8173_mt6391_dais,
 	.num_links = ARRAY_SIZE(mt8173_mt6391_dais),
+	.controls = mt8173_mt6391_controls,
+	.num_controls = ARRAY_SIZE(mt8173_mt6391_controls),
+	.dapm_widgets = mt8173_mt6391_widgets,
+	.num_dapm_widgets = ARRAY_SIZE(mt8173_mt6391_widgets),
+	.dapm_routes = mt8173_mt6391_routes,
+	.num_dapm_routes = ARRAY_SIZE(mt8173_mt6391_routes),
 };
 
 static int mt8173_mt6391_dev_probe(struct platform_device *pdev)
@@ -178,28 +213,16 @@ static int mt8173_mt6391_dev_probe(struct platform_device *pdev)
 		ret = -EINVAL;
 		goto put_platform_node;
 	}
-	/*
-	 * Only the back end names the codec. The front ends use
-	 * COMP_DUMMY(), which is empty at this point and filled in by the
-	 * core during registration -- assigning an of_node to them too
-	 * fails the card sanity check with "Both Component name/of_node
-	 * are set".
-	 */
+	/* The front ends' dummy codec is filled in by the core */
 	mt8173_mt6391_dais[DAI_LINK_CODEC].codecs[0].of_node = codec_node;
 
-	/*
-	 * The RT5514 capture back end is optional. A board without one drops
-	 * the last link instead of failing to register, so playback is
-	 * unaffected either way -- which is why DAI_LINK_RT5514 is last.
-	 */
 	capture_node = of_parse_phandle(pdev->dev.of_node,
 					"mediatek,capture-codec", 0);
 	if (capture_node) {
 		mt8173_mt6391_dais[DAI_LINK_RT5514].codecs[0].of_node =
 			capture_node;
 	} else {
-		dev_info(&pdev->dev,
-			 "no 'mediatek,capture-codec'; capture back end disabled\n");
+		dev_dbg(&pdev->dev, "no capture codec, playback only\n");
 		card->num_links = DAI_LINK_RT5514;
 	}
 
@@ -217,7 +240,7 @@ put_platform_node:
 
 static const struct of_device_id mt8173_mt6391_dt_match[] = {
 	{ .compatible = "mediatek,mt8173-mt6391", },
-	{ }
+	{ /* sentinel */ }
 };
 MODULE_DEVICE_TABLE(of, mt8173_mt6391_dt_match);
 
@@ -232,7 +255,5 @@ static struct platform_driver mt8173_mt6391_driver = {
 
 module_platform_driver(mt8173_mt6391_driver);
 
-/* Module information */
 MODULE_DESCRIPTION("MT8173 MT6391 ALSA SoC machine driver");
 MODULE_LICENSE("GPL");
-MODULE_ALIAS("platform:mt8173-mt6391");
