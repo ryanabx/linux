@@ -119,6 +119,10 @@ static const struct resource mt6397_keys_resources[] = {
 	DEFINE_RES_IRQ_NAMED(MT6397_IRQ_HOMEKEY, "homekey"),
 };
 
+static const struct resource mt6397_codec_resources[] = {
+	DEFINE_RES_IRQ_NAMED(MT6397_IRQ_ACCDET, "accdet"),
+};
+
 static const struct resource mt6323_pwrc_resources[] = {
 	DEFINE_RES_MEM(MT6323_PWRC_BASE, MT6323_PWRC_SIZE),
 };
@@ -276,6 +280,8 @@ static const struct mfd_cell mt6397_devs[] = {
 		.of_compatible = "mediatek,mt6397-regulator",
 	}, {
 		.name = "mt6397-codec",
+		.num_resources = ARRAY_SIZE(mt6397_codec_resources),
+		.resources = mt6397_codec_resources,
 		.of_compatible = "mediatek,mt6397-codec",
 	}, {
 		.name = "mt6397-clk",
