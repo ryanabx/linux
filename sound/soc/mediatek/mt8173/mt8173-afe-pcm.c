@@ -65,9 +65,7 @@
 
 #define AFE_ADDA_DL_SRC2_CON0	0x0108
 #define AFE_ADDA_DL_SRC2_CON1	0x010c
-#define AFE_ADDA_UL_SRC_CON0	0x0114
 #define AFE_ADDA_UL_DL_CON0	0x0124
-#define AFE_ADDA_NEWIF_CFG1	0x013c
 #define AFE_ADDA_PREDIS_CON0	0x0260
 #define AFE_ADDA_PREDIS_CON1	0x0264
 
@@ -90,7 +88,6 @@
 /* AUDIO_TOP_CON0 (0x0000) */
 #define AUD_TCON0_PDN_DAC_PREDIS	(0x1 << 26)
 #define AUD_TCON0_PDN_DAC		(0x1 << 25)
-#define AUD_TCON0_PDN_ADC		(0x1 << 24)
 #define AUD_TCON0_PDN_SPDF		(0x1 << 21)
 #define AUD_TCON0_PDN_HDMI		(0x1 << 20)
 #define AUD_TCON0_PDN_24M		(0x1 << 9)
@@ -160,6 +157,7 @@ static const unsigned int mt8173_afe_backup_list[] = {
 
 struct mt8173_afe_private {
 	struct clk *clocks[MT8173_CLK_NUM];
+	unsigned int i2s_out_users;
 };
 
 static const struct snd_pcm_hardware mt8173_afe_hardware = {
@@ -205,6 +203,41 @@ static int mt8173_afe_i2s_fs(unsigned int sample_rate)
 	return -EINVAL;
 }
 
+/*
+ * The I2S output in AFE_I2S_CON1 also feeds the ADDA downlink, so the I2S
+ * and ADDA DAIs share it: the first user sets its rate, and the last one
+ * to stop disables it.
+ */
+static int mt8173_afe_i2s_out_config(struct mtk_base_afe *afe,
+				     unsigned int user, unsigned int val)
+{
+	struct mt8173_afe_private *afe_priv = afe->platform_priv;
+	unsigned int con1;
+
+	if (afe_priv->i2s_out_users & ~user) {
+		regmap_read(afe->regmap, AFE_I2S_CON1, &con1);
+		if ((con1 ^ val) & AFE_I2S_CON1_RATE(0xf))
+			return -EBUSY;
+	} else {
+		regmap_update_bits(afe->regmap, AFE_I2S_CON1,
+				   ~AFE_I2S_CON1_EN, val);
+	}
+
+	afe_priv->i2s_out_users |= user;
+	return 0;
+}
+
+static void mt8173_afe_i2s_out_release(struct mtk_base_afe *afe,
+				       unsigned int user)
+{
+	struct mt8173_afe_private *afe_priv = afe->platform_priv;
+
+	afe_priv->i2s_out_users &= ~user;
+	if (!afe_priv->i2s_out_users)
+		regmap_update_bits(afe->regmap, AFE_I2S_CON1,
+				   AFE_I2S_CON1_EN, 0);
+}
+
 static int mt8173_afe_set_i2s(struct mtk_base_afe *afe, unsigned int rate)
 {
 	unsigned int val;
@@ -229,8 +262,7 @@ static int mt8173_afe_set_i2s(struct mtk_base_afe *afe, unsigned int rate)
 	      AFE_I2S_CON1_RATE(fs) |
 	      AFE_I2S_CON1_FORMAT_I2S;
 
-	regmap_update_bits(afe->regmap, AFE_I2S_CON1, ~AFE_I2S_CON1_EN, val);
-	return 0;
+	return mt8173_afe_i2s_out_config(afe, BIT(MT8173_AFE_IO_I2S), val);
 }
 
 static void mt8173_afe_set_i2s_enable(struct mtk_base_afe *afe, bool enable)
@@ -245,7 +277,10 @@ static void mt8173_afe_set_i2s_enable(struct mtk_base_afe *afe, bool enable)
 	regmap_update_bits(afe->regmap, AFE_I2S_CON2, 0x1, enable);
 
 	/* output */
-	regmap_update_bits(afe->regmap, AFE_I2S_CON1, 0x1, enable);
+	if (enable)
+		regmap_update_bits(afe->regmap, AFE_I2S_CON1, 0x1, 0x1);
+	else
+		mt8173_afe_i2s_out_release(afe, BIT(MT8173_AFE_IO_I2S));
 }
 
 /*
@@ -277,8 +312,7 @@ static int mt8173_afe_adda_startup(struct snd_pcm_substream *substream,
 		return 0;
 
 	regmap_update_bits(afe->regmap, AUDIO_TOP_CON0,
-			   AUD_TCON0_PDN_DAC_PREDIS | AUD_TCON0_PDN_DAC |
-			   AUD_TCON0_PDN_ADC, 0);
+			   AUD_TCON0_PDN_DAC_PREDIS | AUD_TCON0_PDN_DAC, 0);
 	return 0;
 }
 
@@ -291,14 +325,11 @@ static void mt8173_afe_adda_shutdown(struct snd_pcm_substream *substream,
 		return;
 
 	regmap_update_bits(afe->regmap, AFE_ADDA_DL_SRC2_CON0, 0x1, 0);
-	regmap_update_bits(afe->regmap, AFE_I2S_CON1, 0x1, 0);
-	regmap_update_bits(afe->regmap, AFE_ADDA_UL_SRC_CON0, 0x1, 0);
+	mt8173_afe_i2s_out_release(afe, BIT(MT8173_AFE_IO_PMIC));
 	regmap_update_bits(afe->regmap, AFE_ADDA_UL_DL_CON0, 0x1, 0);
 	regmap_update_bits(afe->regmap, AUDIO_TOP_CON0,
-			   AUD_TCON0_PDN_DAC_PREDIS | AUD_TCON0_PDN_DAC |
-			   AUD_TCON0_PDN_ADC,
-			   AUD_TCON0_PDN_DAC_PREDIS | AUD_TCON0_PDN_DAC |
-			   AUD_TCON0_PDN_ADC);
+			   AUD_TCON0_PDN_DAC_PREDIS | AUD_TCON0_PDN_DAC,
+			   AUD_TCON0_PDN_DAC_PREDIS | AUD_TCON0_PDN_DAC);
 }
 
 static int mt8173_afe_adda_prepare(struct snd_pcm_substream *substream,
@@ -306,64 +337,34 @@ static int mt8173_afe_adda_prepare(struct snd_pcm_substream *substream,
 {
 	struct mtk_base_afe *afe = snd_soc_dai_get_drvdata(dai);
 	unsigned int rate = substream->runtime->rate;
+	int dl_rate = mt8173_afe_adda_dl_rate(rate);
+	int fs = mt8173_afe_i2s_fs(rate);
+	unsigned int con0;
+	int ret;
 
-	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
-		int dl_rate = mt8173_afe_adda_dl_rate(rate);
-		int fs = mt8173_afe_i2s_fs(rate);
-		unsigned int con0;
+	if (dl_rate < 0 || fs < 0)
+		return -EINVAL;
 
-		if (dl_rate < 0 || fs < 0)
-			return -EINVAL;
+	/* internal I2S towards the DAC: 16 bit, normal clock */
+	ret = mt8173_afe_i2s_out_config(afe, BIT(MT8173_AFE_IO_PMIC),
+					AFE_I2S_CON1_RATE(fs) |
+					AFE_I2S_CON1_FORMAT_I2S);
+	if (ret)
+		return ret;
 
-		/* no pre-distortion */
-		regmap_write(afe->regmap, AFE_ADDA_PREDIS_CON0, 0);
-		regmap_write(afe->regmap, AFE_ADDA_PREDIS_CON1, 0);
+	/* no pre-distortion */
+	regmap_write(afe->regmap, AFE_ADDA_PREDIS_CON0, 0);
+	regmap_write(afe->regmap, AFE_ADDA_PREDIS_CON1, 0);
 
-		/* downlink sample rate converter, -0.3 dB as the vendor does */
-		con0 = (dl_rate << 28) | (0x03 << 24) | (0x03 << 11) | (0x01 << 1);
-		if (rate == 8000 || rate == 16000)
-			con0 |= 0x01 << 5;	/* voice mode */
-		regmap_write(afe->regmap, AFE_ADDA_DL_SRC2_CON0, con0);
-		regmap_write(afe->regmap, AFE_ADDA_DL_SRC2_CON1, 0xf74f0000);
+	/* downlink sample rate converter, at -0.3 dB */
+	con0 = (dl_rate << 28) | (0x03 << 24) | (0x03 << 11) | (0x01 << 1);
+	if (rate == 8000 || rate == 16000)
+		con0 |= 0x01 << 5;	/* voice mode */
+	regmap_write(afe->regmap, AFE_ADDA_DL_SRC2_CON0, con0);
+	regmap_write(afe->regmap, AFE_ADDA_DL_SRC2_CON1, 0xf74f0000);
 
-		/* internal I2S towards the DAC: 16 bit, normal clock */
-		regmap_update_bits(afe->regmap, AFE_I2S_CON1,
-				   ~(u32)AFE_I2S_CON1_EN,
-				   AFE_I2S_CON1_RATE(fs) |
-				   AFE_I2S_CON1_FORMAT_I2S);
-
-		regmap_update_bits(afe->regmap, AFE_ADDA_DL_SRC2_CON0, 0x1, 0x1);
-		regmap_update_bits(afe->regmap, AFE_I2S_CON1, 0x1, 0x1);
-	} else {
-		unsigned int voice_mode;
-
-		switch (rate) {
-		case 8000:
-			voice_mode = 0;
-			break;
-		case 16000:
-			voice_mode = 1;
-			break;
-		case 32000:
-			voice_mode = 2;
-			break;
-		case 48000:
-			voice_mode = 3;
-			break;
-		default:
-			return -EINVAL;
-		}
-
-		/* I03/I04 from the internal ADC, i.e. the PMIC */
-		regmap_update_bits(afe->regmap, AFE_ADDA_TOP_CON0, 0x1, 0x0);
-		regmap_update_bits(afe->regmap, AFE_ADDA_UL_SRC_CON0,
-				   0x001e0000,
-				   ((voice_mode << 2) | voice_mode) << 17);
-		regmap_update_bits(afe->regmap, AFE_ADDA_NEWIF_CFG1,
-				   0xc00, ((voice_mode < 3) ? 1 : 3) << 10);
-		regmap_update_bits(afe->regmap, AFE_ADDA_UL_SRC_CON0, 0x1, 0x1);
-	}
-
+	regmap_update_bits(afe->regmap, AFE_ADDA_DL_SRC2_CON0, 0x1, 0x1);
+	regmap_update_bits(afe->regmap, AFE_I2S_CON1, 0x1, 0x1);
 	regmap_update_bits(afe->regmap, AFE_ADDA_UL_DL_CON0, 0x1, 0x1);
 	return 0;
 }
@@ -718,14 +719,6 @@ static struct snd_soc_dai_driver mt8173_afe_pcm_dais[] = {
 			.rates = SNDRV_PCM_RATE_8000_48000,
 			.formats = SNDRV_PCM_FMTBIT_S16_LE,
 		},
-		.capture = {
-			.stream_name = "ADDA Capture",
-			.channels_min = 1,
-			.channels_max = 2,
-			.rates = SNDRV_PCM_RATE_8000 | SNDRV_PCM_RATE_16000 |
-				 SNDRV_PCM_RATE_32000 | SNDRV_PCM_RATE_48000,
-			.formats = SNDRV_PCM_FMTBIT_S16_LE,
-		},
 		.ops = &mt8173_afe_adda_ops,
 	},
 };
@@ -814,8 +807,6 @@ static const struct snd_soc_dapm_route mt8173_afe_pcm_routes[] = {
 	{"VUL", NULL, "O10"},
 	{"I03", NULL, "I2S Capture"},
 	{"I04", NULL, "I2S Capture"},
-	{"I03", NULL, "ADDA Capture"},
-	{"I04", NULL, "ADDA Capture"},
 	{"I17", NULL, "I2S Capture"},
 	{"I18", NULL, "I2S Capture"},
 	{ "O03", "I05 Switch", "I05" },
