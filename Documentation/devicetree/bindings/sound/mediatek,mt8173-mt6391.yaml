@@ -11,7 +11,7 @@ maintainers:
 
 description:
   Sound card for MT8173 boards whose playback codec is the audio block of the
-  MT6397 PMIC, known as the MT6391, reached over the SoC's internal ADDA
+  MT6391 PMIC, an MT6397 variant, reached over the SoC's internal ADDA
   interface. Capture, when fitted, comes from a Realtek RT5514 on the I2S
   interface.
 
@@ -20,14 +20,12 @@ properties:
     const: mediatek,mt8173-mt6391
 
   mediatek,audio-codec:
-    $ref: /schemas/types.yaml#/definitions/phandle
-    description: The audio codec node of the MT6397 PMIC.
-
-  mediatek,capture-codec:
-    $ref: /schemas/types.yaml#/definitions/phandle
+    $ref: /schemas/types.yaml#/definitions/phandle-array
     description:
-      The RT5514 carrying the microphone, on the I2S interface. Without it
-      the card has no capture.
+      The audio codec node of the PMIC, then, when fitted, the RT5514
+      carrying the microphone on I2S.
+    minItems: 1
+    maxItems: 2
 
   mediatek,platform:
     $ref: /schemas/types.yaml#/definitions/phandle
@@ -44,9 +42,7 @@ examples:
   - |
     sound {
         compatible = "mediatek,mt8173-mt6391";
-        mediatek,audio-codec = <&mt6397_codec>;
-        mediatek,capture-codec = <&rt5514>;
+        mediatek,audio-codec = <&mt6397_codec>, <&rt5514>;
         mediatek,platform = <&afe>;
-        pinctrl-names = "default";
-        pinctrl-0 = <&audio_pins_default>;
     };
+...
