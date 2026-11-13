@@ -289,13 +289,12 @@
 
 	sound {
 		compatible = "mediatek,mt8173-mt6391";
-		mediatek,audio-codec = <&mt6397codec>;
 		/*
 		 * Capture comes from the RT5514 over I2S2, not from the MT6397.
 		 * The AFE carries that stream to I17/I18 -> O09/O10 -> VUL;
-		 * this adds the back end that lets that leg power up.
+		 * the second codec adds the back end that lets that leg power up.
 		 */
-		mediatek,capture-codec = <&rt5514>;
+		mediatek,audio-codec = <&mt6397codec>, <&rt5514>;
 		mediatek,platform = <&afe>;
 		pinctrl-names = "default";
 		pinctrl-0 = <&audio_pins_default>;

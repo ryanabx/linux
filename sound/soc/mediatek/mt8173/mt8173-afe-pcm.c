@@ -356,7 +356,12 @@ static int mt8173_afe_adda_prepare(struct snd_pcm_substream *substream,
 	regmap_write(afe->regmap, AFE_ADDA_PREDIS_CON0, 0);
 	regmap_write(afe->regmap, AFE_ADDA_PREDIS_CON1, 0);
 
-	/* downlink sample rate converter, at -0.3 dB */
+	/*
+	 * Downlink sample rate converter, as MediaTek sets it up: input rate
+	 * [31:28], output select 3 [25:24], both channels unmuted [12:11] and
+	 * the gain applied [1], with CON1's gain [31:16] at -0.3 dB. The
+	 * field layout is that of MT8183's AFE (mt8183-reg.h).
+	 */
 	con0 = (dl_rate << 28) | (0x03 << 24) | (0x03 << 11) | (0x01 << 1);
 	if (rate == 8000 || rate == 16000)
 		con0 |= 0x01 << 5;	/* voice mode */
