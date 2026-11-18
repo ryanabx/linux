@@ -133,6 +133,9 @@ struct pvr_device_quirks {
 	bool has_brn63553;
 	bool has_brn66011;
 	bool has_brn71242;
+
+	/* Not reported in the firmware's device info. */
+	bool has_brn65273;
 };
 
 /*

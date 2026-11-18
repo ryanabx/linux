@@ -35,6 +35,13 @@
 /* 0x00_0040_0000 - 0x7F_FFC0_0000 **/
 /* 4 MiB to 512 GiB, size of 512 GiB less 4 MiB : RESERVED */
 
+/*
+ * Inside the reserved range above, 0x65_C000_0000: one page mapped by the
+ * kernel in each user context on cores with BRN 65273 (see
+ * ROGUE_BRN65273_INIA_BASE below).
+ */
+#define ROGUE_BRN65273_PM_BASE 0x65C0000000ull
+
 /* 0x80_0000_0000 ************************************************************/
 
 /* 0x80_0000_0000 - 0x9F_FFFF_FFFF **/
@@ -107,6 +114,16 @@
 
 /* 0xF3_0000_0000 - 0xFF_FFFF_FFFF */
 /* 972 GiB to 1024 GiB, size of 52 GiB : FREE */
+
+/*
+ * BRN 65273: on affected cores the firmware's workaround makes the GPU write
+ * to fixed addresses in every user context: the TE writes region headers at
+ * two addresses 4 GiB apart (INIA and INIB), and the PM writes at
+ * ROGUE_BRN65273_PM_BASE. The kernel maps one zeroed page at each; all three
+ * are outside the heaps above, so userspace can't map or unmap them.
+ */
+#define ROGUE_BRN65273_INIA_BASE 0xF800000000ull
+#define ROGUE_BRN65273_INIB_BASE 0xF900000000ull
 
 /* 0xFF_FFFF_FFFF ************************************************************/
 
