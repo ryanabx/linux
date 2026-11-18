@@ -2292,12 +2292,17 @@ int mt7615_mac_set_beacon_filter(struct mt7615_phy *phy,
 	if (err)
 		return err;
 
+	/* Keep phy->rxfilter in sync: mt7615_configure_filter() writes it
+	 * to MT_WF_RFCR as a whole.
+	 */
 	if (phy->n_beacon_vif) {
 		vif->driver_flags &= ~IEEE80211_VIF_BEACON_FILTER;
+		phy->rxfilter &= ~MT_WF_RFCR_DROP_OTHER_BEACON;
 		mt76_clear(dev, MT_WF_RFCR(ext_phy),
 			   MT_WF_RFCR_DROP_OTHER_BEACON);
 	} else {
 		vif->driver_flags |= IEEE80211_VIF_BEACON_FILTER;
+		phy->rxfilter |= MT_WF_RFCR_DROP_OTHER_BEACON;
 		mt76_set(dev, MT_WF_RFCR(ext_phy),
 			 MT_WF_RFCR_DROP_OTHER_BEACON);
 	}
