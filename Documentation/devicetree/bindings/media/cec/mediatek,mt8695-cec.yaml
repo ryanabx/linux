@@ -1,0 +1,65 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: http://devicetree.org/schemas/media/cec/mediatek,mt8695-cec.yaml#
+$schema: http://devicetree.org/meta-schemas/core.yaml#
+
+title: MediaTek MT8695 HDMI CEC controller
+
+maintainers:
+  - Ryan Brue <ryanbrue.dev@gmail.com>
+
+description:
+  The second-generation HDMI CEC controller of the MediaTek MT8695. It
+  handles message framing, up to three logical addresses and
+  retransmission in hardware. The SoC also has the first-generation CEC
+  block, which selects which of the two drives the CEC pin, so the
+  controller needs that block's registers too.
+
+allOf:
+  - $ref: cec-common.yaml#
+
+properties:
+  compatible:
+    const: mediatek,mt8695-cec
+
+  reg:
+    items:
+      - description: CEC controller registers
+      - description: first-generation CEC block registers
+
+  reg-names:
+    items:
+      - const: cec
+      - const: legacy
+
+  interrupts:
+    maxItems: 1
+
+  clocks:
+    maxItems: 1
+
+required:
+  - compatible
+  - reg
+  - reg-names
+  - interrupts
+  - clocks
+  - hdmi-phandle
+
+unevaluatedProperties: false
+
+examples:
+  - |
+    #include <dt-bindings/clock/mediatek,mt8695-clk.h>
+    #include <dt-bindings/interrupt-controller/arm-gic.h>
+    #include <dt-bindings/interrupt-controller/irq.h>
+
+    cec@10002400 {
+        compatible = "mediatek,mt8695-cec";
+        reg = <0x10002400 0x100>, <0x10002000 0x100>;
+        reg-names = "cec", "legacy";
+        interrupts = <GIC_SPI 175 IRQ_TYPE_LEVEL_LOW>;
+        clocks = <&infracfg CLK_INFRA_CEC>;
+        hdmi-phandle = <&hdmi>;
+    };
