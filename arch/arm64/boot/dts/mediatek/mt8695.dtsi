@@ -623,6 +623,26 @@
 			status = "disabled";
 		};
 
+		gpu: gpu@13000000 {
+			compatible = "mediatek,mt8695-gpu", "img,img-ge8300",
+				     "img,img-rogue";
+			reg = <0 0x13000000 0 0x80000>;
+			interrupts = <GIC_SPI 225 IRQ_TYPE_LEVEL_LOW>;
+			clocks = <&mfgcfg CLK_MFG_BG3D>,
+				 <&mfgcfg CLK_MFG_BMEM>,
+				 <&mfgcfg CLK_MFG_BAXI>;
+			clock-names = "core", "mem", "sys";
+			power-domains = <&spm MT8695_POWER_DOMAIN_MFG>;
+			power-domain-names = "a";
+			assigned-clocks = <&topckgen CLK_TOP_MFG_SEL>,
+					  <&topckgen CLK_TOP_AXI_MFG_IN_AS_SEL>,
+					  <&topckgen CLK_TOP_SLOW_MFG_SEL>;
+			assigned-clock-parents = <&topckgen CLK_TOP_MMPLL>,
+						 <&topckgen CLK_TOP_AXI_SEL>,
+						 <&topckgen CLK_TOP_UNIVPLL2_D4>;
+			status = "disabled";
+		};
+
 		mfgcfg: clock-controller@13ffe000 {
 			compatible = "mediatek,mt8695-mfgcfg", "syscon";
 			reg = <0 0x13ffe000 0 0x1000>;
