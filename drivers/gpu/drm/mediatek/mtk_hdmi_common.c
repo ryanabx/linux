@@ -446,6 +446,13 @@ struct mtk_hdmi *mtk_hdmi_common_probe(struct platform_device *pdev)
 		hdmi->bridge.ops |= DRM_BRIDGE_OP_HDMI |
 				    DRM_BRIDGE_OP_HDMI_SPD_INFOFRAME;
 
+	/*
+	 * A CEC controller outside this block (one that points at it with
+	 * hdmi-phandle) learns the physical address through a CEC notifier.
+	 */
+	hdmi->bridge.ops |= DRM_BRIDGE_OP_HDMI_CEC_NOTIFIER;
+	hdmi->bridge.hdmi_cec_dev = dev;
+
 	hdmi->bridge.type = DRM_MODE_CONNECTOR_HDMIA;
 	hdmi->bridge.ddc = hdmi->ddc_adpt;
 	hdmi->bridge.vendor = "MediaTek";
