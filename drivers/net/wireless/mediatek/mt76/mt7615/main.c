@@ -255,6 +255,7 @@ static int mt7615_add_interface(struct ieee80211_hw *hw,
 	/* a beaconing vif wants other BSSs' beacons and no runtime PM */
 	if (mt7615_vif_sends_beacons(vif)) {
 		phy->n_beacon_vif++;
+		phy->rxfilter &= ~MT_WF_RFCR_DROP_OTHER_BEACON;
 		mt76_clear(dev, MT_WF_RFCR(ext_phy),
 			   MT_WF_RFCR_DROP_OTHER_BEACON);
 	}
