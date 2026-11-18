@@ -176,6 +176,18 @@ static int get_omac_idx(enum nl80211_iftype type, u64 mask)
 	return -1;
 }
 
+static bool mt7615_vif_sends_beacons(struct ieee80211_vif *vif)
+{
+	switch (vif->type) {
+	case NL80211_IFTYPE_AP:
+	case NL80211_IFTYPE_MESH_POINT:
+	case NL80211_IFTYPE_ADHOC:
+		return true;
+	default:
+		return false;
+	}
+}
+
 static int mt7615_add_interface(struct ieee80211_hw *hw,
 				struct ieee80211_vif *vif)
 {
@@ -237,6 +249,15 @@ static int mt7615_add_interface(struct ieee80211_hw *hw,
 	}
 
 	ret = mt7615_mcu_add_dev_info(phy, vif, true);
+	if (ret)
+		goto out;
+
+	/* a beaconing vif wants other BSSs' beacons and no runtime PM */
+	if (mt7615_vif_sends_beacons(vif)) {
+		phy->n_beacon_vif++;
+		mt76_clear(dev, MT_WF_RFCR(ext_phy),
+			   MT_WF_RFCR_DROP_OTHER_BEACON);
+	}
 out:
 	mt7615_mutex_release(dev);
 
@@ -266,6 +287,9 @@ static void mt7615_remove_interface(struct ieee80211_hw *hw,
 	mt76_connac_free_pending_tx_skbs(&dev->pm, &msta->wcid);
 
 	mt7615_mcu_add_dev_info(phy, vif, false);
+
+	if (mt7615_vif_sends_beacons(vif))
+		phy->n_beacon_vif--;
 
 	rcu_assign_pointer(dev->mt76.wcid[idx], NULL);
 
