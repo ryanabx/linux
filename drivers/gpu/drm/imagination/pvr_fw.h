@@ -189,6 +189,7 @@ struct pvr_fw_defs {
 	 *                     to report FW idle before proceeding.
 	 *
 	 * @pvr_dev: Target PowerVR device.
+	 * @hard_reset: The FW was not asked to idle before this stop.
 	 * @wait[out]: Whether the FW stop sequence should wait for FW idle.
 	 *
 	 * This function is optional. The assumption is that we must always wait
@@ -199,7 +200,7 @@ struct pvr_fw_defs {
 	 *  * 0 on success.
 	 *  * Any appropriate error on failure.
 	 */
-	int (*must_wait_fw_idle)(struct pvr_device *pvr_dev, bool *wait);
+	int (*must_wait_fw_idle)(struct pvr_device *pvr_dev, bool hard_reset, bool *wait);
 
 	/**
 	 * @has_fixed_data_addr: Specify whether the firmware fixed data must be loaded at the

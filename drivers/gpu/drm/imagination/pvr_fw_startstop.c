@@ -207,13 +207,14 @@ static inline bool layout_is_mars(struct pvr_device *pvr_dev)
 	return layout_mars_value > 0;
 }
 
-static inline int must_wait_fw_idle_before_stop(struct pvr_device *pvr_dev)
+static inline int must_wait_fw_idle_before_stop(struct pvr_device *pvr_dev, bool hard_reset)
 {
 	bool wait_fw_idle = true;
 	int err;
 
 	if (pvr_dev->fw_dev.defs->must_wait_fw_idle) {
-		err = pvr_dev->fw_dev.defs->must_wait_fw_idle(pvr_dev, &wait_fw_idle);
+		err = pvr_dev->fw_dev.defs->must_wait_fw_idle(pvr_dev, hard_reset,
+							      &wait_fw_idle);
 		if (err)
 			return err;
 	}
@@ -224,13 +225,14 @@ static inline int must_wait_fw_idle_before_stop(struct pvr_device *pvr_dev)
 /**
  * pvr_fw_stop() - Stop FW processor
  * @pvr_dev: Target PowerVR device.
+ * @hard_reset: The FW processor was not asked to idle first.
  *
  * Returns:
  *  * 0 on success, or
  *  * Any error returned by pvr_cr_poll_reg32().
  */
 int
-pvr_fw_stop(struct pvr_device *pvr_dev)
+pvr_fw_stop(struct pvr_device *pvr_dev, bool hard_reset)
 {
 	const u32 sidekick_idle_mask = ROGUE_CR_SIDEKICK_IDLE_MASKFULL &
 				       ~(ROGUE_CR_SIDEKICK_IDLE_GARTEN_EN |
@@ -328,7 +330,7 @@ pvr_fw_stop(struct pvr_device *pvr_dev)
 		if (err)
 			return err;
 
-		wait_fw_idle = must_wait_fw_idle_before_stop(pvr_dev);
+		wait_fw_idle = must_wait_fw_idle_before_stop(pvr_dev, hard_reset);
 		if (wait_fw_idle < 0)
 			return wait_fw_idle;
 

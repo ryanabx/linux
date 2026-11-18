@@ -4,10 +4,12 @@
 #ifndef PVR_FW_STARTSTOP_H
 #define PVR_FW_STARTSTOP_H
 
+#include <linux/types.h>
+
 /* Forward declaration from pvr_device.h. */
 struct pvr_device;
 
 int pvr_fw_start(struct pvr_device *pvr_dev);
-int pvr_fw_stop(struct pvr_device *pvr_dev);
+int pvr_fw_stop(struct pvr_device *pvr_dev, bool hard_reset);
 
 #endif /* PVR_FW_STARTSTOP_H */

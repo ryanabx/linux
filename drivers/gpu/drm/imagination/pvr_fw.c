@@ -975,7 +975,7 @@ pvr_fw_init(struct pvr_device *pvr_dev)
 	return 0;
 
 err_fw_stop:
-	pvr_fw_stop(pvr_dev);
+	pvr_fw_stop(pvr_dev, false);
 
 err_destroy_structures:
 	pvr_fw_destroy_structures(pvr_dev);

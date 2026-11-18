@@ -143,7 +143,7 @@ pvr_power_fw_disable(struct pvr_device *pvr_dev, bool hard_reset, bool rpm_suspe
 		disable_irq(pvr_dev->irq);
 	}
 
-	err = pvr_fw_stop(pvr_dev);
+	err = pvr_fw_stop(pvr_dev, hard_reset);
 	if (err && rpm_suspend)
 		enable_irq(pvr_dev->irq);
 
@@ -165,7 +165,7 @@ pvr_power_fw_enable(struct pvr_device *pvr_dev, bool rpm_resume)
 	err = pvr_wait_for_fw_boot(pvr_dev);
 	if (err) {
 		drm_err(from_pvr_device(pvr_dev), "Firmware failed to boot\n");
-		pvr_fw_stop(pvr_dev);
+		pvr_fw_stop(pvr_dev, false);
 		goto out;
 	}
 
