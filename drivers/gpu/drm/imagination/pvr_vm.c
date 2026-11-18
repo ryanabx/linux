@@ -231,7 +231,7 @@ static int
 pvr_vm_bind_op_map_init(struct pvr_vm_bind_op *bind_op,
 			struct pvr_vm_context *vm_ctx,
 			struct pvr_gem_object *pvr_obj, u64 offset,
-			u64 device_addr, u64 size)
+			u64 device_addr, u64 size, bool kernel_owned)
 {
 	struct drm_gem_object *obj = gem_from_pvr_gem(pvr_obj);
 	const bool is_user = vm_ctx != vm_ctx->pvr_dev->kernel_vm_ctx;
@@ -243,7 +243,7 @@ pvr_vm_bind_op_map_init(struct pvr_vm_bind_op *bind_op,
 	if (check_add_overflow(offset, size, &offset_plus_size))
 		return -EINVAL;
 
-	if (is_user &&
+	if (is_user && !kernel_owned &&
 	    !pvr_find_heap_containing(vm_ctx->pvr_dev, device_addr, size)) {
 		return -EINVAL;
 	}
@@ -526,6 +526,8 @@ fw_mem_context_init(void *cpu_ptr, void *priv)
 	fw_mem_ctx->page_cat_base_reg_set = ROGUE_FW_BIF_INVALID_PCSET;
 }
 
+static int pvr_vm_map_brn65273(struct pvr_vm_context *vm_ctx);
+
 /**
  * pvr_vm_create_context() - Create a new VM context.
  * @pvr_dev: Target PowerVR device.
@@ -593,6 +595,14 @@ pvr_vm_create_context(struct pvr_device *pvr_dev, bool is_userspace_context)
 
 	mutex_init(&vm_ctx->lock);
 	kref_init(&vm_ctx->ref_count);
+
+	if (is_userspace_context && PVR_HAS_QUIRK(pvr_dev, 65273)) {
+		err = pvr_vm_map_brn65273(vm_ctx);
+		if (err) {
+			pvr_vm_context_put(vm_ctx);
+			return ERR_PTR(err);
+		}
+	}
 
 	return vm_ctx;
 
@@ -701,6 +711,47 @@ pvr_vm_lock_extra(struct drm_gpuvm_exec *vm_exec)
 	return drm_exec_lock_obj(&vm_exec->exec, gem_from_pvr_gem(pvr_obj));
 }
 
+static int
+pvr_vm_map_common(struct pvr_vm_context *vm_ctx, struct pvr_gem_object *pvr_obj,
+		  u64 pvr_obj_offset, u64 device_addr, u64 size,
+		  bool kernel_owned)
+{
+	struct pvr_vm_bind_op bind_op = {0};
+	struct drm_gpuvm_exec vm_exec = {
+		.vm = &vm_ctx->gpuvm_mgr,
+		.flags = DRM_EXEC_INTERRUPTIBLE_WAIT |
+			 DRM_EXEC_IGNORE_DUPLICATES,
+		.extra = {
+			.fn = pvr_vm_lock_extra,
+			.priv = &bind_op,
+		},
+	};
+
+	int err = pvr_vm_bind_op_map_init(&bind_op, vm_ctx, pvr_obj,
+					  pvr_obj_offset, device_addr,
+					  size, kernel_owned);
+
+	if (err)
+		return err;
+
+	pvr_gem_object_get(pvr_obj);
+
+	mutex_lock(&vm_ctx->lock);
+	err = drm_gpuvm_exec_lock(&vm_exec);
+	if (err)
+		goto err_cleanup;
+
+	err = pvr_vm_bind_op_exec(&bind_op);
+
+	drm_gpuvm_exec_unlock(&vm_exec);
+
+err_cleanup:
+	mutex_unlock(&vm_ctx->lock);
+	pvr_vm_bind_op_fini(&bind_op);
+
+	return err;
+}
+
 /**
  * pvr_vm_map() - Map a section of physical memory into a section of
  * device-virtual memory.
@@ -727,38 +778,52 @@ int
 pvr_vm_map(struct pvr_vm_context *vm_ctx, struct pvr_gem_object *pvr_obj,
 	   u64 pvr_obj_offset, u64 device_addr, u64 size)
 {
-	struct pvr_vm_bind_op bind_op = {0};
-	struct drm_gpuvm_exec vm_exec = {
-		.vm = &vm_ctx->gpuvm_mgr,
-		.flags = DRM_EXEC_INTERRUPTIBLE_WAIT |
-			 DRM_EXEC_IGNORE_DUPLICATES,
-		.extra = {
-			.fn = pvr_vm_lock_extra,
-			.priv = &bind_op,
-		},
-	};
+	return pvr_vm_map_common(vm_ctx, pvr_obj, pvr_obj_offset, device_addr,
+				 size, false);
+}
 
-	int err = pvr_vm_bind_op_map_init(&bind_op, vm_ctx, pvr_obj,
-					  pvr_obj_offset, device_addr,
-					  size);
+/*
+ * Pages the kernel maps in every user VM context on cores with BRN 65273.
+ * See ROGUE_BRN65273_INIA_BASE.
+ */
+static const u64 pvr_brn65273_addrs[] = {
+	ROGUE_BRN65273_INIA_BASE,
+	ROGUE_BRN65273_INIB_BASE,
+	ROGUE_BRN65273_PM_BASE,
+};
 
-	if (err)
-		return err;
+/**
+ * pvr_vm_map_brn65273() - Map the pages the BRN 65273 workaround writes to.
+ * @vm_ctx: Target user VM context.
+ *
+ * Maps one page of a zeroed object, private to @vm_ctx, at each address in
+ * pvr_brn65273_addrs. The mappings hold the only reference to the object
+ * and go away with the other mappings in pvr_vm_unmap_all().
+ *
+ * Return:
+ *  * 0 on success, or
+ *  * Any error returned by pvr_gem_object_create() or pvr_vm_map_common().
+ */
+static int
+pvr_vm_map_brn65273(struct pvr_vm_context *vm_ctx)
+{
+	struct pvr_gem_object *pvr_obj;
+	int err = 0;
 
-	pvr_gem_object_get(pvr_obj);
+	pvr_obj = pvr_gem_object_create(vm_ctx->pvr_dev,
+					ARRAY_SIZE(pvr_brn65273_addrs) * PAGE_SIZE,
+					0);
+	if (IS_ERR(pvr_obj))
+		return PTR_ERR(pvr_obj);
 
-	mutex_lock(&vm_ctx->lock);
-	err = drm_gpuvm_exec_lock(&vm_exec);
-	if (err)
-		goto err_cleanup;
+	for (u32 i = 0; i < ARRAY_SIZE(pvr_brn65273_addrs); i++) {
+		err = pvr_vm_map_common(vm_ctx, pvr_obj, i * PAGE_SIZE,
+					pvr_brn65273_addrs[i], PAGE_SIZE, true);
+		if (err)
+			break;
+	}
 
-	err = pvr_vm_bind_op_exec(&bind_op);
-
-	drm_gpuvm_exec_unlock(&vm_exec);
-
-err_cleanup:
-	mutex_unlock(&vm_ctx->lock);
-	pvr_vm_bind_op_fini(&bind_op);
+	pvr_gem_object_put(pvr_obj);
 
 	return err;
 }

@@ -93,6 +93,16 @@ void pvr_device_info_set_quirks(struct pvr_device *pvr_dev, const u64 *quirks, u
 
 	pvr_device_info_set_common(pvr_dev, quirks, quirks_size, quirks_mapping,
 				   ARRAY_SIZE(quirks_mapping));
+
+	/*
+	 * Quirks the driver handles that have no bit in the firmware device
+	 * info as this driver knows it (enum pvr_fw_has_brn).
+	 */
+	switch (pvr_gpu_id_to_packed_bvnc(&pvr_dev->gpu_id)) {
+	case PVR_PACKED_BVNC(22, 68, 54, 30):
+		pvr_dev->quirks.has_brn65273 = true;
+		break;
+	}
 }
 
 /**
