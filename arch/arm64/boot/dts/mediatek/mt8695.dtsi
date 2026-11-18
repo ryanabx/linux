@@ -220,6 +220,16 @@
 			#clock-cells = <1>;
 		};
 
+		cec: cec@10002400 {
+			compatible = "mediatek,mt8695-cec";
+			reg = <0 0x10002400 0 0x100>, <0 0x10002000 0 0x100>;
+			reg-names = "cec", "legacy";
+			interrupts = <GIC_SPI 175 IRQ_TYPE_LEVEL_LOW>;
+			clocks = <&infracfg CLK_INFRA_CEC>;
+			hdmi-phandle = <&hdmi>;
+			status = "disabled";
+		};
+
 		pericfg: clock-controller@10003000 {
 			compatible = "mediatek,mt8695-pericfg", "syscon";
 			reg = <0 0x10003000 0 0x1000>;
