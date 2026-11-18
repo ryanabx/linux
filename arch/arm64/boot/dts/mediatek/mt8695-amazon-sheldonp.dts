@@ -162,6 +162,12 @@
 	status = "okay";
 };
 
+&cec {
+	pinctrl-names = "default";
+	pinctrl-0 = <&cec_pins>;
+	status = "okay";
+};
+
 &cpu0 {
 	proc-supply = <&mt6393_vproc>;
 };
@@ -363,6 +369,12 @@
 		pins-rst {
 			pinmux = <MT8695_PIN_46_EMMC_RSTB__FUNC_MSDC0_RSTB>;
 			bias-pull-up;
+		};
+	};
+
+	cec_pins: cec-pins {
+		pins-cec {
+			pinmux = <MT8695_PIN_72_HDMITX20_CEC__FUNC_HDMITX20_CEC>;
 		};
 	};
 
