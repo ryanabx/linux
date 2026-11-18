@@ -1377,7 +1377,16 @@ pvr_drm_driver_postclose(__always_unused struct drm_device *drm_dev,
 	file->driver_priv = NULL;
 }
 
-DEFINE_DRM_GEM_FOPS(pvr_drm_driver_fops);
+static void pvr_drm_show_fdinfo(struct drm_printer *p, struct drm_file *file)
+{
+	drm_show_memory_stats(p, file);
+}
+
+static const struct file_operations pvr_drm_driver_fops = {
+	.owner = THIS_MODULE,
+	DRM_GEM_FOPS,
+	.show_fdinfo = drm_show_fdinfo,
+};
 
 static struct drm_driver pvr_drm_driver = {
 	.driver_features = DRIVER_GEM | DRIVER_RENDER |
@@ -1387,6 +1396,7 @@ static struct drm_driver pvr_drm_driver = {
 	.ioctls = pvr_drm_driver_ioctls,
 	.num_ioctls = ARRAY_SIZE(pvr_drm_driver_ioctls),
 	.fops = &pvr_drm_driver_fops,
+	.show_fdinfo = pvr_drm_show_fdinfo,
 #if defined(CONFIG_DEBUG_FS)
 	.debugfs_init = pvr_debugfs_init,
 #endif
