@@ -127,6 +127,13 @@ mt7615_pm_set(void *data, u64 val)
 
 	pm->enable = val;
 	mt76_connac_power_save_sched(&dev->mphy, pm);
+
+	/* With runtime PM on, mac_work is cancelled on activity and queued
+	 * again only on wakeup: restart it when runtime PM goes off.
+	 */
+	if (!val && test_bit(MT76_STATE_RUNNING, &dev->mphy.state))
+		ieee80211_queue_delayed_work(mt76_hw(dev), &dev->mphy.mac_work,
+					     mt7615_get_macwork_timeout(dev));
 out:
 	mutex_unlock(&dev->mt76.mutex);
 
