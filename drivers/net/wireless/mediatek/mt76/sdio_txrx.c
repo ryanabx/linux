@@ -258,6 +258,7 @@ static int mt76s_tx_run_queue(struct mt76_dev *dev, struct mt76_queue *q)
 	int err, nframes = 0, len = 0, pse_sz = 0, ple_sz = 0;
 	bool mcu = q == dev->q_mcu[MT_MCUQ_WM];
 	struct mt76_sdio *sdio = &dev->sdio;
+	u16 first = q->first;
 	u8 pad;
 
 	while (q->first != q->head) {
@@ -318,7 +319,9 @@ next:
 	}
 	mt76s_tx_update_quota(sdio, mcu, pse_sz, ple_sz);
 
-	mt76_worker_schedule(&sdio->status_worker);
+	/* only wake the status worker if entries were completed */
+	if (q->first != first)
+		mt76_worker_schedule(&sdio->status_worker);
 
 	return nframes;
 }
