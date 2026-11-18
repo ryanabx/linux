@@ -9,6 +9,7 @@
 /dts-v1/;
 #include "mt8695.dtsi"
 #include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/input/input.h>
 
 / {
 	model = "Amazon Fire TV Stick 3rd Gen (sheldonp)";
@@ -58,6 +59,32 @@
 		regulator-min-microvolt = <3300000>;
 		regulator-max-microvolt = <3300000>;
 		regulator-always-on;
+	};
+
+	/*
+	 * The MT7663's wake lines: the Wi-Fi firmware's WoWLAN GPIO and the
+	 * Bluetooth firmware's WoBLE GPIO, as wired in the vendor device tree
+	 * (GPIO26 = EINT33, GPIO27 = EINT34, falling edge). Test only: no
+	 * binding describes these for an SDIO MT7663.
+	 */
+	wake-keys {
+		compatible = "gpio-keys";
+		pinctrl-names = "default";
+		pinctrl-0 = <&wake_pins>;
+
+		key-wowlan {
+			label = "WoWLAN";
+			gpios = <&pio 26 GPIO_ACTIVE_LOW>;
+			linux,code = <KEY_WAKEUP>;
+			wakeup-source;
+		};
+
+		key-woble {
+			label = "WoBLE";
+			gpios = <&pio 27 GPIO_ACTIVE_LOW>;
+			linux,code = <KEY_WAKEUP>;
+			wakeup-source;
+		};
 	};
 
 	hdmi-connector {
@@ -431,6 +458,14 @@
 			pinmux = <MT8695_PIN_28_MSDC2_CLK__FUNC_MSDC2_CLK>;
 			drive-strength = <MTK_DRIVE_6mA>;
 			bias-pull-down = <MTK_PUPD_SET_R1R0_10>;
+		};
+	};
+
+	wake_pins: wake-pins {
+		pins-wake {
+			pinmux = <MT8695_PIN_26_GPIO26__FUNC_GPIO26>,
+				 <MT8695_PIN_27_GPIO27__FUNC_GPIO27>;
+			input-enable;
 		};
 	};
 };
