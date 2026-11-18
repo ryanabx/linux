@@ -202,13 +202,14 @@ err_reset:
 /**
  * pvr_fw_stop() - Stop FW processor
  * @pvr_dev: Target PowerVR device.
+ * @hard_reset: The FW processor was not asked to idle first.
  *
  * Returns:
  *  * 0 on success, or
  *  * Any error returned by pvr_cr_poll_reg32().
  */
 int
-pvr_fw_stop(struct pvr_device *pvr_dev)
+pvr_fw_stop(struct pvr_device *pvr_dev, bool hard_reset)
 {
 	const u32 sidekick_idle_mask = ROGUE_CR_SIDEKICK_IDLE_MASKFULL &
 				       ~(ROGUE_CR_SIDEKICK_IDLE_GARTEN_EN |
@@ -319,9 +320,10 @@ pvr_fw_stop(struct pvr_device *pvr_dev)
 		/*
 		 * Wait for Sidekick/Jones to signal IDLE including the Garten
 		 * Wrapper if there is no debugger attached (TxVECINT_BHALT =
-		 * 0x0).
+		 * 0x0). A META that was not asked to idle (hard reset) keeps
+		 * the Garten Wrapper busy; the soft reset below stops it.
 		 */
-		if (reg_value)
+		if (reg_value || hard_reset)
 			skip_garten_idle = true;
 	}
 
