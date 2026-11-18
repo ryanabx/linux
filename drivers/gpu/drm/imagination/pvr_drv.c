@@ -1116,7 +1116,8 @@ pvr_ioctl_vm_unmap(struct drm_device *drm_dev, void *raw_args,
 	int err;
 
 	/* Initial validation of args. */
-	if (args->_padding_4)
+	if (args->_padding_4 ||
+	    !pvr_find_heap_containing(pvr_file->pvr_dev, args->device_addr, args->size))
 		return -EINVAL;
 
 	vm_ctx = pvr_vm_context_lookup(pvr_file, args->vm_context_handle);
