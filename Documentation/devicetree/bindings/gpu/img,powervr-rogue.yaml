@@ -29,6 +29,11 @@ properties:
           - const: img,img-rogue
       - items:
           - enum:
+              - mediatek,mt8695-gpu
+          - const: img,img-ge8300
+          - const: img,img-rogue
+      - items:
+          - enum:
               - ti,am62-gpu
           - const: img,img-axe-1-16m
           # This deprecated element must be kept around to allow old kernels to
@@ -124,6 +129,7 @@ allOf:
           contains:
             enum:
               - img,img-ge7800
+              - img,img-ge8300
               - img,img-gx6250
               - thead,th1520-gpu
     then:
@@ -137,7 +143,9 @@ allOf:
       properties:
         compatible:
           contains:
-            const: img,img-axe-1-16m
+            enum:
+              - img,img-axe-1-16m
+              - img,img-ge8300
     then:
       properties:
         power-domains:
