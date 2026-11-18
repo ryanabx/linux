@@ -169,6 +169,17 @@ pvr_power_fw_disable(struct pvr_device *pvr_dev, bool hard_reset, bool rpm_suspe
 	if (err && rpm_suspend)
 		enable_irq(pvr_dev->irq);
 
+	/*
+	 * A hard reset does not ask the firmware to idle first, so a META
+	 * firmware processor that is still running never lets the Garten
+	 * wrapper report idle. The GPU is power cycled next, so carry on.
+	 */
+	if (err && hard_reset) {
+		drm_warn(from_pvr_device(pvr_dev),
+			 "FW did not stop (%d), resetting anyway\n", err);
+		err = 0;
+	}
+
 	return err;
 }
 
