@@ -2273,21 +2273,6 @@ int mt7615_mac_set_beacon_filter(struct mt7615_phy *phy,
 	if (!mt7615_firmware_offload(dev))
 		return -EOPNOTSUPP;
 
-	switch (vif->type) {
-	case NL80211_IFTYPE_MONITOR:
-		return 0;
-	case NL80211_IFTYPE_MESH_POINT:
-	case NL80211_IFTYPE_ADHOC:
-	case NL80211_IFTYPE_AP:
-		if (enable)
-			phy->n_beacon_vif++;
-		else
-			phy->n_beacon_vif--;
-		fallthrough;
-	default:
-		break;
-	}
-
 	err = mt7615_mcu_set_bss_pm(dev, vif, !phy->n_beacon_vif);
 	if (err)
 		return err;
