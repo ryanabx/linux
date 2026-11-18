@@ -14,6 +14,22 @@ config CEC_CROS_EC
 	  The CEC bus is present in the HDMI connector and enables communication
 	  between compatible devices.
 
+config CEC_MEDIATEK
+	tristate "MediaTek HDMI CEC driver"
+	depends on ARCH_MEDIATEK || COMPILE_TEST
+	depends on COMMON_CLK && OF
+	select CEC_CORE
+	select CEC_NOTIFIER
+	help
+	  This is a driver for the second-generation HDMI CEC controller of
+	  MediaTek SoCs such as MT8695. It uses the generic CEC framework
+	  interface.
+	  CEC bus is present in the HDMI connector and enables communication
+	  between compatible devices.
+
+	  To compile this driver as a module, choose M here: the module
+	  will be called mtk-cec.
+
 config CEC_MESON_AO
 	tristate "Amlogic Meson AO CEC driver"
 	depends on ARCH_MESON || COMPILE_TEST
