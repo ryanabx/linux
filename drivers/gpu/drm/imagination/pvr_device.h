@@ -316,6 +316,14 @@ struct pvr_device {
 	bool lost;
 
 	/**
+	 * @lost_work: Unplugs the DRM device once it has been lost.
+	 *
+	 * pvr_device_lost() can be called from inside a drm_dev_enter() section, and
+	 * drm_dev_unplug() waits for all of those to end.
+	 */
+	struct work_struct lost_work;
+
+	/**
 	 * @reset_sem: Reset semaphore.
 	 *
 	 * GPU reset code will lock this for writing. Any code that submits commands to the firmware
