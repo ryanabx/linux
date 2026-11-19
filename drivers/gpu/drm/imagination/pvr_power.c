@@ -33,18 +33,28 @@
 /* How long system suspend waits for jobs already on the GPU. */
 #define SYSTEM_SUSPEND_DRAIN_MS (1000)
 
+static void
+pvr_device_lost_work(struct work_struct *work)
+{
+	struct pvr_device *pvr_dev = container_of(work, struct pvr_device, lost_work);
+
+	pvr_device_unplug(pvr_dev);
+}
+
 /**
  * pvr_device_lost() - Mark GPU device as lost
  * @pvr_dev: Target PowerVR device.
  *
- * This will cause the DRM device to be unplugged.
+ * This will cause the DRM device to be unplugged. The unplug happens from a
+ * work item: the caller can be an ioctl inside drm_dev_enter(), and
+ * drm_dev_unplug() waits for every such section to end, its caller's included.
  */
 void
 pvr_device_lost(struct pvr_device *pvr_dev)
 {
 	if (!pvr_dev->lost) {
 		WRITE_ONCE(pvr_dev->lost, true);
-		pvr_device_unplug(pvr_dev);
+		schedule_work(&pvr_dev->lost_work);
 	}
 }
 
@@ -277,6 +287,7 @@ int
 pvr_watchdog_init(struct pvr_device *pvr_dev)
 {
 	INIT_DELAYED_WORK(&pvr_dev->watchdog.work, pvr_watchdog_worker);
+	INIT_WORK(&pvr_dev->lost_work, pvr_device_lost_work);
 
 	return 0;
 }

@@ -1498,6 +1498,7 @@ err_device_fini:
 
 err_watchdog_fini:
 	pvr_watchdog_fini(pvr_dev);
+	cancel_work_sync(&pvr_dev->lost_work);
 	pm_runtime_dont_use_autosuspend(&plat_dev->dev);
 	pm_runtime_disable(&plat_dev->dev);
 
@@ -1558,6 +1559,9 @@ static void pvr_remove(struct platform_device *plat_dev)
 	pvr_queue_device_fini(pvr_dev);
 	pvr_context_device_fini(pvr_dev);
 	pvr_power_domains_fini(pvr_dev);
+
+	/* Anything above can still lose the device; the unplug is already done. */
+	cancel_work_sync(&pvr_dev->lost_work);
 }
 
 static const struct pvr_device_data pvr_device_data_manual = {
