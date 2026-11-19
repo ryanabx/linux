@@ -651,6 +651,8 @@ int mt76s_init(struct mt76_dev *dev, struct sdio_func *func,
 	u32 host_max_cap;
 	int err;
 
+	init_waitqueue_head(&sdio->wait);
+
 	err = mt76_worker_setup(dev->hw, &sdio->status_worker,
 				mt76s_status_worker, "sdio-status");
 	if (err)
