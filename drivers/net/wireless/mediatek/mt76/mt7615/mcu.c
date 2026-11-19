@@ -8,6 +8,8 @@
 #include <linux/firmware.h>
 #include "mt7615.h"
 #include "mcu.h"
+#include <linux/mmc/sdio_func.h>
+#include "../sdio.h"
 #include "mac.h"
 #include "eeprom.h"
 
@@ -141,6 +143,28 @@ int mt7615_mcu_parse_response(struct mt76_dev *mdev, int cmd,
 	if (!skb) {
 		dev_err(mdev->dev, "Message %08x (seq %d) timeout\n",
 			cmd, seq);
+		WARN_ONCE(1, "mt7615 debug: first MCU timeout, sender %s/%d\n",
+			  current->comm, current->pid);
+		if (mt76_is_sdio(mdev)) {
+			static int dbg_n;
+			struct mt76_sdio *sdio = &mdev->sdio;
+			struct mt76_queue *q = mdev->q_mcu[MT_MCUQ_WM];
+			u32 lpcr, ier;
+
+			if (dbg_n++ < 3) {
+				sdio_claim_host(sdio->func);
+				lpcr = sdio_readl(sdio->func, MCR_WHLPCR, NULL);
+				ier = sdio_readl(sdio->func, MCR_WHIER, NULL);
+				sdio_release_host(sdio->func);
+				dev_err(mdev->dev,
+					"mt7615 debug: WHLPCR %08x WHIER %08x mcuq queued %d head %d tail %d first %d txrx state %lx task state %x phy state %lx\n",
+					lpcr, ier, q->queued, q->head, q->tail,
+					q->first, sdio->txrx_worker.state,
+					READ_ONCE(sdio->txrx_worker.task->__state),
+					mdev->phy.state);
+				mt76_worker_schedule(&sdio->txrx_worker);
+			}
+		}
 		return -ETIMEDOUT;
 	}
 

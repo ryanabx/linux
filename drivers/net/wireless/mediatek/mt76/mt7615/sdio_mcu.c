@@ -62,6 +62,11 @@ static int __mt7663s_mcu_drv_pmctrl(struct mt7615_dev *dev)
 
 	sdio_claim_host(func);
 
+	if (test_bit(MT76_STATE_SUSPEND, &mphy->state)) {
+		dev_info(dev->mt76.dev, "dbg drv_own while suspended, by %s\n",
+			 current->comm);
+		dump_stack();
+	}
 	sdio_writel(func, WHLPCR_FW_OWN_REQ_CLR, MCR_WHLPCR, NULL);
 
 	ret = readx_poll_timeout(mt76s_read_pcr, &dev->mt76, status,
@@ -110,6 +115,8 @@ static int mt7663s_mcu_fw_pmctrl(struct mt7615_dev *dev)
 
 	sdio_claim_host(func);
 
+	dev_info(dev->mt76.dev, "dbg fw_own request by %s, suspend %d\n",
+		 current->comm, test_bit(MT76_STATE_SUSPEND, &mphy->state));
 	sdio_writel(func, WHLPCR_FW_OWN_REQ_SET, MCR_WHLPCR, NULL);
 
 	ret = readx_poll_timeout(mt76s_read_pcr, &dev->mt76, status,
