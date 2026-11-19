@@ -241,6 +241,13 @@ static int mt7663s_resume(struct device *dev)
 	mt76_worker_enable(&mdev->mt76.sdio.net_worker);
 	mt76_worker_enable(&mdev->mt76.sdio.stat_worker);
 
+	/*
+	 * Ask for the chip back even if MT76_STATE_PM says the driver kept
+	 * it: after a long WoWLAN suspend the firmware can own it anyway,
+	 * and every MCU command then times out. Asking when the driver owns
+	 * it already costs one register write.
+	 */
+	set_bit(MT76_STATE_PM, &mdev->mphy.state);
 	err = mt7615_mcu_set_drv_ctrl(mdev);
 	if (err)
 		return err;
