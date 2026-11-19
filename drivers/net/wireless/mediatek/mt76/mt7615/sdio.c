@@ -201,20 +201,25 @@ static int mt7663s_suspend(struct device *dev)
 	struct mt7615_dev *mdev = sdio_get_drvdata(func);
 	int err;
 
+	/*
+	 * Park the TX worker before handing the chip to the firmware: run
+	 * while the firmware owns it, it queues the PM wake work, which
+	 * takes the chip back in the middle of the sleep.
+	 */
+	mt76_worker_disable(&mdev->mt76.tx_worker);
+
 	if (!test_bit(MT76_STATE_SUSPEND, &mdev->mphy.state) &&
 	    mt7615_firmware_offload(mdev)) {
-		int err;
-
 		err = mt76_connac_mcu_set_hif_suspend(&mdev->mt76, true, true);
 		if (err < 0)
-			return err;
+			goto restore_tx_worker;
 	}
 
 	sdio_set_host_pm_flags(func, MMC_PM_KEEP_POWER);
 
 	err = mt7615_mcu_set_fw_ctrl(mdev);
 	if (err)
-		return err;
+		goto restore_tx_worker;
 
 	mt76_worker_disable(&mdev->mt76.sdio.txrx_worker);
 	mt76_worker_disable(&mdev->mt76.sdio.status_worker);
@@ -226,6 +231,11 @@ static int mt7663s_suspend(struct device *dev)
 	mt76_tx_status_check(&mdev->mt76, true);
 
 	return 0;
+
+restore_tx_worker:
+	mt76_worker_enable(&mdev->mt76.tx_worker);
+
+	return err;
 }
 
 static int mt7663s_resume(struct device *dev)
@@ -240,6 +250,7 @@ static int mt7663s_resume(struct device *dev)
 	mt76_worker_enable(&mdev->mt76.sdio.stat_worker);
 
 	err = mt7615_mcu_set_drv_ctrl(mdev);
+	mt76_worker_enable(&mdev->mt76.tx_worker);
 	if (err)
 		return err;
 
