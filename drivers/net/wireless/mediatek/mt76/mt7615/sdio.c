@@ -223,6 +223,14 @@ static int mt7663s_suspend(struct device *dev)
 	mt76_worker_disable(&mdev->mt76.sdio.net_worker);
 	mt76_worker_disable(&mdev->mt76.sdio.stat_worker);
 
+	/*
+	 * The mt76 workqueue isn't freezable: keep its works from waking the
+	 * chip (mt76_connac_pm_wake()) or sending it MCU commands, which the
+	 * parked txrx worker would never deliver, until resume.
+	 */
+	mdev->pm.suspended = true;
+	cancel_work_sync(&mdev->pm.wake_work);
+
 	clear_bit(MT76_READING_STATS, &mdev->mphy.state);
 
 	mt76_tx_status_check(&mdev->mt76, true);
@@ -235,6 +243,8 @@ static int mt7663s_resume(struct device *dev)
 	struct sdio_func *func = dev_to_sdio_func(dev);
 	struct mt7615_dev *mdev = sdio_get_drvdata(func);
 	int err;
+
+	mdev->pm.suspended = false;
 
 	mt76_worker_enable(&mdev->mt76.sdio.txrx_worker);
 	mt76_worker_enable(&mdev->mt76.sdio.status_worker);

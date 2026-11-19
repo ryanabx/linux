@@ -42,6 +42,12 @@ mt7663s_mcu_send_message(struct mt76_dev *mdev, struct sk_buff *skb,
 	struct mt7615_dev *dev = container_of(mdev, struct mt7615_dev, mt76);
 	int ret;
 
+	/* The txrx worker is parked until resume: nothing would send it */
+	if (dev->pm.suspended) {
+		dev_kfree_skb(skb);
+		return -EBUSY;
+	}
+
 	mt7615_mcu_fill_msg(dev, skb, cmd, seq);
 	ret = mt76_tx_queue_skb_raw(dev, mdev->q_mcu[MT_MCUQ_WM], skb, 0);
 	if (ret)
