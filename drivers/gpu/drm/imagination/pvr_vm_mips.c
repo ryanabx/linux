@@ -228,10 +228,13 @@ pvr_vm_mips_unmap(struct pvr_device *pvr_dev, struct pvr_fw_object *fw_obj)
 			      ROGUE_MIPSFW_LOG2_PAGE_SIZE_4K;
 	const u32 end_pfn = (end & fw_dev->fw_heap_info.offset_mask) >>
 			    ROGUE_MIPSFW_LOG2_PAGE_SIZE_4K;
+	int err;
 
 	for (u32 pfn = start_pfn; pfn < end_pfn; pfn++)
 		WRITE_ONCE(mips_data->pt[pfn], 0);
 
 	pvr_mmu_flush_request_all(pvr_dev);
-	WARN_ON(pvr_mmu_flush_exec(pvr_dev, true));
+	err = pvr_mmu_flush_exec(pvr_dev, true);
+	/* A lost device fails every flush with -EIO; nothing to warn about */
+	WARN_ON(err && !pvr_dev->lost);
 }
