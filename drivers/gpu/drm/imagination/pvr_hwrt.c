@@ -499,8 +499,10 @@ pvr_hwrt_dataset_release(struct kref *ref_count)
 		container_of(ref_count, struct pvr_hwrt_dataset, ref_count);
 
 	for (int i = ARRAY_SIZE(hwrt->data) - 1; i >= 0; i--) {
-		WARN_ON(pvr_fw_structure_cleanup(hwrt->pvr_dev, ROGUE_FWIF_CLEANUP_HWRTDATA,
-						 hwrt->data[i].fw_obj, 0));
+		int err = pvr_fw_structure_cleanup(hwrt->pvr_dev, ROGUE_FWIF_CLEANUP_HWRTDATA,
+						   hwrt->data[i].fw_obj, 0);
+
+		WARN_ON(err && !hwrt->pvr_dev->lost);
 		hwrt_data_fini_fw_structure(hwrt, i);
 	}
 

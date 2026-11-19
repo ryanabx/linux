@@ -493,7 +493,7 @@ pvr_free_list_release(struct kref *ref_count)
 					       free_list->fw_obj, 0);
 	}
 
-	WARN_ON(err);
+	WARN_ON(err && !free_list->pvr_dev->lost);
 
 	/* clang-format off */
 	list_for_each_safe(pos, n, &free_list->mem_block_list) {
