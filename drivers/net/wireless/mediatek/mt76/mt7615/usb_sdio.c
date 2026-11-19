@@ -128,6 +128,11 @@ static int mt7663_usb_sdio_set_rates(struct mt7615_dev *dev,
 	return 0;
 }
 
+static bool mt7663_usb_sdio_suspended(struct mt7615_dev *dev)
+{
+	return test_bit(MT76_STATE_SUSPEND, &dev->mphy.state);
+}
+
 static void mt7663_usb_sdio_rate_work(struct work_struct *work)
 {
 	struct mt7615_wtbl_rate_desc *wrd, *wrd_next;
@@ -145,9 +150,18 @@ static void mt7663_usb_sdio_rate_work(struct work_struct *work)
 	list_for_each_entry_safe(wrd, wrd_next, &wrd_list, node) {
 		list_del(&wrd->node);
 
-		mt7615_mutex_acquire(dev);
-		mt7663_usb_sdio_set_rates(dev, wrd);
-		mt7615_mutex_release(dev);
+		/*
+		 * From mt7615_suspend() until mt7615_resume() has resumed the
+		 * host interface, the firmware doesn't answer: drop the update
+		 * (rate control sends new ones) rather than wait 20 s for each
+		 * register access. MT76_STATE_SUSPEND changes under the mutex.
+		 */
+		if (!mt7663_usb_sdio_suspended(dev)) {
+			mt7615_mutex_acquire(dev);
+			if (!mt7663_usb_sdio_suspended(dev))
+				mt7663_usb_sdio_set_rates(dev, wrd);
+			mt7615_mutex_release(dev);
+		}
 
 		kfree(wrd);
 	}
@@ -157,8 +171,13 @@ bool mt7663_usb_sdio_tx_status_data(struct mt76_dev *mdev, u8 *update)
 {
 	struct mt7615_dev *dev = container_of(mdev, struct mt7615_dev, mt76);
 
+	/* As in the rate work: the firmware doesn't answer while suspended */
+	if (mt7663_usb_sdio_suspended(dev))
+		return false;
+
 	mt7615_mutex_acquire(dev);
-	mt7615_mac_sta_poll(dev);
+	if (!mt7663_usb_sdio_suspended(dev))
+		mt7615_mac_sta_poll(dev);
 	mt7615_mutex_release(dev);
 
 	return false;
