@@ -1488,6 +1488,7 @@ static void pvr_remove(struct platform_device *plat_dev)
 
 	pm_runtime_suspend(drm_dev->dev);
 	pvr_device_fini(pvr_dev);
+	cancel_work_sync(&pvr_dev->lost_work);
 	drm_dev_unplug(drm_dev);
 	pvr_watchdog_fini(pvr_dev);
 	pvr_queue_device_fini(pvr_dev);
