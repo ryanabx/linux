@@ -35,7 +35,9 @@ static int mt7615_start(struct ieee80211_hw *hw)
 	if (!mt7615_wait_for_mcu_init(dev))
 		return -EIO;
 
+	dev_info(dev->mt76.dev, "dbg mt7615_resume: enter\n");
 	mt7615_mutex_acquire(dev);
+	dev_info(dev->mt76.dev, "dbg mt7615_resume: mutex held\n");
 
 	running = mt7615_dev_running(dev);
 
@@ -1294,7 +1296,9 @@ static int mt7615_resume(struct ieee80211_hw *hw)
 	unsigned long timeout;
 	bool running;
 
+	dev_info(dev->mt76.dev, "dbg mt7615_resume: enter\n");
 	mt7615_mutex_acquire(dev);
+	dev_info(dev->mt76.dev, "dbg mt7615_resume: mutex held\n");
 
 	running = mt7615_dev_running(dev);
 	set_bit(MT76_STATE_RUNNING, &phy->mt76->state);
@@ -1303,6 +1307,7 @@ static int mt7615_resume(struct ieee80211_hw *hw)
 		int err;
 
 		err = mt76_connac_mcu_set_hif_suspend(&dev->mt76, false, true);
+		dev_info(dev->mt76.dev, "dbg mt7615_resume: hif_suspend(false) %d\n", err);
 		if (err < 0) {
 			mt7615_mutex_release(dev);
 			return err;

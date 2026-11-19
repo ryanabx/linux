@@ -197,6 +197,16 @@ static void mt7663s_remove(struct sdio_func *func)
 	mt76_free_device(&dev->mt76);
 }
 
+static u32 dbg_pcr(struct mt7615_dev *dev)
+{
+	u32 v;
+
+	sdio_claim_host(dev->mt76.sdio.func);
+	v = mt76s_read_pcr(&dev->mt76);
+	sdio_release_host(dev->mt76.sdio.func);
+	return v;
+}
+
 static int mt7663s_suspend(struct device *dev)
 {
 	struct sdio_func *func = dev_to_sdio_func(dev);
@@ -217,6 +227,10 @@ static int mt7663s_suspend(struct device *dev)
 	err = mt7615_mcu_set_fw_ctrl(mdev);
 	if (err)
 		return err;
+	dev_info(dev, "dbg suspend: PM %d wake.count %d WHLPCR %08x mcuq %d rate_work pending %d\n",
+		 test_bit(MT76_STATE_PM, &mdev->mphy.state), mdev->pm.wake.count,
+		 dbg_pcr(mdev), mdev->mt76.q_mcu[MT_MCUQ_WM]->queued,
+		 work_pending(&mdev->rate_work));
 
 	mt76_worker_disable(&mdev->mt76.sdio.txrx_worker);
 	mt76_worker_disable(&mdev->mt76.sdio.status_worker);
@@ -257,8 +271,12 @@ static int mt7663s_resume(struct device *dev)
 	 * and every MCU command then times out. Asking when the driver owns
 	 * it already costs one register write.
 	 */
+	dev_info(dev, "dbg resume: PM %d WHLPCR %08x mcuq %d\n",
+		 test_bit(MT76_STATE_PM, &mdev->mphy.state), dbg_pcr(mdev),
+		 mdev->mt76.q_mcu[MT_MCUQ_WM]->queued);
 	set_bit(MT76_STATE_PM, &mdev->mphy.state);
 	err = mt7615_mcu_set_drv_ctrl(mdev);
+	dev_info(dev, "dbg resume: drv_ctrl %d WHLPCR %08x\n", err, dbg_pcr(mdev));
 	if (err)
 		return err;
 
