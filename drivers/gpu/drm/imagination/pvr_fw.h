@@ -301,8 +301,8 @@ struct pvr_fw_device {
 	/** @hwrinfobuf: CPU mapping of the firmware's HWR log (LOCAL debug). */
 	struct rogue_fwif_hwrinfobuf *hwrinfobuf;
 
-	/** @hwr_last_logged: Highest HWR number already logged (LOCAL debug). */
-	u32 hwr_last_logged;
+	/** @hwr_logged_timer: cr_timer of each HWR log slot when last logged (LOCAL debug). */
+	u64 hwr_logged_timer[16];
 
 	/**
 	 * @initialised: %true if the firmware has been successfully initialised,
