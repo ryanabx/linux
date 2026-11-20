@@ -453,6 +453,10 @@ pvr_context_destroy(struct pvr_file *pvr_file, u32 handle)
  * %PVR_CONTEXT_CLOSE_DRAIN_TIMEOUT_US per queue, so their memory isn't
  * unmapped while the GPU still uses it.
  */
+static bool close_drain = true;
+module_param(close_drain, bool, 0644);
+MODULE_PARM_DESC(close_drain, "Let a closed file's in-flight jobs finish before unmapping (LOCAL A/B)");
+
 static void pvr_context_wait_idle(struct pvr_context *ctx)
 {
 	struct pvr_queue *queues[2] = {};
@@ -481,8 +485,8 @@ static void pvr_context_wait_idle(struct pvr_context *ctx)
 				      USEC_PER_MSEC,
 				      PVR_CONTEXT_CLOSE_DRAIN_TIMEOUT_US, false,
 				      &queues[i]->in_flight_job_count)) {
-			drm_dbg(from_pvr_device(ctx->pvr_dev),
-				"context %u: %d job(s) still in flight on close\n",
+			drm_info(from_pvr_device(ctx->pvr_dev),
+				 "context %u: %d job(s) still in flight on close\n",
 				ctx->ctx_id, in_flight);
 		}
 	}
@@ -520,7 +524,8 @@ void pvr_destroy_contexts_for_file(struct pvr_file *pvr_file)
 			 * through a recovery that also resets other clients'
 			 * contexts.
 			 */
-			pvr_context_wait_idle(ctx);
+			if (close_drain) /* LOCAL A/B switch */
+				pvr_context_wait_idle(ctx);
 
 			pvr_vm_unmap_all(ctx->vm_ctx);
 
