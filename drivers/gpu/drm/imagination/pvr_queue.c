@@ -9,7 +9,9 @@
 #include "pvr_context.h"
 #include "pvr_device.h"
 #include "pvr_drv.h"
+#include "pvr_dump.h"
 #include "pvr_job.h"
+#include "pvr_power.h"
 #include "pvr_queue.h"
 #include "pvr_trace.h"
 #include "pvr_vm.h"
@@ -873,7 +875,10 @@ pvr_queue_timedout_job(struct drm_sched_job *s_job)
 	if (dma_fence_is_signaled(s_job->s_fence->parent))
 		return DRM_GPU_SCHED_STAT_NO_HANG;
 
-	dev_err(sched->dev, "Job timeout\n");
+	dev_err(sched->dev, "Job timeout (context %u, %s[%d])\n", queue->ctx->ctx_id,
+		queue->ctx->owner_comm, queue->ctx->owner_pid);
+	pvr_dump_hwrinfo(pvr_dev, "job timeout");
+	pvr_watchdog_request_recovery(pvr_dev, PVR_RECOVER_JOB_TIMEOUT);
 
 	/* Before we stop the scheduler, make sure the queue is out of any list, so
 	 * any call to pvr_queue_update_active_state_locked() that might happen

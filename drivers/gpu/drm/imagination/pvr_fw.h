@@ -19,6 +19,9 @@ struct pvr_file;
 /* Forward declaration from "pvr_vm.h". */
 struct pvr_vm_context;
 
+/* Forward declaration from "pvr_rogue_fwif.h". */
+struct rogue_fwif_hwrinfobuf;
+
 #define ROGUE_FWIF_FWCCB_NUMCMDS_LOG2 5
 
 #define ROGUE_FWIF_KCCB_NUMCMDS_LOG2_DEFAULT 7
@@ -294,6 +297,12 @@ struct pvr_fw_device {
 
 	/** @mem: Structure containing objects representing firmware memory allocations. */
 	struct pvr_fw_mem mem;
+
+	/** @hwrinfobuf: CPU mapping of the firmware's HWR log (LOCAL debug). */
+	struct rogue_fwif_hwrinfobuf *hwrinfobuf;
+
+	/** @hwr_last_logged: Highest HWR number already logged (LOCAL debug). */
+	u32 hwr_last_logged;
 
 	/**
 	 * @initialised: %true if the firmware has been successfully initialised,

@@ -165,11 +165,14 @@ process_fwccb_command(struct pvr_device *pvr_dev, struct rogue_fwif_fwccb_cmd *c
 	case ROGUE_FWIF_FWCCB_CMD_CONTEXT_RESET_NOTIFICATION:
 		pvr_dump_context_reset_notification(pvr_dev,
 						    &cmd->cmd_data.cmd_context_reset_notification);
+		pvr_dump_hwrinfo(pvr_dev, "context reset");
 		break;
 
 	case ROGUE_FWIF_FWCCB_CMD_CONTEXT_FW_PF_NOTIFICATION:
 		drm_err(drm_dev, "Firmware page fault at address 0x%llx\n",
 			cmd->cmd_data.cmd_fw_pagefault.fw_fault_addr);
+		pvr_dump_hwrinfo(pvr_dev, "firmware page fault");
+		pvr_watchdog_request_recovery(pvr_dev, PVR_RECOVER_FW_PAGEFAULT);
 		break;
 
 	default:

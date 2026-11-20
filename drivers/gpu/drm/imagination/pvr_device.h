@@ -262,6 +262,15 @@ struct pvr_device {
 		 * KCCB has been stalled for.
 		 */
 		u32 kccb_stall_count;
+
+		/**
+		 * @watchdog.recover_request: Reasons a hard reset was asked
+		 * for outside the watchdog (LOCAL), PVR_RECOVER_* bits.
+		 */
+		unsigned long recover_request;
+
+		/** @watchdog.last_recover: jiffies of the last such reset (LOCAL). */
+		unsigned long last_recover;
 	} watchdog;
 
 	/**

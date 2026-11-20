@@ -305,6 +305,8 @@ int pvr_context_create(struct pvr_file *pvr_file, struct drm_pvr_ioctl_create_co
 	ctx->flags = args->flags;
 	ctx->pvr_dev = pvr_dev;
 	kref_init(&ctx->ref_count);
+	ctx->owner_pid = task_tgid_nr(current);
+	get_task_comm(ctx->owner_comm, current->group_leader);
 
 	err = remap_priority(pvr_file, args->priority, &ctx->priority);
 	if (err)

@@ -28,6 +28,7 @@
 #define POWER_SYNC_TIMEOUT_US (1000000) /* 1s */
 
 #define WATCHDOG_TIME_MS (500)
+#define PVR_RECOVER_MIN_INTERVAL_MS 5000 /* LOCAL */
 
 /**
  * pvr_device_lost() - Mark GPU device as lost
@@ -268,6 +269,25 @@ pvr_watchdog_worker(struct work_struct *work)
 
 		pvr_power_reset(pvr_dev, true);
 		/* Device may be lost at this point. */
+		pvr_dev->watchdog.recover_request = 0;
+	} else if (READ_ONCE(pvr_dev->watchdog.recover_request)) {
+		unsigned long req = xchg(&pvr_dev->watchdog.recover_request, 0);
+
+		if (time_after(jiffies, pvr_dev->watchdog.last_recover +
+				       msecs_to_jiffies(PVR_RECOVER_MIN_INTERVAL_MS)) ||
+		    !pvr_dev->watchdog.last_recover) {
+			drm_err(from_pvr_device(pvr_dev),
+				"Recovering:%s%s, trying hard reset",
+				test_bit(PVR_RECOVER_FW_PAGEFAULT, &req) ? " firmware page fault" : "",
+				test_bit(PVR_RECOVER_JOB_TIMEOUT, &req) ? " job timeout" : "");
+			pvr_dev->watchdog.last_recover = jiffies;
+			pvr_power_reset(pvr_dev, true);
+			/* Device may be lost at this point. */
+		} else {
+			drm_warn(from_pvr_device(pvr_dev),
+				 "Recovery requested (0x%lx) within %u ms of the last one, not resetting",
+				 req, PVR_RECOVER_MIN_INTERVAL_MS);
+		}
 	}
 
 out_pm_runtime_put:
@@ -278,6 +298,35 @@ out_requeue:
 		queue_delayed_work(pvr_dev->sched_wq, &pvr_dev->watchdog.work,
 				   msecs_to_jiffies(WATCHDOG_TIME_MS));
 	}
+}
+
+/*
+ * LOCAL: a firmware page fault, or a job that does not finish, leaves the
+ * GX6250's META firmware unable to run work (notes/GPU-WEDGE-2026-11-17.md);
+ * nothing upstream resets it. Neither the threaded IRQ handler nor the
+ * scheduler's timeout handler can do a hard reset themselves (it disables the
+ * IRQ and stops every scheduler), so they ask the watchdog worker.
+ */
+static bool recover_fw_pf = true;
+module_param(recover_fw_pf, bool, 0644);
+MODULE_PARM_DESC(recover_fw_pf, "Hard-reset the GPU after a firmware page fault (LOCAL)");
+
+static bool recover_timeout = true;
+module_param(recover_timeout, bool, 0644);
+MODULE_PARM_DESC(recover_timeout, "Hard-reset the GPU after a job timeout (LOCAL)");
+
+
+void
+pvr_watchdog_request_recovery(struct pvr_device *pvr_dev, unsigned int reason)
+{
+	if (reason == PVR_RECOVER_FW_PAGEFAULT && !recover_fw_pf)
+		return;
+	if (reason == PVR_RECOVER_JOB_TIMEOUT && !recover_timeout)
+		return;
+
+	set_bit(reason, &pvr_dev->watchdog.recover_request);
+	mod_delayed_work(pvr_dev->sched_wq, &pvr_dev->watchdog.work,
+			 msecs_to_jiffies(200));
 }
 
 /**

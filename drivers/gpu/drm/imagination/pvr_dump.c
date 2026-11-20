@@ -1,11 +1,16 @@
 // SPDX-License-Identifier: GPL-2.0 OR MIT
 /* Copyright (c) 2026 Imagination Technologies Ltd. */
 
+#include "pvr_context.h"
 #include "pvr_device.h"
 #include "pvr_dump.h"
+#include "pvr_rogue_cr_defs.h"
 #include "pvr_rogue_fwif.h"
 
 #include <drm/drm_print.h>
+#include <linux/debugfs.h>
+#include <linux/mutex.h>
+#include <linux/seq_file.h>
 #include <linux/types.h>
 
 static const char *
@@ -101,6 +106,23 @@ pvr_dump_context_reset_notification(struct pvr_device *pvr_dev,
 			 data->server_common_context_id);
 	}
 
+	if (!(data->flags & ROGUE_FWIF_FWCCB_CMD_CONTEXT_RESET_FLAG_ALL_CTXS)) {
+		struct pvr_context *ctx;
+		pid_t pid = -1;
+		char comm[TASK_COMM_LEN] = "?";
+
+		/* Contexts leave ctx_ids before they are freed (LOCAL debug). */
+		xa_lock(&pvr_dev->ctx_ids);
+		ctx = xa_load(&pvr_dev->ctx_ids, data->server_common_context_id);
+		if (ctx) {
+			pid = ctx->owner_pid;
+			strscpy(comm, ctx->owner_comm);
+		}
+		xa_unlock(&pvr_dev->ctx_ids);
+		drm_info(drm_dev, "  Context owner=%s[%d]%s\n", comm, pid,
+			 ctx ? "" : " (context already gone)");
+	}
+
 	drm_info(drm_dev, "  Reset reason=%u (%s)\n", data->reset_reason,
 		 get_reset_reason_desc((enum rogue_context_reset_reason)data->reset_reason));
 	drm_info(drm_dev, "  Data Master=%u (%s)\n", data->dm, get_dm_name(data->dm));
@@ -110,4 +132,160 @@ pvr_dump_context_reset_notification(struct pvr_device *pvr_dev,
 		drm_info(drm_dev, "  Page fault occurred, fault address=%llx\n",
 			 data->fault_address);
 	}
+}
+
+/* LOCAL debug: the firmware's HWR log (struct rogue_fwif_hwrinfobuf). */
+
+static DEFINE_MUTEX(pvr_hwrinfo_log_lock);
+
+static const char *
+get_hwr_type_name(u32 type)
+{
+	static const char * const names[] = {
+		"unknown", "overrun", "poll failure", "BIF0 fault", "BIF1 fault",
+		"TEXAS BIF0 fault", "MMU fault", "MMU META fault", "MIPS TLB fault",
+		"ECC fault", "MMU RISC-V fault",
+	};
+
+	return type < ARRAY_SIZE(names) ? names[type] : "?";
+}
+
+static void
+pvr_hwrinfo_format(const struct rogue_hwrinfo *h, char *buf, size_t len)
+{
+	int n;
+
+	n = scnprintf(buf, len,
+		      "HWR #%u: %s, DM %u (%s), pid %u, frame %u, hwrt 0x%x, event 0x%x, recovery 0x%x, cr_timer %llu",
+		      h->hwr_number, get_hwr_type_name(h->hwr_type), h->dm,
+		      get_dm_name(h->dm), h->pid, h->frame_num, h->active_hwrt_data,
+		      h->event_status, h->hwr_recovery_flags, h->cr_timer);
+
+	switch (h->hwr_type) {
+	case ROGUE_HWRTYPE_BIF0FAULT:
+	case ROGUE_HWRTYPE_BIF1FAULT:
+	case ROGUE_HWRTYPE_TEXASBIF0FAULT: {
+		u64 req = h->hwr_data.bif_info.bif_req_status;
+		u64 mmu = h->hwr_data.bif_info.bif_mmu_status;
+
+		scnprintf(buf + n, len - n,
+			  "; req 0x%llx (addr 0x%llx %s tag_sb %llu tag_id %llu) mmu 0x%llx (cat_base %llu data_type %llu%s%s) pc 0x%llx",
+			  req, req & ~ROGUE_CR_BIF_FAULT_BANK0_REQ_STATUS_ADDRESS_CLRMSK,
+			  (req & ROGUE_CR_BIF_FAULT_BANK0_REQ_STATUS_RNW_EN) ? "read" : "write",
+			  (req >> ROGUE_CR_BIF_FAULT_BANK0_REQ_STATUS_TAG_SB_SHIFT) & 0x1f,
+			  (req >> ROGUE_CR_BIF_FAULT_BANK0_REQ_STATUS_TAG_ID_SHIFT) & 0xf,
+			  mmu, (mmu >> ROGUE_CR_BIF_FAULT_BANK0_MMU_STATUS_CAT_BASE_SHIFT) & 0xf,
+			  (mmu >> ROGUE_CR_BIF_FAULT_BANK0_MMU_STATUS_DATA_TYPE_SHIFT) & 0x3,
+			  (mmu & ROGUE_CR_BIF_FAULT_BANK0_MMU_STATUS_FAULT_RO_EN) ? " ro" : "",
+			  (mmu & ROGUE_CR_BIF_FAULT_BANK0_MMU_STATUS_FAULT_PM_META_RO_EN) ? " pm_meta_ro" : "",
+			  h->hwr_data.bif_info.pc_address);
+		break;
+	}
+	case ROGUE_HWRTYPE_MMUFAULT:
+	case ROGUE_HWRTYPE_MMUMETAFAULT:
+		scnprintf(buf + n, len - n, "; mmu_status 0x%llx 0x%llx pc 0x%llx",
+			  h->hwr_data.mmu_info.mmu_status[0],
+			  h->hwr_data.mmu_info.mmu_status[1],
+			  h->hwr_data.mmu_info.pc_address);
+		break;
+	case ROGUE_HWRTYPE_POLLFAILURE:
+		scnprintf(buf + n, len - n, "; poll thread %u addr 0x%x mask 0x%x last 0x%x",
+			  h->hwr_data.poll_info.thread_num, h->hwr_data.poll_info.cr_poll_addr,
+			  h->hwr_data.poll_info.cr_poll_mask,
+			  h->hwr_data.poll_info.cr_poll_last_value);
+		break;
+	default:
+		break;
+	}
+}
+
+static bool
+pvr_hwrinfo_used(const struct rogue_hwrinfo *h)
+{
+	return h->cr_timer || h->os_timer || h->hwr_number;
+}
+
+/**
+ * pvr_dump_hwrinfo() - Log the firmware HWR records not logged yet (LOCAL debug)
+ * @pvr_dev: Device pointer.
+ * @why: What made us look.
+ */
+void
+pvr_dump_hwrinfo(struct pvr_device *pvr_dev, const char *why)
+{
+	struct pvr_fw_device *fw_dev = &pvr_dev->fw_dev;
+	struct rogue_fwif_hwrinfobuf *buf = fw_dev->hwrinfobuf;
+	struct drm_device *drm_dev = from_pvr_device(pvr_dev);
+	u32 upto = fw_dev->hwr_last_logged, next = upto;
+	char *line;
+
+	if (!buf)
+		return;
+
+	line = kmalloc(512, GFP_KERNEL);
+	if (!line)
+		return;
+
+	mutex_lock(&pvr_hwrinfo_log_lock);
+	upto = next = fw_dev->hwr_last_logged;
+
+	/* Firmware memory reinitialised by a hard reset: start again. */
+	if (READ_ONCE(buf->hwr_counter) < upto)
+		upto = next = 0;
+
+	for (u32 i = 0; i < ROGUE_FWIF_HWINFO_MAX; i++) {
+		struct rogue_hwrinfo h;
+
+		memcpy(&h, &buf->hwr_info[i], sizeof(h));
+		if (!pvr_hwrinfo_used(&h) || h.hwr_number < upto)
+			continue;
+		pvr_hwrinfo_format(&h, line, 512);
+		drm_info(drm_dev, "  [%s] %s\n", why, line);
+		next = max(next, h.hwr_number + 1);
+	}
+	fw_dev->hwr_last_logged = next;
+	mutex_unlock(&pvr_hwrinfo_log_lock);
+	kfree(line);
+}
+
+static int
+pvr_hwrinfo_show(struct seq_file *m, void *unused)
+{
+	struct pvr_device *pvr_dev = m->private;
+	struct rogue_fwif_hwrinfobuf *buf = pvr_dev->fw_dev.hwrinfobuf;
+	char *line;
+
+	if (!buf)
+		return -ENODEV;
+
+	line = kmalloc(512, GFP_KERNEL);
+	if (!line)
+		return -ENOMEM;
+
+	seq_printf(m, "hwr_counter %u write_index %u dd_req_count %u flags 0x%x\n",
+		   buf->hwr_counter, buf->write_index, buf->dd_req_count,
+		   buf->hwr_info_buf_flags);
+	for (u32 dm = 0; dm < PVR_FWIF_DM_MAX; dm++)
+		seq_printf(m, "DM %u (%s): locked_up %u overran %u recovered %u false_detect %u\n",
+			   dm, get_dm_name(dm), buf->hwr_dm_locked_up_count[dm],
+			   buf->hwr_dm_overran_count[dm], buf->hwr_dm_recovered_count[dm],
+			   buf->hwr_dm_false_detect_count[dm]);
+	for (u32 i = 0; i < ROGUE_FWIF_HWINFO_MAX; i++) {
+		struct rogue_hwrinfo h;
+
+		memcpy(&h, &buf->hwr_info[i], sizeof(h));
+		if (!pvr_hwrinfo_used(&h))
+			continue;
+		pvr_hwrinfo_format(&h, line, 512);
+		seq_printf(m, "[%u] %s\n", i, line);
+	}
+	kfree(line);
+	return 0;
+}
+DEFINE_SHOW_ATTRIBUTE(pvr_hwrinfo);
+
+void
+pvr_hwrinfo_debugfs_init(struct pvr_device *pvr_dev, struct dentry *dir)
+{
+	debugfs_create_file("hwrinfo", 0400, dir, pvr_dev, &pvr_hwrinfo_fops);
 }
