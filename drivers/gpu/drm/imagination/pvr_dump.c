@@ -6,6 +6,7 @@
 #include "pvr_dump.h"
 #include "pvr_rogue_cr_defs.h"
 #include "pvr_rogue_fwif.h"
+#include "pvr_vm.h"
 
 #include <drm/drm_print.h>
 #include <linux/debugfs.h>
@@ -205,6 +206,26 @@ pvr_hwrinfo_used(const struct rogue_hwrinfo *h)
 	return h->cr_timer || h->os_timer || h->hwr_number;
 }
 
+/* The process whose VM has page catalogue @pc, if any (LOCAL debug). */
+static void
+pvr_pc_owner(struct pvr_device *pvr_dev, u64 pc, char *comm, pid_t *pid)
+{
+	struct pvr_context *ctx;
+	unsigned long id;
+
+	strscpy(comm, "?", TASK_COMM_LEN);
+	*pid = -1;
+	xa_lock(&pvr_dev->ctx_ids);
+	xa_for_each(&pvr_dev->ctx_ids, id, ctx) {
+		if (ctx->vm_ctx && pvr_vm_get_page_table_root_addr(ctx->vm_ctx) == pc) {
+			strscpy(comm, ctx->owner_comm, TASK_COMM_LEN);
+			*pid = ctx->owner_pid;
+			break;
+		}
+	}
+	xa_unlock(&pvr_dev->ctx_ids);
+}
+
 /**
  * pvr_dump_hwrinfo() - Log the firmware HWR records not logged yet (LOCAL debug)
  * @pvr_dev: Device pointer.
@@ -216,9 +237,9 @@ pvr_dump_hwrinfo(struct pvr_device *pvr_dev, const char *why)
 	struct pvr_fw_device *fw_dev = &pvr_dev->fw_dev;
 	struct rogue_fwif_hwrinfobuf *buf = fw_dev->hwrinfobuf;
 	struct drm_device *drm_dev = from_pvr_device(pvr_dev);
-	u32 upto = fw_dev->hwr_last_logged, next = upto;
 	char *line;
 
+	BUILD_BUG_ON(ARRAY_SIZE(fw_dev->hwr_logged_timer) != ROGUE_FWIF_HWINFO_MAX);
 	if (!buf)
 		return;
 
@@ -227,23 +248,28 @@ pvr_dump_hwrinfo(struct pvr_device *pvr_dev, const char *why)
 		return;
 
 	mutex_lock(&pvr_hwrinfo_log_lock);
-	upto = next = fw_dev->hwr_last_logged;
-
-	/* Firmware memory reinitialised by a hard reset: start again. */
-	if (READ_ONCE(buf->hwr_counter) < upto)
-		upto = next = 0;
-
 	for (u32 i = 0; i < ROGUE_FWIF_HWINFO_MAX; i++) {
 		struct rogue_hwrinfo h;
+		char comm[TASK_COMM_LEN];
+		pid_t pid = -1;
 
 		memcpy(&h, &buf->hwr_info[i], sizeof(h));
-		if (!pvr_hwrinfo_used(&h) || h.hwr_number < upto)
+		if (!pvr_hwrinfo_used(&h) || h.cr_timer == fw_dev->hwr_logged_timer[i])
 			continue;
+		fw_dev->hwr_logged_timer[i] = h.cr_timer;
 		pvr_hwrinfo_format(&h, line, 512);
-		drm_info(drm_dev, "  [%s] %s\n", why, line);
-		next = max(next, h.hwr_number + 1);
+		comm[0] = 0;
+		if (ROGUE_FWIF_HWRTYPE_PAGE_FAULT_GET(h.hwr_type) &&
+		    (h.hwr_type == ROGUE_HWRTYPE_BIF0FAULT ||
+		     h.hwr_type == ROGUE_HWRTYPE_BIF1FAULT ||
+		     h.hwr_type == ROGUE_HWRTYPE_TEXASBIF0FAULT))
+			pvr_pc_owner(pvr_dev, h.hwr_data.bif_info.pc_address, comm, &pid);
+		if (comm[0])
+			drm_info(drm_dev, "  [%s] slot %u %s, pc owner %s[%d]\n", why, i, line,
+				 comm, pid);
+		else
+			drm_info(drm_dev, "  [%s] slot %u %s\n", why, i, line);
 	}
-	fw_dev->hwr_last_logged = next;
 	mutex_unlock(&pvr_hwrinfo_log_lock);
 	kfree(line);
 }
