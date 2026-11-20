@@ -426,15 +426,17 @@ static void mtk_vdec_worker(struct work_struct *work)
 		 * point, so call flush decode here
 		 */
 		mtk_vdec_flush_decoder(ctx);
-		mtk_vdec_return_last_buf(ctx);
 		/*
 		 * After all buffers containing decoded frames from
 		 * before the resolution change point ready to be
 		 * dequeued on the CAPTURE queue, the driver sends a
 		 * V4L2_EVENT_SOURCE_CHANGE event for source change
-		 * type V4L2_EVENT_SRC_CH_RESOLUTION
+		 * type V4L2_EVENT_SRC_CH_RESOLUTION, then returns the
+		 * LAST buffer, so a client that sees LAST finds the
+		 * event already queued.
 		 */
 		mtk_vdec_queue_res_chg_event(ctx);
+		mtk_vdec_return_last_buf(ctx);
 	}
 	v4l2_m2m_job_finish(dev->m2m_dev_dec, ctx->m2m_ctx);
 }
