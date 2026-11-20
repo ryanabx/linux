@@ -14,4 +14,9 @@ void
 pvr_dump_context_reset_notification(struct pvr_device *pvr_dev,
 				    struct rogue_fwif_fwccb_cmd_context_reset_data *data);
 
+void pvr_dump_hwrinfo(struct pvr_device *pvr_dev, const char *why);
+
+struct dentry;
+void pvr_hwrinfo_debugfs_init(struct pvr_device *pvr_dev, struct dentry *dir);
+
 #endif /* PVR_DUMP_H */

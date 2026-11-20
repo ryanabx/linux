@@ -9,6 +9,7 @@
 #include <linux/compiler_attributes.h>
 #include <linux/dma-fence.h>
 #include <linux/kref.h>
+#include <linux/sched.h>
 #include <linux/types.h>
 #include <linux/xarray.h>
 #include <uapi/drm/pvr_drm.h>
@@ -68,6 +69,12 @@ struct pvr_context {
 	 * used anymore.
 	 */
 	atomic_t faulty;
+
+	/** @owner_pid: Thread group ID of the creating process (LOCAL debug). */
+	pid_t owner_pid;
+
+	/** @owner_comm: Name of the creating process (LOCAL debug). */
+	char owner_comm[TASK_COMM_LEN];
 
 	/** @queues: Union containing all kind of queues. */
 	union {

@@ -10,6 +10,11 @@
 #include <linux/pm_runtime.h>
 
 int pvr_watchdog_init(struct pvr_device *pvr_dev);
+
+/* LOCAL: hard-reset recovery requested from contexts that cannot reset. */
+#define PVR_RECOVER_FW_PAGEFAULT 0
+#define PVR_RECOVER_JOB_TIMEOUT 1
+void pvr_watchdog_request_recovery(struct pvr_device *pvr_dev, unsigned int reason);
 void pvr_watchdog_fini(struct pvr_device *pvr_dev);
 
 void pvr_device_lost(struct pvr_device *pvr_dev);

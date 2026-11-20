@@ -450,12 +450,15 @@ pvr_fw_create_structures(struct pvr_device *pvr_dev)
 		goto err_release_connection_ctl;
 	}
 
-	err = pvr_fw_object_create(pvr_dev, sizeof(struct rogue_fwif_hwrinfobuf),
-				   PVR_BO_FW_FLAGS_DEVICE_UNCACHED,
-				   NULL, NULL, &fw_mem->hwrinfobuf_obj);
-	if (err) {
+	fw_dev->hwrinfobuf = pvr_fw_object_create_and_map(pvr_dev,
+							  sizeof(struct rogue_fwif_hwrinfobuf),
+							  PVR_BO_FW_FLAGS_DEVICE_UNCACHED,
+							  NULL, NULL, &fw_mem->hwrinfobuf_obj);
+	if (IS_ERR(fw_dev->hwrinfobuf)) {
 		drm_err(drm_dev,
 			"Unable to allocate FW hwrinfobuf structure\n");
+		err = PTR_ERR(fw_dev->hwrinfobuf);
+		fw_dev->hwrinfobuf = NULL;
 		goto err_release_power_sync;
 	}
 
@@ -569,7 +572,7 @@ err_release_mmucache_sync_obj:
 	pvr_fw_object_destroy(fw_mem->mmucache_sync_obj);
 
 err_release_hwrinfobuf:
-	pvr_fw_object_destroy(fw_mem->hwrinfobuf_obj);
+	pvr_fw_object_unmap_and_destroy(fw_mem->hwrinfobuf_obj);
 
 err_release_power_sync:
 	pvr_fw_object_unmap_and_destroy(fw_mem->power_sync_obj);
@@ -594,7 +597,8 @@ pvr_fw_destroy_structures(struct pvr_device *pvr_dev)
 	pvr_fw_object_unmap_and_destroy(fw_mem->sysinit_obj);
 
 	pvr_fw_object_destroy(fw_mem->mmucache_sync_obj);
-	pvr_fw_object_destroy(fw_mem->hwrinfobuf_obj);
+	pvr_fw_object_unmap_and_destroy(fw_mem->hwrinfobuf_obj);
+	pvr_dev->fw_dev.hwrinfobuf = NULL;
 	pvr_fw_object_unmap_and_destroy(fw_mem->power_sync_obj);
 	pvr_fw_object_unmap_and_destroy(fw_mem->osdata_obj);
 	pvr_fw_object_destroy(fw_mem->osinit_obj);
