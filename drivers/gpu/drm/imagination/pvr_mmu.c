@@ -150,6 +150,14 @@ int pvr_mmu_flush_exec(struct pvr_device *pvr_dev, bool wait)
 				  &cmd_mmu_cache_data->mmu_cache_sync_fw_addr);
 	cmd_mmu_cache_data->mmu_cache_sync_update_value = 0;
 
+	if (xchg(&pvr_dbg_lose_in_flush, false)) {
+		pr_info("powervr: DEBUG: failing an MMU flush (wait=%d)\n", wait);
+		dump_stack();
+		WRITE_ONCE(pvr_dbg_reset_fails, true);
+		err = -ETIMEDOUT;
+		goto err_reset_and_retry;
+	}
+
 	err = pvr_kccb_send_cmd(pvr_dev, &cmd_mmu_cache, &slot);
 	if (err)
 		goto err_reset_and_retry;

@@ -34,6 +34,15 @@
 /* How long system suspend waits for jobs already on the GPU. */
 #define SYSTEM_SUSPEND_DRAIN_MS (1000)
 
+/* LOCAL DEBUG: not for submission. Forced device loss for the lost-work tests. */
+static bool pvr_dbg_force_lost;
+module_param_named(dbg_force_lost, pvr_dbg_force_lost, bool, 0644);
+MODULE_PARM_DESC(dbg_force_lost, "DEBUG: lose the device at the next watchdog tick");
+bool pvr_dbg_lose_in_flush;
+module_param_named(dbg_lose_in_flush, pvr_dbg_lose_in_flush, bool, 0644);
+MODULE_PARM_DESC(dbg_lose_in_flush, "DEBUG: fail the next MMU flush, and the hard reset it triggers");
+bool pvr_dbg_reset_fails;
+
 /**
  * pvr_device_lost() - Mark GPU device as lost
  * @pvr_dev: Target PowerVR device.
@@ -275,6 +284,11 @@ pvr_watchdog_worker(struct work_struct *work)
 	struct pvr_device *pvr_dev = container_of(work, struct pvr_device,
 						  watchdog.work.work);
 	bool stalled;
+
+	if (xchg(&pvr_dbg_force_lost, false)) {
+		pr_info("powervr: DEBUG: losing the device from the watchdog\n");
+		pvr_device_lost(pvr_dev);
+	}
 
 	if (pvr_dev->lost)
 		return;
@@ -686,7 +700,12 @@ pvr_power_reset(struct pvr_device *pvr_dev, bool hard_reset)
 			queues_disabled = true;
 		}
 
-		err = pvr_power_fw_disable(pvr_dev, hard_reset, false);
+		if (hard_reset && xchg(&pvr_dbg_reset_fails, false)) {
+			pr_info("powervr: DEBUG: failing the hard reset\n");
+			err = -ETIMEDOUT;
+		} else {
+			err = pvr_power_fw_disable(pvr_dev, hard_reset, false);
+		}
 		if (!err) {
 			if (hard_reset) {
 				WRITE_ONCE(pvr_dev->fw_dev.initialised, false);

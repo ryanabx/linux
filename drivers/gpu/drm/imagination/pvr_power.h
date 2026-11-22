@@ -18,6 +18,9 @@ void pvr_watchdog_request_recovery(struct pvr_device *pvr_dev, unsigned int reas
 void pvr_watchdog_fini(struct pvr_device *pvr_dev);
 
 void pvr_device_lost(struct pvr_device *pvr_dev);
+/* LOCAL DEBUG */
+extern bool pvr_dbg_lose_in_flush;
+extern bool pvr_dbg_reset_fails;
 void pvr_device_unplug(struct pvr_device *pvr_dev);
 
 bool pvr_power_is_idle(struct pvr_device *pvr_dev);
