@@ -782,6 +782,13 @@ static struct dma_fence *pvr_queue_run_job(struct drm_sched_job *sched_job)
 		     job->ctx != job->paired_job->ctx)))
 		return ERR_PTR(-EINVAL);
 
+	/*
+	 * The device is unplugged from a work item once it is lost; don't
+	 * kick the firmware in the meantime.
+	 */
+	if (READ_ONCE(pvr_dev->lost))
+		return ERR_PTR(-EIO);
+
 	err = pvr_job_get_pm_ref(job);
 	if (WARN_ON(err))
 		return ERR_PTR(err);
