@@ -568,6 +568,16 @@ pvr_meta_must_wait_fw_idle(struct pvr_device *pvr_dev, bool hard_reset, bool *wa
 	u32 reg_value;
 	int err;
 
+	/*
+	 * A META that was not asked to idle (hard reset) keeps the Garten
+	 * Wrapper busy; the soft reset that follows stops it. Don't touch
+	 * the slave port either, which a hung META may have stalled.
+	 */
+	if (hard_reset) {
+		*wait = false;
+		return 0;
+	}
+
 	err = pvr_meta_cr_read32(pvr_dev, META_CR_TxVECINT_BHALT, &reg_value);
 	if (err)
 		return err;
@@ -575,10 +585,8 @@ pvr_meta_must_wait_fw_idle(struct pvr_device *pvr_dev, bool hard_reset, bool *wa
 	/*
 	 * Wait for Sidekick/Jones to signal IDLE including the Garten
 	 * Wrapper if there is no debugger attached (TxVECINT_BHALT = 0x0).
-	 * A META that was not asked to idle (hard reset) keeps the Garten
-	 * Wrapper busy; the soft reset that follows stops it.
 	 */
-	*wait = !reg_value && !hard_reset;
+	*wait = !reg_value;
 
 	return 0;
 }
