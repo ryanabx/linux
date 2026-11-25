@@ -1251,23 +1251,6 @@ static void reg_state_init(void *cpu_ptr, void *priv)
 	}
 }
 
-static void pvr_queue_reset_put_work(struct work_struct *w)
-{
-	struct pvr_queue *queue = container_of(w, struct pvr_queue, reset_put_work);
-
-	pvr_context_put(queue->ctx);
-}
-
-static void pvr_queue_reset_hold(struct pvr_queue *queue, struct list_head *list)
-{
-	/* A put still pending from the last reset hands its reference over. */
-	if (!cancel_work(&queue->reset_put_work) &&
-	    !pvr_context_get_if_referenced(queue->ctx))
-		return;
-
-	list_add_tail(&queue->reset_node, list);
-}
-
 /**
  * pvr_queue_create() - Create a queue object.
  * @ctx: The context this queue will be attached to.
@@ -1402,7 +1385,6 @@ struct pvr_queue *pvr_queue_create(struct pvr_context *ctx,
 		goto err_sched_fini;
 
 	INIT_LIST_HEAD(&queue->reset_node);
-	INIT_WORK(&queue->reset_put_work, pvr_queue_reset_put_work);
 
 	mutex_lock(&pvr_dev->queues.lock);
 	list_add_tail(&queue->node, &pvr_dev->queues.idle);
@@ -1438,15 +1420,15 @@ void pvr_queue_device_pre_reset(struct pvr_device *pvr_dev)
 
 	/*
 	 * drm_sched_stop() waits for the run_job work, which takes
-	 * queues.lock, so it can't be called with queues.lock held. Pin the
-	 * queues and stop them without it. A queue whose context is already
-	 * being released has no jobs left, so it needs no stopping.
+	 * queues.lock, so it can't be called with queues.lock held. Collect
+	 * the queues and stop them without it. pvr_queue_destroy() unlinks a
+	 * queue under reset_sem, so none can go away until post_reset().
 	 */
 	mutex_lock(&pvr_dev->queues.lock);
 	list_for_each_entry(queue, &pvr_dev->queues.idle, node)
-		pvr_queue_reset_hold(queue, resetting);
+		list_add_tail(&queue->reset_node, resetting);
 	list_for_each_entry(queue, &pvr_dev->queues.active, node)
-		pvr_queue_reset_hold(queue, resetting);
+		list_add_tail(&queue->reset_node, resetting);
 	mutex_unlock(&pvr_dev->queues.lock);
 
 	list_for_each_entry(queue, resetting, reset_node)
@@ -1462,7 +1444,6 @@ void pvr_queue_device_post_reset(struct pvr_device *pvr_dev)
 	list_for_each_entry_safe(queue, tmp, &pvr_dev->queues.resetting, reset_node) {
 		pvr_queue_start(queue);
 		list_del_init(&queue->reset_node);
-		queue_work(pvr_dev->sched_wq, &queue->reset_put_work);
 	}
 }
 
@@ -1492,12 +1473,19 @@ void pvr_queue_kill(struct pvr_queue *queue)
  */
 void pvr_queue_destroy(struct pvr_queue *queue, bool cleanup_queue_entity)
 {
+	struct pvr_device *pvr_dev;
+
 	if (!queue)
 		return;
 
-	mutex_lock(&queue->ctx->pvr_dev->queues.lock);
+	pvr_dev = queue->ctx->pvr_dev;
+
+	/* A hard reset may be using the queue without queues.lock held. */
+	down_read(&pvr_dev->reset_sem);
+	mutex_lock(&pvr_dev->queues.lock);
 	list_del_init(&queue->node);
-	mutex_unlock(&queue->ctx->pvr_dev->queues.lock);
+	mutex_unlock(&pvr_dev->queues.lock);
+	up_read(&pvr_dev->reset_sem);
 
 	drm_sched_fini(&queue->scheduler);
 	if (cleanup_queue_entity)

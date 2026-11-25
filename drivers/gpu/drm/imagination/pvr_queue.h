@@ -92,16 +92,9 @@ struct pvr_queue {
 
 	/**
 	 * @reset_node: Used to add the queue to pvr_device::queues::resetting
-	 * while a hard reset has it stopped. The queue holds a reference on
-	 * its context while it is on that list.
+	 * while a hard reset has it stopped.
 	 */
 	struct list_head reset_node;
-
-	/**
-	 * @reset_put_work: Drops the context reference taken by a hard reset.
-	 * Context release can't run under pvr_device::reset_sem.
-	 */
-	struct work_struct reset_put_work;
 
 	/**
 	 * @in_flight_job_count: Number of jobs submitted to the CCCB that
