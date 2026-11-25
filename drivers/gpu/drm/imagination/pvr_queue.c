@@ -881,9 +881,15 @@ pvr_queue_timedout_job(struct drm_sched_job *s_job)
 	struct pvr_device *pvr_dev = queue->ctx->pvr_dev;
 	struct pvr_job *job;
 	u32 job_count = 0;
+	int idx;
 
-	if (dma_fence_is_signaled(s_job->s_fence->parent))
+	if (!drm_dev_enter(from_pvr_device(pvr_dev), &idx))
+		return DRM_GPU_SCHED_STAT_ENODEV;
+
+	if (dma_fence_is_signaled(s_job->s_fence->parent)) {
+		drm_dev_exit(idx);
 		return DRM_GPU_SCHED_STAT_NO_HANG;
+	}
 
 	dev_err(sched->dev, "Job timeout\n");
 
@@ -924,6 +930,7 @@ pvr_queue_timedout_job(struct drm_sched_job *s_job)
 	mutex_unlock(&pvr_dev->queues.lock);
 
 	drm_sched_start(sched, 0);
+	drm_dev_exit(idx);
 
 	return DRM_GPU_SCHED_STAT_RESET;
 }
@@ -1469,7 +1476,8 @@ void pvr_queue_destroy(struct pvr_queue *queue, bool cleanup_queue_entity)
 	list_del_init(&queue->node);
 	mutex_unlock(&queue->ctx->pvr_dev->queues.lock);
 
-	drm_sched_fini(&queue->scheduler);
+	if (queue->scheduler.sched_rq)
+		drm_sched_fini(&queue->scheduler);
 	if (cleanup_queue_entity)
 		drm_sched_entity_fini(&queue->entity);
 
@@ -1510,6 +1518,60 @@ int pvr_queue_device_init(struct pvr_device *pvr_dev)
 		return -ENOMEM;
 
 	return 0;
+}
+
+/**
+ * pvr_queue_device_quiesce() - Stop all remaining queues during device removal.
+ * @pvr_dev: The device to quiesce.
+ *
+ * Detaches every registered queue from @pvr_dev->queues.{active,idle} so the
+ * IRQ handler cannot signal fences or re-queue free_job work, tears down its
+ * scheduler entity without blocking in drm_sched_entity_flush(), finalises its
+ * scheduler so work_run_job, work_free_job and work_tdr are stopped, and
+ * releases runtime PM references held by remaining in-flight jobs before
+ * device teardown. Pins each queue's context while operating on it to avoid
+ * racing with concurrent pvr_queue_destroy().
+ */
+void pvr_queue_device_quiesce(struct pvr_device *pvr_dev)
+{
+	struct pvr_queue *queue;
+
+	for (;;) {
+		struct pvr_context *ctx = NULL;
+
+		mutex_lock(&pvr_dev->queues.lock);
+		queue = list_first_entry_or_null(&pvr_dev->queues.active,
+						 struct pvr_queue, node);
+		if (!queue)
+			queue = list_first_entry_or_null(&pvr_dev->queues.idle,
+							 struct pvr_queue, node);
+		if (queue) {
+			list_del_init(&queue->node);
+			if (pvr_context_get_if_referenced(queue->ctx))
+				ctx = queue->ctx;
+		}
+		mutex_unlock(&pvr_dev->queues.lock);
+
+		if (!queue)
+			break;
+		if (!ctx)
+			continue;
+
+		if (!queue->entity.stopped) {
+			drm_sched_entity_fini(&queue->entity);
+			dma_fence_put(queue->last_queued_job_scheduled_fence);
+			queue->last_queued_job_scheduled_fence = NULL;
+		}
+		if (queue->scheduler.sched_rq) {
+			struct pvr_job *job;
+
+			drm_sched_fini(&queue->scheduler);
+			list_for_each_entry(job, &queue->scheduler.pending_list, base.list)
+				pvr_job_release_pm_ref(job);
+		}
+
+		pvr_context_put(ctx);
+	}
 }
 
 /**

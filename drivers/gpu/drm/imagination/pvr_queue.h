@@ -168,6 +168,8 @@ void pvr_queue_device_post_reset(struct pvr_device *pvr_dev);
 
 int pvr_queue_device_init(struct pvr_device *pvr_dev);
 
+void pvr_queue_device_quiesce(struct pvr_device *pvr_dev);
+
 void pvr_queue_device_fini(struct pvr_device *pvr_dev);
 
 #endif /* PVR_QUEUE_H */
