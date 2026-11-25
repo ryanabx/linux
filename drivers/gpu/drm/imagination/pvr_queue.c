@@ -3,6 +3,8 @@
 
 #include <drm/drm_managed.h>
 #include <drm/gpu_scheduler.h>
+#include <linux/delay.h>
+#include <linux/moduleparam.h>
 #include <linux/overflow.h>
 
 #include "pvr_cccb.h"
@@ -658,6 +660,11 @@ static void pvr_queue_update_active_state(struct pvr_queue *queue)
 	mutex_unlock(&pvr_dev->queues.lock);
 }
 
+/* LOCAL DEBUG: not for submission. Widen the run_job window for the pre_reset deadlock test. */
+static unsigned int pvr_dbg_submit_delay_ms;
+module_param_named(dbg_submit_delay_ms, pvr_dbg_submit_delay_ms, uint, 0644);
+MODULE_PARM_DESC(dbg_submit_delay_ms, "DEBUG: sleep this long in run_job before taking queues.lock");
+
 static void pvr_queue_submit_job_to_cccb(struct pvr_job *job)
 {
 	struct pvr_queue *queue = container_of(job->base.sched, struct pvr_queue, scheduler);
@@ -673,6 +680,8 @@ static void pvr_queue_submit_job_to_cccb(struct pvr_job *job)
 	 * happened on this queue.
 	 */
 	atomic_inc(&queue->in_flight_job_count);
+	if (READ_ONCE(pvr_dbg_submit_delay_ms))
+		msleep(READ_ONCE(pvr_dbg_submit_delay_ms));
 	pvr_queue_update_active_state(queue);
 
 	xa_for_each(&job->base.dependencies, index, fence) {
