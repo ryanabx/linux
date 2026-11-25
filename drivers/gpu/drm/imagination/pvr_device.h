@@ -242,6 +242,13 @@ struct pvr_device {
 		/** @queues.lock: Lock protecting access to the active/idle
 		 *  lists. */
 		struct mutex lock;
+
+		/**
+		 * @queues.resetting: Queues stopped by a hard reset, linked by
+		 *  pvr_queue::reset_node. Only used with @reset_sem held for
+		 *  writing.
+		 */
+		struct list_head resetting;
 	} queues;
 
 	/**
