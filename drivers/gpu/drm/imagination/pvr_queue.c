@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only OR MIT
 /* Copyright (c) 2023 Imagination Technologies Ltd. */
 
+#include <drm/drm_drv.h>
 #include <drm/drm_managed.h>
 #include <drm/gpu_scheduler.h>
 #include <linux/overflow.h>
@@ -122,8 +123,19 @@ static void pvr_queue_fence_release(struct dma_fence *f)
 {
 	struct pvr_queue_fence *fence = container_of(f, struct pvr_queue_fence, base);
 	struct pvr_device *pvr_dev = fence->queue->ctx->pvr_dev;
+	int idx;
 
-	queue_work(pvr_dev->sched_wq, &fence->release_work);
+	/*
+	 * Fences held by drm_syncobj are released in drm_file_free() before
+	 * postclose. After unplug, sched_wq and kernel_vm_ctx may already be
+	 * torn down; free the fence directly and leak the context reference.
+	 */
+	if (drm_dev_enter(from_pvr_device(pvr_dev), &idx)) {
+		queue_work(pvr_dev->sched_wq, &fence->release_work);
+		drm_dev_exit(idx);
+	} else {
+		dma_fence_free(&fence->base);
+	}
 }
 
 static const char *
