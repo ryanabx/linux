@@ -29,6 +29,11 @@
 
 #define WATCHDOG_TIME_MS (500)
 
+/* LOCAL DEBUG: not for submission. One-shot hard reset for the reset tests. */
+static bool pvr_dbg_hard_reset;
+module_param_named(dbg_hard_reset, pvr_dbg_hard_reset, bool, 0644);
+MODULE_PARM_DESC(dbg_hard_reset, "DEBUG: hard-reset at the next watchdog tick (GPU in use)");
+
 /**
  * pvr_device_lost() - Mark GPU device as lost
  * @pvr_dev: Target PowerVR device.
@@ -252,6 +257,10 @@ pvr_watchdog_worker(struct work_struct *work)
 		goto out_pm_runtime_put;
 
 	stalled = pvr_watchdog_kccb_stalled(pvr_dev);
+	if (xchg(&pvr_dbg_hard_reset, false)) {
+		pr_info("powervr: DEBUG: forcing a hard reset from the watchdog\n");
+		stalled = true;
+	}
 
 	if (stalled) {
 		drm_err(from_pvr_device(pvr_dev), "FW stalled, trying hard reset");
