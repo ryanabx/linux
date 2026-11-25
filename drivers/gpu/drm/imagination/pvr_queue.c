@@ -1251,23 +1251,6 @@ static void reg_state_init(void *cpu_ptr, void *priv)
 	}
 }
 
-static void pvr_queue_reset_put_work(struct work_struct *w)
-{
-	struct pvr_queue *queue = container_of(w, struct pvr_queue, reset_put_work);
-
-	pvr_context_put(queue->ctx);
-}
-
-static void pvr_queue_reset_hold(struct pvr_queue *queue, struct list_head *list)
-{
-	/* A put still pending from the last reset hands its reference over. */
-	if (!cancel_work(&queue->reset_put_work) &&
-	    !pvr_context_get_if_referenced(queue->ctx))
-		return;
-
-	list_add_tail(&queue->reset_node, list);
-}
-
 /**
  * pvr_queue_create() - Create a queue object.
  * @ctx: The context this queue will be attached to.
@@ -1401,9 +1384,6 @@ struct pvr_queue *pvr_queue_create(struct pvr_context *ctx,
 	if (err)
 		goto err_sched_fini;
 
-	INIT_LIST_HEAD(&queue->reset_node);
-	INIT_WORK(&queue->reset_put_work, pvr_queue_reset_put_work);
-
 	mutex_lock(&pvr_dev->queues.lock);
 	list_add_tail(&queue->node, &pvr_dev->queues.idle);
 	mutex_unlock(&pvr_dev->queues.lock);
@@ -1431,39 +1411,26 @@ err_free_queue:
 
 void pvr_queue_device_pre_reset(struct pvr_device *pvr_dev)
 {
-	struct list_head *resetting = &pvr_dev->queues.resetting;
 	struct pvr_queue *queue;
 
-	lockdep_assert_held_write(&pvr_dev->reset_sem);
-
-	/*
-	 * drm_sched_stop() waits for the run_job work, which takes
-	 * queues.lock, so it can't be called with queues.lock held. Pin the
-	 * queues and stop them without it. A queue whose context is already
-	 * being released has no jobs left, so it needs no stopping.
-	 */
 	mutex_lock(&pvr_dev->queues.lock);
 	list_for_each_entry(queue, &pvr_dev->queues.idle, node)
-		pvr_queue_reset_hold(queue, resetting);
-	list_for_each_entry(queue, &pvr_dev->queues.active, node)
-		pvr_queue_reset_hold(queue, resetting);
-	mutex_unlock(&pvr_dev->queues.lock);
-
-	list_for_each_entry(queue, resetting, reset_node)
 		pvr_queue_stop(queue, NULL);
+	list_for_each_entry(queue, &pvr_dev->queues.active, node)
+		pvr_queue_stop(queue, NULL);
+	mutex_unlock(&pvr_dev->queues.lock);
 }
 
 void pvr_queue_device_post_reset(struct pvr_device *pvr_dev)
 {
-	struct pvr_queue *queue, *tmp;
+	struct pvr_queue *queue;
 
-	lockdep_assert_held_write(&pvr_dev->reset_sem);
-
-	list_for_each_entry_safe(queue, tmp, &pvr_dev->queues.resetting, reset_node) {
+	mutex_lock(&pvr_dev->queues.lock);
+	list_for_each_entry(queue, &pvr_dev->queues.active, node)
 		pvr_queue_start(queue);
-		list_del_init(&queue->reset_node);
-		queue_work(pvr_dev->sched_wq, &queue->reset_put_work);
-	}
+	list_for_each_entry(queue, &pvr_dev->queues.idle, node)
+		pvr_queue_start(queue);
+	mutex_unlock(&pvr_dev->queues.lock);
 }
 
 /**
@@ -1531,7 +1498,6 @@ int pvr_queue_device_init(struct pvr_device *pvr_dev)
 
 	INIT_LIST_HEAD(&pvr_dev->queues.active);
 	INIT_LIST_HEAD(&pvr_dev->queues.idle);
-	INIT_LIST_HEAD(&pvr_dev->queues.resetting);
 	err = drmm_mutex_init(from_pvr_device(pvr_dev), &pvr_dev->queues.lock);
 	if (err)
 		return err;
