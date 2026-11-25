@@ -719,10 +719,18 @@ pvr_ioctl_destroy_context(struct drm_device *drm_dev, void *raw_args,
 	struct drm_pvr_ioctl_destroy_context_args *args = raw_args;
 	struct pvr_file *pvr_file = file->driver_priv;
 
+	int idx, err;
+
 	if (args->_padding_4)
 		return -EINVAL;
 
-	return pvr_context_destroy(pvr_file, args->handle);
+	if (!drm_dev_enter(drm_dev, &idx))
+		return -EIO;
+
+	err = pvr_context_destroy(pvr_file, args->handle);
+	drm_dev_exit(idx);
+
+	return err;
 }
 
 /**
@@ -1351,7 +1359,7 @@ pvr_drm_driver_open(struct drm_device *drm_dev, struct drm_file *file)
 /**
  * pvr_drm_driver_postclose() - One of the driver callbacks when a &struct
  * drm_file is closed.
- * @drm_dev: [IN] DRM device (unused).
+ * @drm_dev: [IN] DRM device.
  * @file: [IN] DRM file private data.
  *
  * Frees powervr-specific file private data (&struct pvr_file).
@@ -1359,10 +1367,35 @@ pvr_drm_driver_open(struct drm_device *drm_dev, struct drm_file *file)
  * Registered in &pvr_drm_driver.
  */
 static void
-pvr_drm_driver_postclose(__always_unused struct drm_device *drm_dev,
+pvr_drm_driver_postclose(struct drm_device *drm_dev,
 			 struct drm_file *file)
 {
 	struct pvr_file *pvr_file = to_pvr_file(file);
+	int idx;
+
+	/*
+	 * If the device is already unplugged, pvr_remove() may have torn down
+	 * sched_wq, kernel_vm_ctx and FW objects. Release only the per-file
+	 * container bookkeeping (detaching file_link so leaked contexts cannot
+	 * point into freed pvr_file) and deliberately leak the device objects.
+	 */
+	if (!drm_dev_enter(drm_dev, &idx)) {
+		struct pvr_device *pvr_dev = to_pvr_device(drm_dev);
+		struct pvr_context *ctx, *tmp;
+
+		spin_lock(&pvr_dev->ctx_list_lock);
+		list_for_each_entry_safe(ctx, tmp, &pvr_file->contexts, file_link)
+			list_del_init(&ctx->file_link);
+		spin_unlock(&pvr_dev->ctx_list_lock);
+
+		xa_destroy(&pvr_file->ctx_handles);
+		xa_destroy(&pvr_file->free_list_handles);
+		xa_destroy(&pvr_file->hwrt_handles);
+		xa_destroy(&pvr_file->vm_ctx_handles);
+		kfree(pvr_file);
+		file->driver_priv = NULL;
+		return;
+	}
 
 	/* Kill remaining contexts. */
 	pvr_destroy_contexts_for_file(pvr_file);
@@ -1374,6 +1407,8 @@ pvr_drm_driver_postclose(__always_unused struct drm_device *drm_dev,
 
 	kfree(pvr_file);
 	file->driver_priv = NULL;
+
+	drm_dev_exit(idx);
 }
 
 DEFINE_DRM_GEM_FOPS(pvr_drm_driver_fops);
@@ -1469,15 +1504,45 @@ static void pvr_remove(struct platform_device *plat_dev)
 	struct drm_device *drm_dev = platform_get_drvdata(plat_dev);
 	struct pvr_device *pvr_dev = to_pvr_device(drm_dev);
 
+	/* Stop the watchdog first so it cannot race the pvr_dev->lost check. */
+	pvr_watchdog_fini(pvr_dev);
+
+	/*
+	 * Unplug first so in-flight ioctls, postclose, timeouts and fence
+	 * releases finish and no new ones (or runtime resumes) can start.
+	 * pvr_device_lost() may already have unplugged it, and drm_dev_unplug()
+	 * is not idempotent.
+	 */
+	if (!READ_ONCE(pvr_dev->lost))
+		drm_dev_unplug(drm_dev);
+
+	/* Stop all queues and their drm_sched workers/timers before teardown. */
+	pvr_queue_device_quiesce(pvr_dev);
+
+	/*
+	 * Drain pre-unplug pvr_queue_fence_release_work items while the GPU,
+	 * kernel_vm_ctx, FW objects and job_ids are still alive.
+	 */
+	flush_workqueue(pvr_dev->sched_wq);
+
 	WARN_ON(!xa_empty(&pvr_dev->job_ids));
 	WARN_ON(!xa_empty(&pvr_dev->free_list_ids));
 
 	xa_destroy(&pvr_dev->job_ids);
 	xa_destroy(&pvr_dev->free_list_ids);
 
+	/*
+	 * Leave runtime PM to the driver core.  This call happens after
+	 * drm_dev_unplug(), so pvr_power_device_suspend() returns -EIO from
+	 * its drm_dev_enter() guard and latches runtime_error.  That latch is
+	 * load-bearing: it makes rpm_idle() bail out before invoking
+	 * pvr_power_device_idle(), which reads pvr_dev->fw_dev.fwif_sysdata
+	 * memory that pvr_device_fini() has already unmapped below.
+	 */
 	pm_runtime_suspend(drm_dev->dev);
+
 	pvr_device_fini(pvr_dev);
-	drm_dev_unplug(drm_dev);
+	/* Cancel again in case an IRQ-driven reset re-armed watchdog before free_irq(). */
 	pvr_watchdog_fini(pvr_dev);
 	pvr_queue_device_fini(pvr_dev);
 	pvr_context_device_fini(pvr_dev);
