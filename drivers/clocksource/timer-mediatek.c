@@ -353,9 +353,15 @@ static int mtk_gpt_init(struct platform_device *pdev)
 	/* Configure clock event */
 	mtk_gpt_setup(&to, TIMER_CLK_EVT, GPT_CTRL_OP_REPEAT);
 	mtk_gpt_enable_irq(&to, TIMER_CLK_EVT);
+	pr_info("mtk-gpt: DEBUG before register: irq_sta=%#x irq_en=%#x\n",
+		readl(timer_of_base(&to) + 0x04), readl(timer_of_base(&to) + GPT_IRQ_EN_REG));
 	clockevents_config_and_register(&to.clkevt, timer_of_rate(&to),
 					TIMER_SYNC_TICKS, 0xffffffff);
 
+	/* LOCAL DEBUG: not for submission. */
+	pr_info("mtk-gpt: DEBUG before enable_irq: irq_sta=%#x irq_en=%#x handler=%ps\n",
+		readl(timer_of_base(&to) + 0x04), readl(timer_of_base(&to) + GPT_IRQ_EN_REG),
+		to.clkevt.event_handler);
 	enable_irq(timer_of_irq(&to));
 
 	return 0;
