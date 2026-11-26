@@ -29,6 +29,11 @@
 
 #define WATCHDOG_TIME_MS (500)
 
+/* LOCAL DEBUG: not for submission. Forced device loss for the teardown tests. */
+static bool pvr_dbg_force_lost;
+module_param_named(dbg_force_lost, pvr_dbg_force_lost, bool, 0644);
+MODULE_PARM_DESC(dbg_force_lost, "DEBUG: lose the device at the next watchdog tick");
+
 /**
  * pvr_device_lost() - Mark GPU device as lost
  * @pvr_dev: Target PowerVR device.
@@ -261,6 +266,12 @@ pvr_watchdog_worker(struct work_struct *work)
 
 	if (!READ_ONCE(pvr_dev->fw_dev.initialised))
 		goto out_pm_runtime_put;
+
+	if (xchg(&pvr_dbg_force_lost, false)) {
+		pr_info("powervr: DEBUG: forcing device loss from the watchdog\n");
+		pvr_device_lost(pvr_dev);
+		goto out_pm_runtime_put;
+	}
 
 	stalled = pvr_watchdog_kccb_stalled(pvr_dev);
 
