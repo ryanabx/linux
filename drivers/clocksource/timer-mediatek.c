@@ -352,6 +352,11 @@ static int mtk_gpt_init(struct platform_device *pdev)
 
 	/* Configure clock event */
 	mtk_gpt_setup(&to, TIMER_CLK_EVT, GPT_CTRL_OP_REPEAT);
+	/*
+	 * Keep the timer stopped until an event is programmed, so that
+	 * nothing is pending once the interrupt is enabled.
+	 */
+	mtk_gpt_clkevt_time_stop(&to, TIMER_CLK_EVT);
 	mtk_gpt_enable_irq(&to, TIMER_CLK_EVT);
 	pr_info("mtk-gpt: DEBUG before register: irq_sta=%#x irq_en=%#x\n",
 		readl(timer_of_base(&to) + 0x04), readl(timer_of_base(&to) + GPT_IRQ_EN_REG));
