@@ -21,6 +21,8 @@
 #define NAL_TYPE(value)				((value) & 0x1F)
 /* the decoder reads the bitstream from an address rounded down to this */
 #define H264_BS_READ_ALIGN			16
+/* and reads up to about 200 bytes past the end of the data */
+#define H264_BS_READ_AHEAD			256
 
 #define BUF_PREDICTION_SZ			(32 * 1024)
 
@@ -463,11 +465,10 @@ static int vdec_h264_copy_nal(struct vdec_h264_inst *inst,
 			      struct mtk_vcodec_mem *dst,
 			      struct mtk_vcodec_mem *nal)
 {
-	if (dst->size < nal->size + H264_BS_READ_ALIGN) {
+	if (dst->size < nal->size + H264_BS_READ_AHEAD) {
 		if (dst->va)
 			mtk_vcodec_mem_free(inst->ctx, dst);
-		/* room past the end, as a bitstream buffer has */
-		dst->size = round_up(nal->size + H264_BS_READ_ALIGN, SZ_4K);
+		dst->size = round_up(nal->size + H264_BS_READ_AHEAD, SZ_4K);
 		if (mtk_vcodec_mem_alloc(inst->ctx, dst)) {
 			dst->size = 0;
 			return -ENOMEM;
